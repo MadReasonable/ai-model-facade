@@ -1,0 +1,81 @@
+# OpenAI-compatible gateway
+#
+# Semantics:
+#   - ${NAME} in scalar strings is replaced by environment variable NAME at load time;
+#     an undefined variable is a startup error. No other substitution exists.
+#   - `vars` is ignored by the loader; it exists only as a home for YAML anchors.
+#   - `params` is a map or a list of maps. Each is applied as a JSON Merge Patch
+#     (RFC 7386): objects merge recursively, scalars/arrays replace, null deletes the key.
+#   - Request processing for a virtual model:
+#       client body → route params → winning candidate params → model rewritten → backend
+#     Gateway params override client values (they are patches, not defaults).
+
+server:
+  listen: 0.0.0.0:8088
+  # Optional inbound auth. Omit to accept unauthenticated requests.
+  # apiKeys:
+  #   - name: openWebUi
+  #     key: ${GATEWAY_KEY_OPEN_WEBUI}
+  # unknownKeys: reject             # reject | allow (accept and log as "unknown" with a fingerprint)
+  targetHeader: X-Gateway-Target    # response header naming the backend model chosen
+
+logging:
+  level: info                       # debug | info | warning | error
+  logSelection: true                # one line per request: virtual model, candidates checked, winner, reason
+
+vars:
+  noThinking: &noThinking
+    chat_template_kwargs: { enable_thinking: false }
+
+  taskLimits: &taskLimits
+    max_tokens: 1000
+    think: null                     # Open WebUI's Ollama-style flag; llama-server ignores it
+
+backends:
+  llamaSwap:
+    type: llamaSwap
+    baseUrl: http://ai-llama-swap:8080
+    # apiKey: ${LLAMA_SWAP_API_KEY}
+    # passthroughAuth: true         # chat requests carry the client's own key; apiKey stays for state calls
+    stateCacheSeconds: 2            # cache of GET /running; only models in state "ready" count as loaded
+    stateTimeoutSeconds: 10         # timeout for /running and /v1/models calls (default 10)
+    connectTimeoutSeconds: 5
+    requestTimeoutSeconds: 180      # covers a cold load of a loadIfNone candidate
+
+models:
+  # Open WebUI background tasks: titles, tags, follow-ups, query generation.
+  # Never causes an eviction unless nothing above the last candidate is loaded.
+  task-monkey:
+    backend: llamaSwap
+    description: Background tasks on whichever LLM is already loaded, thinking off
+    params: *taskLimits
+    candidates:
+      # The first loaded candidate (per /running) wins. If none is loaded, the first
+      # loadIfNone: true candidate wins, wherever it is in the list, and is loaded.
+      # `*` globs match against loaded model IDs; the concrete matched ID is forwarded.
+      # llama-swap aliases (presets) may be listed too; an alias is loaded when its base
+      # model is, but llama-swap then applies the preset's params over the gateway's.
+      - model: qwen3.6-35b-a3b:q8_0          # daily (always present in daily)
+        params: *noThinking
+      - model: qwen3.8-flash-next:iq3_s      # coding
+        params: *noThinking
+      - model: qwen3.8-27b:*                 # daily Q6_K or a testing quant
+        params: *noThinking
+      - model: qwen2.5-coder-3b:q8_0         # non-thinking; no kwargs needed
+        loadIfNone: true                    # medium/large with nothing loaded: load the 3B
+                                             # (evicts nothing in large; clears medium's image models)
+    # With no loadIfNone candidate, an unmatched request gets 503 and
+    # Open WebUI skips the task.
+
+  # Home Assistant voice assistant: always answers on whatever is loaded, without a swap.
+  # Each model family defines an `:Assistant` preset in llama-swap (fast, thinking off,
+  # tuned for voice), and the pattern picks whichever one is loaded. No params here,
+  # so the preset's own settings apply unchanged.
+  assistant:
+    backend: llamaSwap
+    description: Home Assistant voice assistant on whichever model is loaded
+    candidates:
+      - model: "*:Assistant"                 # quoted: a leading * is YAML alias syntax
+      - model: qwen2.5-coder-3b:q8_0         # nothing with an Assistant preset is loaded
+        params: *noThinking
+        loadIfNone: true

@@ -1,0 +1,208 @@
+package selector
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/MadReasonable/ai-model-facade/internal/backend"
+)
+
+type fakeBackend struct {
+	loaded  []string
+	aliases map[string][]string // base model ID -> aliases
+	err     error
+}
+
+func (f *fakeBackend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	return nil, nil
+}
+
+func (f *fakeBackend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
+	return backend.ChatResult{}, nil
+}
+
+func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	var models []backend.ModelInfo
+	for _, id := range f.loaded {
+		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id]})
+	}
+	return models, f.err
+}
+
+// The qwen3.6 base model with its llama-swap preset aliases, as /v1/models lists them.
+var qwen36 = map[string][]string{
+	"qwen3.6-35b-a3b:q8_0": {"qwen3.6-35b:Dreamer", "qwen3.6-35b:Philosopher", "qwen3.6-35b:Slacker", "qwen3.6-35b:Thinker"},
+	"qwen3.8-27b:q6_k":     {"qwen3.8-27b:Dreamer", "qwen3.8-27b:Slacker"},
+}
+
+func TestAliasCandidateIsLoadedWhenItsBaseIs(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.6-35b:Slacker"}}}
+	sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.6-35b-a3b:q8_0"}, aliases: qwen36})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Target != "qwen3.6-35b:Slacker" || sel.AliasOf != "qwen3.6-35b-a3b:q8_0" || sel.Reason != "loaded" {
+		t.Errorf("got %+v", sel)
+	}
+	if sel.Checked[0] != "qwen3.6-35b:Slacker: loaded (alias of qwen3.6-35b-a3b:q8_0)" {
+		t.Errorf("checked %q", sel.Checked)
+	}
+	// Not loaded when the base model isn't.
+	sel, _ = s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.8-27b:q6_k"}, aliases: qwen36})
+	if sel.Index != -1 {
+		t.Errorf("got %+v", sel)
+	}
+}
+
+// `qwen3.8-27b:*` must pick the quant, not the `qwen3.8-27b:Dreamer` preset
+// that sorts before it.
+func TestGlobPrefersBaseModelsOverAliases(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.8-27b:*"}}}
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.8-27b:q6_k"}, aliases: qwen36})
+	if sel.Target != "qwen3.8-27b:q6_k" || sel.AliasOf != "" {
+		t.Errorf("got %+v", sel)
+	}
+}
+
+func TestGlobMatchesAliasesWhenNoBaseDoes(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "*:Slacker"}}}
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.8-27b:q6_k", "qwen3.6-35b-a3b:q8_0"}, aliases: qwen36})
+	if sel.Target != "qwen3.6-35b:Slacker" || sel.AliasOf != "qwen3.6-35b-a3b:q8_0" {
+		t.Errorf("got %+v", sel)
+	}
+	if sel.Checked[0] != "*:Slacker: loaded as qwen3.6-35b:Slacker (alias of qwen3.6-35b-a3b:q8_0)" {
+		t.Errorf("checked %q", sel.Checked)
+	}
+}
+
+func TestMatchesOrdersBasesThenAliases(t *testing.T) {
+	models := []backend.ModelInfo{
+		{ID: "qwen3.8-27b:q6_k", Aliases: qwen36["qwen3.8-27b:q6_k"]},
+		{ID: "qwen3.8-27b:iq4_xs"},
+	}
+	// Aliases of a matching base model are left out: the base always wins.
+	bases, aliases := Matches("qwen3.8-27b:*", models)
+	if strings.Join(bases, ",") != "qwen3.8-27b:iq4_xs,qwen3.8-27b:q6_k" || len(aliases) != 0 {
+		t.Errorf("got bases %v, aliases %v", bases, aliases)
+	}
+	bases, aliases = Matches("*:Slacker", models)
+	if len(bases) != 0 || strings.Join(aliases, ",") != "qwen3.8-27b:Slacker" {
+		t.Errorf("got bases %v, aliases %v", bases, aliases)
+	}
+}
+
+// The candidate list from config.example.yaml's `task` model.
+var task = &FirstLoaded{Candidates: []Candidate{
+	{Model: "qwen3.6-35b-a3b:q8_0"},
+	{Model: "qwen3.8-flash-next:iq3_s"},
+	{Model: "qwen3.8-27b:*"},
+	{Model: "qwen2.5-coder-3b:q8_0", LoadIfNone: true},
+}}
+
+// The matrix sets from docs/design.md §6.
+func TestTaskAgainstMatrixSets(t *testing.T) {
+	cases := []struct {
+		set    string
+		loaded []string
+		target string
+		reason string
+	}{
+		{"daily", []string{"qwen2.5-coder-3b:q8_0", "qwen3.8-27b:q6_k", "qwen3.6-35b-a3b:q8_0"}, "qwen3.6-35b-a3b:q8_0", "loaded"},
+		{"coding", []string{"qwen3.8-flash-next:iq3_s", "qwen2.5-coder-3b:q8_0"}, "qwen3.8-flash-next:iq3_s", "loaded"},
+		{"testing", []string{"qwen3.8-27b:iq4_xs", "qwen2.5-coder-3b:q8_0"}, "qwen3.8-27b:iq4_xs", "loaded"},
+		{"large", []string{"qwen2.5-coder-3b:q8_0", "big-model"}, "qwen2.5-coder-3b:q8_0", "loaded"},
+		{"medium", []string{"flux2-dev:q8"}, "qwen2.5-coder-3b:q8_0", "loadIfNone"},
+	}
+	for _, c := range cases {
+		sel, err := task.Select(context.Background(), nil, &fakeBackend{loaded: c.loaded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sel.Target != c.target || sel.Reason != c.reason {
+			t.Errorf("%s: got %q (%s), want %q (%s); checked %v", c.set, sel.Target, sel.Reason, c.target, c.reason, sel.Checked)
+		}
+	}
+}
+
+// A loadIfNone candidate in the middle of the list keeps its place when it is
+// loaded, but is only loaded on demand after every candidate has been checked.
+func TestLoadIfNoneInMiddleIsFallback(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{
+		{Model: "a"},
+		{Model: "b", LoadIfNone: true},
+		{Model: "c"},
+		{Model: "d", LoadIfNone: true},
+	}}
+	cases := []struct {
+		loaded []string
+		target string
+		reason string
+	}{
+		{[]string{"a", "b", "c"}, "a", "loaded"},
+		{[]string{"b", "c"}, "b", "loaded"},
+		{[]string{"c"}, "c", "loaded"},
+		{[]string{"d"}, "d", "loaded"},
+		{[]string{"x"}, "b", "loadIfNone"}, // the first loadIfNone candidate, not d
+	}
+	for _, c := range cases {
+		sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: c.loaded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sel.Target != c.target || sel.Reason != c.reason {
+			t.Errorf("loaded %v: got %q (%s), want %q (%s); checked %v", c.loaded, sel.Target, sel.Reason, c.target, c.reason, sel.Checked)
+		}
+	}
+	// Every candidate is checked before falling back.
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"x"}})
+	want := "a: not loaded|b: not loaded|c: not loaded|d: not loaded|b: loading (loadIfNone)"
+	if got := strings.Join(sel.Checked, "|"); got != want {
+		t.Errorf("checked %q, want %q", got, want)
+	}
+}
+
+func TestGlobPicksFirstSortedMatch(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "m:*"}}}
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"m:b", "m:a", "x"}})
+	if sel.Target != "m:a" || sel.Index != 0 {
+		t.Errorf("got %+v", sel)
+	}
+}
+
+func TestNoMatch(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b:*"}}}
+	sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Index != -1 || sel.Reason != "no candidate loaded" || len(sel.Checked) != 2 {
+		t.Errorf("got %+v", sel)
+	}
+}
+
+func TestStateErrorPropagates(t *testing.T) {
+	_, err := task.Select(context.Background(), nil, &fakeBackend{err: errors.New("down")})
+	if err == nil {
+		t.Error("expected an error")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	bad := []Candidate{
+		{Model: ""},
+		{Model: "a["},
+		{Model: "a:*", LoadIfNone: true},
+	}
+	for _, c := range bad {
+		if err := c.Validate(); err == nil {
+			t.Errorf("%+v: expected an error", c)
+		}
+	}
+	for _, c := range task.Candidates {
+		if err := c.Validate(); err != nil {
+			t.Error(err)
+		}
+	}
+}
