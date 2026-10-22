@@ -83,21 +83,22 @@ func TestGetModel(t *testing.T) {
 // loadIfNone fallback, or nothing.
 func TestModelCurrent(t *testing.T) {
 	cases := []struct {
-		name   string
-		loaded []string
-		cfg    func(string) string
-		want   string
+		name             string
+		loaded, starting []string
+		cfg              func(string) string
+		want             string
 	}{
-		{"loaded", []string{"qwen3.6-35b-a3b:q8_0"}, nil, `"current":{"model":"qwen3.6-35b-a3b:q8_0","reason":"loaded"}`},
-		{"would load", nil, nil, `"current":{"model":"qwen2.5-coder-3b:q8_0","reason":"loadIfNone"}`},
-		{"none", nil, func(c string) string { return strings.Replace(c, "        loadIfNone: true\n", "", 1) }, `"current":{"reason":"no candidate loaded"}`},
+		{"loaded", []string{"qwen3.6-35b-a3b:q8_0"}, nil, nil, `"current":{"model":"qwen3.6-35b-a3b:q8_0","reason":"loaded"}`},
+		{"starting", nil, []string{"qwen3.8-27b:q6_k"}, nil, `"current":{"model":"qwen3.8-27b:q6_k","reason":"starting"}`},
+		{"would load", nil, nil, nil, `"current":{"model":"qwen2.5-coder-3b:q8_0","reason":"loadIfNone"}`},
+		{"none", nil, nil, func(c string) string { return strings.Replace(c, "        loadIfNone: true\n", "", 1) }, `"current":{"reason":"no candidate loaded"}`},
 	}
 	for _, c := range cases {
 		cfg := testConfig
 		if c.cfg != nil {
 			cfg = c.cfg(cfg)
 		}
-		srv, _ := buildGateway(t, &fakeSwap{loaded: c.loaded}, cfg, discard)
+		srv, _ := buildGateway(t, &fakeSwap{loaded: c.loaded, starting: c.starting}, cfg, discard)
 		for _, path := range []string{"/v1/models", "/v1/models/task"} {
 			req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
 			req.Header.Set("Authorization", "Bearer secret")

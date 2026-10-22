@@ -10,9 +10,10 @@ import (
 )
 
 type fakeBackend struct {
-	loaded  []string
-	aliases map[string][]string // base model ID -> aliases
-	err     error
+	loaded   []string
+	starting []string
+	aliases  map[string][]string // base model ID -> aliases
+	err      error
 }
 
 func (f *fakeBackend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
@@ -28,7 +29,54 @@ func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, er
 	for _, id := range f.loaded {
 		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id]})
 	}
+	for _, id := range f.starting {
+		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id], Starting: true})
+	}
 	return models, f.err
+}
+
+func TestStartingOrder(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{
+		{Model: "a"},
+		{Model: "b", LoadIfNone: true},
+		{Model: "qwen3.6-35b:Slacker"},
+		{Model: "c"},
+	}}
+	cases := []struct {
+		name              string
+		loaded, starting  []string
+		target, aliasOf   string
+		reason, lastCheck string
+	}{
+		{"ready anywhere beats starting", []string{"c"}, []string{"a"}, "c", "", "loaded", "c: loaded"},
+		{"first starting wins", nil, []string{"c", "a"}, "a", "", "starting", "a: waiting for it to finish starting"},
+		{"starting alias", nil, []string{"qwen3.6-35b-a3b:q8_0"}, "qwen3.6-35b:Slacker", "qwen3.6-35b-a3b:q8_0", "starting", "qwen3.6-35b:Slacker: waiting for it to finish starting"},
+		{"starting beats loadIfNone", nil, []string{"c"}, "c", "", "starting", "c: waiting for it to finish starting"},
+		{"neither: loadIfNone", nil, nil, "b", "", "loadIfNone", "b: loading (loadIfNone)"},
+	}
+	for _, c := range cases {
+		sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: c.loaded, starting: c.starting, aliases: qwen36})
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := sel.Checked[len(sel.Checked)-1]
+		if sel.Target != c.target || sel.AliasOf != c.aliasOf || sel.Reason != c.reason || last != c.lastCheck {
+			t.Errorf("%s: got %q (alias of %q, %s), last check %q; checked %q", c.name, sel.Target, sel.AliasOf, sel.Reason, last, sel.Checked)
+		}
+	}
+	// Starting candidates are noted as such while the list is walked.
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{starting: []string{"a"}})
+	if got := strings.Join(sel.Checked, "|"); got != "a: starting|b: not loaded|qwen3.6-35b:Slacker: not loaded|c: not loaded|a: waiting for it to finish starting" {
+		t.Errorf("checked %q", got)
+	}
+}
+
+func TestStartingGlob(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.8-27b:*"}}}
+	sel, _ := s.Select(context.Background(), nil, &fakeBackend{starting: []string{"qwen3.8-27b:q6_k"}, aliases: qwen36})
+	if sel.Target != "qwen3.8-27b:q6_k" || sel.Reason != "starting" || sel.Checked[0] != "qwen3.8-27b:*: starting as qwen3.8-27b:q6_k" {
+		t.Errorf("got %+v", sel)
+	}
 }
 
 // The qwen3.6 base model with its llama-swap preset aliases, as /v1/models lists them.

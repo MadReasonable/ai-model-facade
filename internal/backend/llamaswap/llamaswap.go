@@ -164,8 +164,8 @@ func (b *Backend) fetchState(f *stateFetch) {
 			aliases[m.ID] = m.Aliases
 		}
 		for _, r := range running.Running {
-			if r.State == "ready" {
-				models = append(models, backend.ModelInfo{ID: r.Model, Aliases: aliases[r.Model]})
+			if r.State == "ready" || r.State == "starting" {
+				models = append(models, backend.ModelInfo{ID: r.Model, Aliases: aliases[r.Model], Starting: r.State == "starting"})
 			}
 		}
 	}

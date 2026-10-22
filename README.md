@@ -147,7 +147,7 @@ Model objects have the standard OpenAI fields plus `current`: where a request wo
  "current":{"model":"qwen3.8-flash-next:iq3_s","reason":"loaded"}}
 ```
 
-`reason` is `loaded`, or `loadIfNone` when nothing is loaded and that model would be loaded.
+`reason` is `loaded`; `starting` when nothing is ready and a request would wait for that model to finish loading; or `loadIfNone` when nothing is ready or starting and that model would be loaded.
 When no request would succeed, `current` has no `model` and the reason is `no candidate loaded`.
 `alias_of` is added when `model` is a llama-swap alias.
 It's a snapshot, so the next request can be routed differently if what's loaded changes. If llama-swap's state can't be read, `current` is left out.
@@ -164,14 +164,19 @@ Chat traffic keeps going straight to llama-swap; only background tasks go throug
 
 ### Choosing a model
 
-Each virtual model has an ordered list of candidates, and the first eligible one wins:
+Each virtual model has an ordered list of candidates. The gateway walks the whole list up to three times, stopping at the first match:
 
-- A candidate is eligible when llama-swap's `/running` reports it in state `ready`. A model that is still starting doesn't count.
-- A pattern such as `qwen3.8-27b:*` matches ready models, and the matched ID is forwarded. If several match, the first in sorted order wins.
-- A llama-swap alias (a preset such as `qwen3.6-35b:Slacker`) can be a candidate too. It is ready whenever its base model is, and is forwarded under the alias ID so llama-swap applies the preset. Patterns prefer base models over aliases, so `qwen3.8-27b:*` picks the quant rather than its `:Dreamer` preset.
+1. **Ready.** The first candidate that llama-swap's `/running` reports in state `ready` wins.
+2. **Starting.** If nothing is ready, the first candidate that is still `starting` wins, and the request waits for that load to finish. This avoids asking llama-swap to load a second model, which could evict the one already starting.
+3. **Fallback.** If nothing is ready or starting, the first `loadIfNone` candidate wins, and llama-swap loads it.
+
+A model that is stopping or stopped never counts.
+
+- A pattern such as `qwen3.8-27b:*` matches ready (or starting) models, and the matched ID is forwarded. If several match, the first in sorted order wins.
+- A llama-swap alias (a preset such as `qwen3.6-35b:Slacker`) can be a candidate too. It is ready (or starting) whenever its base model is, and is forwarded under the alias ID so llama-swap applies the preset. Patterns prefer base models over aliases, so `qwen3.8-27b:*` picks the quant rather than its `:Dreamer` preset.
 - A pattern can also pick a preset across model families. If each family defines an `:Assistant` preset in llama-swap, `"*:Assistant"` matches whichever one is loaded; `config.example.yaml` uses this for a Home Assistant voice model. Quote a pattern that starts with `*`, because a leading `*` is YAML alias syntax.
-- A candidate with `loadIfNone: true` is the fallback. It is used like any other candidate when it's already loaded, but if no candidate on the list is loaded, the first `loadIfNone` candidate wins and llama-swap loads it. It can sit anywhere in the list: its position sets its priority among loaded models, while the fallback only happens after the whole list has been checked.
-- If nothing is eligible, the request gets `503`. Open WebUI, for example, then skips the task.
+- A candidate with `loadIfNone: true` is used like any other candidate when it's ready or starting, and is also the fallback in step 3. It can sit anywhere in the list: its position sets its priority in steps 1 and 2, while the fallback only happens after the whole list has been checked.
+- If nothing matches, the request gets `503`. Open WebUI, for example, then skips the task.
 
 There is no failover: a request is never retried against another model.
 
@@ -304,7 +309,7 @@ Each candidate takes:
 | Key | Description |
 |-----|-------------|
 | `model` | An exact backend model ID or alias, or a pattern using `*`, `?` or `[...]`. |
-| `loadIfNone` | `true`: if no candidate is loaded, the first `loadIfNone` candidate is used and llama-swap loads it. Default `false`: only used when already loaded. Must be an exact ID. |
+| `loadIfNone` | `true`: if no candidate is ready or starting, the first `loadIfNone` candidate is used and llama-swap loads it. Default `false`: only used when ready or starting. Must be an exact ID. |
 | `params` | Applied after the model's `params` when this candidate wins. Optional. |
 
 ## Commands

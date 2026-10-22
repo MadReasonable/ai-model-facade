@@ -6,6 +6,9 @@ import "context"
 type ModelInfo struct {
 	ID      string
 	Aliases []string // other IDs the backend accepts for this model, e.g. llama-swap presets
+	// Starting is set by ModelStateProvider for a model that is loading but
+	// not ready yet. A request to it waits for the load to finish.
+	Starting bool
 }
 
 // Catalog indexes a backend's model list for validation and display.
@@ -97,8 +100,9 @@ type Backend interface {
 
 // ModelStateProvider is an optional backend capability.
 type ModelStateProvider interface {
-	// LoadedModels returns the models that are ready, not those still
-	// starting, each with its aliases.
+	// LoadedModels returns the models that are ready, plus those still
+	// starting with Starting set, each with its aliases. A model that is
+	// stopping or stopped is not returned.
 	LoadedModels(ctx context.Context) ([]ModelInfo, error)
 }
 

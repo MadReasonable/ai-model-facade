@@ -21,6 +21,7 @@ import (
 type fakeSwap struct {
 	mu          sync.Mutex
 	loaded      []string
+	starting    []string // reported in state "starting"
 	lastBody    string
 	lastPath    string // path of the last completion request
 	chatMode    string // "json", "stream" or "truncated"
@@ -50,7 +51,9 @@ func (f *fakeSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, id := range f.loaded {
 			running = append(running, `{"model":"`+id+`","state":"ready"}`)
 		}
-		running = append(running, `{"model":"qwen3.8-27b:q6_k","state":"starting"}`)
+		for _, id := range f.starting {
+			running = append(running, `{"model":"`+id+`","state":"starting"}`)
+		}
 		io.WriteString(w, `{"running":[`+strings.Join(running, ",")+`]}`)
 	case "/v1/chat/completions", "/v1/completions":
 		f.lastPath = r.URL.Path
@@ -242,19 +245,33 @@ func TestLegacyCompletions(t *testing.T) {
 	}
 }
 
-func TestStartingModelIsNotLoaded(t *testing.T) {
-	// qwen3.8-27b:q6_k is only "starting", so the glob skips it and the 3B loads.
-	swap := &fakeSwap{}
-	srv := newGateway(t, swap)
-	resp, _ := post(t, srv, "secret", `{"model":"task","messages":[]}`)
-	if got := resp.Header.Get("X-Gateway-Target"); resp.StatusCode != http.StatusOK || got != "qwen2.5-coder-3b:q8_0" {
-		t.Errorf("got %d %q", resp.StatusCode, got)
+// A starting model ranks after every ready candidate but before the
+// loadIfNone fallback: waiting for a load already under way beats
+// triggering another, which could evict the one that is starting.
+func TestStartingModelRanksBetweenReadyAndFallback(t *testing.T) {
+	cases := []struct {
+		name             string
+		loaded, starting []string
+		target, body     string
+	}{
+		{"ready later in the list beats starting", []string{"qwen2.5-coder-3b:q8_0"}, []string{"qwen3.8-27b:q6_k"},
+			"qwen2.5-coder-3b:q8_0", `{"model":"qwen2.5-coder-3b:q8_0","messages":[],"max_tokens":1000}`},
+		{"starting beats loadIfNone", nil, []string{"qwen3.8-27b:q6_k"},
+			"qwen3.8-27b:q6_k", `{"model":"qwen3.8-27b:q6_k","messages":[],"max_tokens":1000,"chat_template_kwargs":{"enable_thinking":false}}`},
+		{"nothing ready or starting: loadIfNone", nil, nil,
+			"qwen2.5-coder-3b:q8_0", `{"model":"qwen2.5-coder-3b:q8_0","messages":[],"max_tokens":1000}`},
 	}
-	if swap.lastBody != `{"model":"qwen2.5-coder-3b:q8_0","messages":[],"max_tokens":1000}` {
-		t.Errorf("forwarded %s", swap.lastBody)
+	for _, c := range cases {
+		swap := &fakeSwap{loaded: c.loaded, starting: c.starting}
+		resp, _ := post(t, newGateway(t, swap), "secret", `{"model":"task","messages":[]}`)
+		if got := resp.Header.Get("X-Gateway-Target"); resp.StatusCode != http.StatusOK || got != c.target {
+			t.Errorf("%s: got %d %q, want %q", c.name, resp.StatusCode, got, c.target)
+		}
+		if swap.lastBody != c.body {
+			t.Errorf("%s: forwarded %s", c.name, swap.lastBody)
+		}
 	}
 }
-
 func TestStreamRelaysAndTerminates(t *testing.T) {
 	swap := &fakeSwap{loaded: []string{"qwen3.6-35b-a3b:q8_0"}, chatMode: "stream"}
 	resp, body := post(t, newGateway(t, swap), "secret", `{"model":"task","stream":true}`)

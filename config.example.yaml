@@ -50,8 +50,9 @@ models:
     description: Background tasks on whichever LLM is already loaded, thinking off
     params: *taskLimits
     candidates:
-      # The first loaded candidate (per /running) wins. If none is loaded, the first
-      # loadIfNone: true candidate wins, wherever it is in the list, and is loaded.
+      # The first ready candidate (per /running) wins. If none is ready, the first one
+      # still starting wins and the request waits for it. If none is starting either,
+      # the first loadIfNone: true candidate wins, wherever it is in the list, and is loaded.
       # `*` globs match against loaded model IDs; the concrete matched ID is forwarded.
       # llama-swap aliases (presets) may be listed too; an alias is loaded when its base
       # model is, but llama-swap then applies the preset's params over the gateway's.

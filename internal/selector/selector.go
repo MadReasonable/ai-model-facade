@@ -36,12 +36,17 @@ func IsGlob(model string) bool {
 	return strings.ContainsAny(model, `*?[\`)
 }
 
-// FirstLoaded picks the first candidate the backend reports ready. An alias
-// is ready when its base model is. A glob matches ready base models first,
-// then their aliases, each in sorted order, so `qwen3.8-27b:*` picks the
-// model itself over its `qwen3.8-27b:Dreamer` preset. Only when no
-// candidate is ready does the first LoadIfNone candidate win, wherever it is
-// in the list, and the backend loads it.
+// FirstLoaded picks, in order of preference:
+//
+//  1. the first candidate the backend reports ready;
+//  2. otherwise the first candidate that is starting: the request waits for
+//     a load already under way instead of triggering another;
+//  3. otherwise the first LoadIfNone candidate, which the backend loads.
+//
+// Each step walks the whole list, so a LoadIfNone candidate can sit anywhere.
+// An alias is ready or starting when its base model is. A glob matches base
+// models first, then their aliases, each in sorted order, so `qwen3.8-27b:*`
+// picks the model itself over its `qwen3.8-27b:Dreamer` preset.
 type FirstLoaded struct {
 	Candidates []Candidate
 }
@@ -74,29 +79,38 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 		sel.Reason = "backend state unavailable"
 		return sel, err
 	}
-	bases, aliases, aliasOf := ranked(loadedModels)
-	fallback := -1 // first LoadIfNone candidate, used if nothing is loaded
+	var readyModels, startingModels []backend.ModelInfo
+	for _, m := range loadedModels {
+		if m.Starting {
+			startingModels = append(startingModels, m)
+		} else {
+			readyModels = append(readyModels, m)
+		}
+	}
+	ready, starting := newModelSet(readyModels), newModelSet(startingModels)
+	wait := -1     // first starting candidate, used if nothing is ready
+	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
+	var waitID, waitBase string
 	for i, c := range s.Candidates {
-		if IsGlob(c.Model) {
-			if id, ok := firstMatch(c.Model, bases); ok {
-				return winner(sel, i, id, "", c.Model+": loaded as "+id, "loaded"), nil
+		if id, base, ok := ready.match(c.Model); ok {
+			return winner(sel, i, id, base, describe(c.Model, id, base, "loaded"), "loaded"), nil
+		}
+		if id, base, ok := starting.match(c.Model); ok {
+			sel.Checked = append(sel.Checked, describe(c.Model, id, base, "starting"))
+			if wait < 0 {
+				wait, waitID, waitBase = i, id, base
 			}
-			if id, ok := firstMatch(c.Model, aliases); ok {
-				return winner(sel, i, id, aliasOf[id], c.Model+": loaded as "+id+" (alias of "+aliasOf[id]+")", "loaded"), nil
-			}
+		} else if IsGlob(c.Model) {
 			sel.Checked = append(sel.Checked, c.Model+": no match loaded")
-			continue
-		}
-		if slices.Contains(bases, c.Model) {
-			return winner(sel, i, c.Model, "", c.Model+": loaded", "loaded"), nil
-		}
-		if base, ok := aliasOf[c.Model]; ok {
-			return winner(sel, i, c.Model, base, c.Model+": loaded (alias of "+base+")", "loaded"), nil
+		} else {
+			sel.Checked = append(sel.Checked, c.Model+": not loaded")
 		}
 		if c.LoadIfNone && fallback < 0 {
 			fallback = i
 		}
-		sel.Checked = append(sel.Checked, c.Model+": not loaded")
+	}
+	if wait >= 0 {
+		return winner(sel, wait, waitID, waitBase, waitID+": waiting for it to finish starting", "starting"), nil
 	}
 	if fallback >= 0 {
 		model := s.Candidates[fallback].Model
@@ -104,6 +118,52 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 	}
 	sel.Reason = "no candidate loaded"
 	return sel, nil
+}
+
+// modelSet is a group of backend models in the order a candidate tries them:
+// sorted base IDs, then sorted aliases.
+type modelSet struct {
+	bases, aliases []string
+	aliasOf        map[string]string
+}
+
+func newModelSet(models []backend.ModelInfo) modelSet {
+	bases, aliases, aliasOf := ranked(models)
+	return modelSet{bases: bases, aliases: aliases, aliasOf: aliasOf}
+}
+
+// match returns the ID a candidate resolves to in the set, and its base model
+// when that ID is an alias.
+func (s modelSet) match(candidate string) (id, base string, ok bool) {
+	if IsGlob(candidate) {
+		if id, ok := firstMatch(candidate, s.bases); ok {
+			return id, "", true
+		}
+		if id, ok := firstMatch(candidate, s.aliases); ok {
+			return id, s.aliasOf[id], true
+		}
+		return "", "", false
+	}
+	if slices.Contains(s.bases, candidate) {
+		return candidate, "", true
+	}
+	if base, ok := s.aliasOf[candidate]; ok {
+		return candidate, base, true
+	}
+	return "", "", false
+}
+
+// describe is a candidate's line in Selection.Checked, e.g.
+// "qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k" or "m:Slacker: starting (alias of m)".
+func describe(candidate, id, base, state string) string {
+	s := candidate + ": " + state
+	if IsGlob(candidate) {
+		s += " as " + id
+	}
+	if base != "" {
+		s += " (alias of " + base + ")"
+	}
+	return s
 }
 
 func winner(sel Selection, index int, target, aliasOf, checked, reason string) Selection {

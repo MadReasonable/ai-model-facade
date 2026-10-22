@@ -38,7 +38,7 @@ func TestLoadedModelsOnlyReadyAndCached(t *testing.T) {
 		switch r.URL.Path {
 		case "/running":
 			calls.Add(1)
-			io.WriteString(w, `{"running":[{"model":"a","state":"ready"},{"model":"b","state":"starting"},{"model":"c","state":"ready","cmd":"x"}]}`)
+			io.WriteString(w, `{"running":[{"model":"a","state":"ready"},{"model":"b","state":"starting"},{"model":"c","state":"ready","cmd":"x"},{"model":"d","state":"stopping"}]}`)
 		case "/v1/models":
 			io.WriteString(w, `{"data":[{"id":"a","meta":{"llamaswap":{"type":"model","aliases":["a:Slacker"]}}},{"id":"a:Slacker","meta":{"llamaswap":{"type":"alias","modelID":"a"}}},{"id":"b"},{"id":"c"}]}`)
 		default:
@@ -52,10 +52,14 @@ func TestLoadedModelsOnlyReadyAndCached(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" {
-			t.Errorf("got %+v", got)
+		// Ready and starting models are returned, starting ones marked; stopping ones are not.
+		if len(got) != 3 || got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+			t.Fatalf("got %+v", got)
 		}
-		if len(got[0].Aliases) != 1 || got[0].Aliases[0] != "a:Slacker" || len(got[1].Aliases) != 0 {
+		if got[0].Starting || !got[1].Starting || got[2].Starting {
+			t.Errorf("starting flags: %+v", got)
+		}
+		if len(got[0].Aliases) != 1 || got[0].Aliases[0] != "a:Slacker" || len(got[2].Aliases) != 0 {
 			t.Errorf("aliases: %+v", got)
 		}
 	}
