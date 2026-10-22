@@ -87,14 +87,17 @@ func serve(path string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	var levelVar slog.LevelVar // reloadable
+	levelVar.Set(level)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &levelVar}))
 	g, err := gateway.Build(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
+	live := gateway.NewLive(g, log)
 	srv := &http.Server{
 		Addr:              g.Config.Server.Listen,
-		Handler:           g.Handler(log),
+		Handler:           live,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
@@ -102,11 +105,21 @@ func serve(path string) error {
 	go func() {
 		errs <- srv.ListenAndServe()
 	}()
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	log.Info("listening", "addr", srv.Addr, "models", len(g.Models))
-	select {
-	case err := <-errs:
-		return err
-	case <-ctx.Done():
+	for running := true; running; {
+		select {
+		case err := <-errs:
+			return err
+		case <-hup:
+			if err := reload(path, live, &levelVar, log); err != nil {
+				log.Error("config reload failed; keeping the running config", "error", err)
+			}
+		case <-ctx.Done():
+			running = false
+		}
 	}
 	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -114,6 +127,28 @@ func serve(path string) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	return nil
+}
+
+// reload re-reads the config on SIGHUP. Nothing changes unless the whole
+// config loads and validates, including against the backends.
+func reload(path string, live *gateway.Live, levelVar *slog.LevelVar, log *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	level, err := parseLevel(cfg.Logging.Level)
+	if err != nil {
+		return err
+	}
+	g, err := live.Reload(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	levelVar.Set(level)
+	log.Info("config reloaded", "models", len(g.Models))
 	return nil
 }
 

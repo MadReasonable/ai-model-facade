@@ -218,6 +218,12 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body}}, nil
 }
 
+// CloseIdleConnections releases pooled connections, e.g. after a config
+// reload replaces this backend.
+func (b *Backend) CloseIdleConnections() {
+	b.client.CloseIdleConnections()
+}
+
 // getJSON serves the state and model-list calls, which must fail fast rather
 // than wait out a chat-length timeout, so it applies stateTimeout itself.
 func (b *Backend) getJSON(ctx context.Context, path string, out any) error {

@@ -321,5 +321,21 @@ ai-model-facade health <config>   exit 0 if the gateway at server.listen answers
 ```
 
 `serve` and `check` validate against llama-swap, so it must be reachable when they start.
+
+### Reloading the config
+
+Send `serve` a `SIGHUP` to reload the config without a restart:
+
+```bash
+kill -HUP <pid>
+docker kill -s HUP <container>
+docker compose kill -s SIGHUP ai-model-facade
+```
+
+The new config is loaded and validated in full first, including against llama-swap, and replaces the running one only if all of it succeeds. Otherwise the running config stays and the error is logged.
+Requests already in flight, including streams, finish on the config that accepted them.
+Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
+Run `check` first to see what a reload would load.
+
 `health` only reads `server.listen` from the config and contacts no backend; a wildcard address such as `0.0.0.0:8088` is checked on `127.0.0.1`.
 The endpoints the gateway serves are listed under [Connecting Clients](#connecting-clients).

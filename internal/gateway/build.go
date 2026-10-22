@@ -14,8 +14,9 @@ import (
 )
 
 type Gateway struct {
-	Config *config.Config
-	Models []Model // in config order
+	Config   *config.Config
+	Models   []Model // in config order
+	backends []backend.Backend
 }
 
 type Model struct {
@@ -63,6 +64,9 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 		return nil, fmt.Errorf("models: at least one virtual model is required")
 	}
 	g := &Gateway{Config: cfg}
+	for _, b := range backends {
+		g.backends = append(g.backends, b)
+	}
 	for _, e := range modelEntries {
 		h, err := virtualmodel.Build(ctx, e, env)
 		if err != nil {
