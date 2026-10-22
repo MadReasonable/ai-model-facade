@@ -83,7 +83,7 @@ func newCandidates(ctx context.Context, entry config.Entry, env Env) (*candidate
 			return nil, fmt.Errorf("line %d: %w", node.Line, err)
 		}
 		if !selector.IsGlob(candidate.Model) && !m.catalog.Contains(candidate.Model) {
-			return nil, fmt.Errorf("line %d: model %q is not listed by backend %q", node.Line, candidate.Model, c.Backend)
+			return nil, fmt.Errorf("line %d: model %q is not listed by backend %q%s", node.Line, candidate.Model, c.Backend, didYouMean(m.catalog.WithTags(candidate.Model)))
 		}
 		patches, err := mergepatch.Compile(&cc.Params)
 		if err != nil {
@@ -201,6 +201,18 @@ func (m *candidates) describeAliases(candidate string, hasParams bool) []string 
 		return lines
 	}
 	return nil
+}
+
+// didYouMean suggests listed IDs for a candidate written without its tag,
+// e.g. Ollama's "llama3" for "llama3:latest".
+func didYouMean(ids []string) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return "; did you mean " + ids[0] + "?"
+	}
+	return "; did you mean one of " + strings.Join(ids, ", ") + "?"
 }
 
 func listOrNone(ids []string) string {

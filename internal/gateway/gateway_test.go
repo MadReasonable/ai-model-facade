@@ -10,9 +10,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
@@ -435,11 +439,150 @@ func TestListModels(t *testing.T) {
 	}
 }
 
+// An ollama backend is built from config and routes on /api/ps.
+func TestOllamaBackend(t *testing.T) {
+	var lastBody string
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			io.WriteString(w, `{"object":"list","data":[{"id":"llama3:latest"},{"id":"qwen2.5:7b"}]}`)
+		case "/api/ps":
+			io.WriteString(w, `{"models":[{"name":"qwen2.5:7b","model":"qwen2.5:7b"}]}`)
+		case "/v1/chat/completions":
+			body, _ := io.ReadAll(r.Body)
+			lastBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"choices":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ollamaSrv.Close()
+	src := `
+server: {listen: ":0"}
+backends:
+  ollama: {type: ollama, baseUrl: "${OLLAMA_URL}"}
+models:
+  task:
+    backend: ollama
+    candidates:
+      - model: llama3:latest
+      - model: qwen2.5:*
+`
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { return ollamaSrv.URL, n == "OLLAMA_URL" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	defer srv.Close()
+	resp, body := post(t, srv, "", `{"model":"task","messages":[]}`)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Gateway-Target") != "qwen2.5:7b" || lastBody != `{"model":"qwen2.5:7b","messages":[]}` {
+		t.Errorf("got %d %q %s; forwarded %s", resp.StatusCode, resp.Header.Get("X-Gateway-Target"), body, lastBody)
+	}
+}
+
+// While one virtual model's request loads a model on Ollama, another virtual
+// model waits for that load instead of loading its own fallback, which could
+// evict it.
+func TestOllamaWaitsForGatewayLoad(t *testing.T) {
+	var mu sync.Mutex
+	var loaded []string
+	var forwarded []string
+	release := make(chan struct{})
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a:1"},{"id":"b:1"}]}`)
+		case "/api/ps":
+			mu.Lock()
+			var ps []string
+			for _, id := range loaded {
+				ps = append(ps, `{"name":"`+id+`"}`)
+			}
+			mu.Unlock()
+			io.WriteString(w, `{"models":[`+strings.Join(ps, ",")+`]}`)
+		case "/v1/chat/completions":
+			body, _ := io.ReadAll(r.Body)
+			model := gjson.GetBytes(body, "model").String()
+			mu.Lock()
+			forwarded = append(forwarded, model)
+			firstLoad := model == "a:1" && len(forwarded) == 1
+			mu.Unlock()
+			if firstLoad {
+				<-release // the load
+			}
+			mu.Lock()
+			if !slices.Contains(loaded, model) {
+				loaded = append(loaded, model)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer ollamaSrv.Close()
+	src := `
+server: {listen: ":0"}
+backends:
+  ollama: {type: ollama, baseUrl: "${OLLAMA_URL}"}
+models:
+  first:
+    backend: ollama
+    candidates:
+      - {model: "a:1", loadIfNone: true}
+  second:
+    backend: ollama
+    candidates:
+      - {model: "b:1", loadIfNone: true}
+      - model: "a:1"
+`
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { return ollamaSrv.URL, n == "OLLAMA_URL" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	defer srv.Close()
+	firstDone := make(chan string)
+	go func() {
+		resp, _ := post(t, srv, "", `{"model":"first","messages":[]}`)
+		firstDone <- resp.Header.Get("X-Gateway-Target")
+	}()
+	time.Sleep(50 * time.Millisecond) // let the first request start the load
+	secondDone := make(chan string)
+	go func() {
+		resp, _ := post(t, srv, "", `{"model":"second","messages":[]}`)
+		secondDone <- resp.Header.Get("X-Gateway-Target")
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if got := <-firstDone; got != "a:1" {
+		t.Errorf("first: %q", got)
+	}
+	if got := <-secondDone; got != "a:1" {
+		t.Errorf("second: %q, want it to wait for a:1", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if slices.Contains(forwarded, "b:1") {
+		t.Errorf("b:1 was loaded: %v", forwarded)
+	}
+}
+
 func TestBuildValidation(t *testing.T) {
 	backendSrv := httptest.NewServer(&fakeSwap{})
 	defer backendSrv.Close()
 	cases := map[string]struct{ from, to, want string }{
 		"missing exact id":   {"model: qwen2.5-coder-3b:q8_0", "model: qwen9:q1", `"qwen9:q1" is not listed`},
+		"missing tag":        {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b", "did you mean qwen2.5-coder-3b:q8_0?"},
+		"missing tag, many":  {"model: qwen3.8-27b:*", "model: qwen3.8-27b", "did you mean one of qwen3.8-27b:Dreamer, qwen3.8-27b:q6_k?"},
 		"undefined backend":  {"    backend: llamaSwap\n    description", "    backend: nope\n    description", `backend "nope" is not defined`},
 		"unknown model key":  {"    description:", "    descripton:", `unknown key "descripton"`},
 		"unknown cand key":   {"loadIfNone: true", "loadIfNoneed: true", `unknown key "loadIfNoneed"`},

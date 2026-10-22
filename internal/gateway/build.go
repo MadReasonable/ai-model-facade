@@ -9,6 +9,7 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
 )
@@ -81,6 +82,8 @@ func newBackend(e config.Entry) (backend.Backend, error) {
 	switch e.Type {
 	case "llamaSwap":
 		return llamaswap.New(e)
+	case "ollama":
+		return ollama.New(e)
 	case "":
 		return nil, fmt.Errorf("line %d: type is required", e.Node.Line)
 	}

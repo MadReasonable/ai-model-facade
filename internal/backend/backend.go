@@ -1,7 +1,11 @@
 // Package backend defines the interfaces backend adapters implement.
 package backend
 
-import "context"
+import (
+	"context"
+	"slices"
+	"strings"
+)
 
 type ModelInfo struct {
 	ID      string
@@ -34,6 +38,24 @@ func (c *Catalog) Contains(id string) bool {
 	_, isModel := c.byID[id]
 	_, isAlias := c.AliasOf[id]
 	return isModel || isAlias
+}
+
+// WithTags returns the listed IDs, models and aliases, that are id followed
+// by ":" and a tag, sorted: "llama3:8b" and "llama3:latest" for "llama3".
+func (c *Catalog) WithTags(id string) []string {
+	var ids []string
+	for listed := range c.byID {
+		if strings.HasPrefix(listed, id+":") {
+			ids = append(ids, listed)
+		}
+	}
+	for alias := range c.AliasOf {
+		if strings.HasPrefix(alias, id+":") {
+			ids = append(ids, alias)
+		}
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // Model returns the base model with this ID.

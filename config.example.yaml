@@ -42,6 +42,13 @@ backends:
     connectTimeoutSeconds: 5
     requestTimeoutSeconds: 180      # covers a cold load of a loadIfNone candidate
 
+  # ollama:                         # same keys; state from GET /api/ps, plus loads the gateway itself started
+  #   type: ollama
+  #   baseUrl: http://ollama:11434
+  #   stateCacheSeconds: 2
+  #   requestTimeoutSeconds: 180
+  # Ollama candidates use full name:tag IDs, e.g. llama3:latest, not llama3.
+
 models:
   # Open WebUI background tasks: titles, tags, follow-ups, query generation.
   # Never causes an eviction unless nothing above the last candidate is loaded.
