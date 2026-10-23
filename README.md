@@ -11,7 +11,7 @@ The smallest useful config is a backend address and one facade mapped to one mod
 Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
 
 > [!NOTE]
-> **Pre-release.** Config keys may still change before the first release.
+> **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
 
 ## Why
 
@@ -31,7 +31,7 @@ A facade moves that decision out of every client and into one place, where it is
 
 This walkthrough uses llama-swap as the backend, so you need a running instance.
 Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
-You need Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
+You need a binary from the [releases page](https://github.com/MadReasonable/ai-model-facade/releases), Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
 
 ```bash
 git clone https://github.com/MadReasonable/ai-model-facade.git
@@ -46,6 +46,8 @@ Then validate the config and start the gateway:
 go run ./cmd/ai-model-facade check config.yaml
 go run ./cmd/ai-model-facade serve config.yaml
 ```
+
+With a release binary, run `ai-model-facade check config.yaml` and `ai-model-facade serve config.yaml` instead.
 
 `check` prints what each candidate will send, and what each pattern can currently route to:
 
@@ -96,17 +98,21 @@ go build -o ai-model-facade ./cmd/ai-model-facade
 ## Running in Docker
 
 The image is a static binary on distroless, about 10 MB.
+Each release publishes it for amd64 and arm64 as `ghcr.io/madreasonable/ai-model-facade`, tagged with the version, such as `0.1.0`, and `latest`.
+To build it from source instead:
 
 ```bash
-docker build -t ai-model-facade .
+docker build --build-arg VERSION=$(git describe --tags --always) -t ai-model-facade .
 ```
+
+`VERSION` is what `ai-model-facade version` and the startup log report; without it, they report `dev`.
 
 Run it as a service in the same compose project as your backends, so `baseUrl` can use their service names:
 
 ```yaml
 services:
   ai-model-facade:
-    image: ai-model-facade
+    image: ghcr.io/madreasonable/ai-model-facade:0.1.0
     restart: unless-stopped
     volumes:
       - ./ai-model-facade/config.yaml:/config/config.yaml:ro
@@ -125,7 +131,7 @@ To run `check` in a container, attach it to the backends' network:
 ```bash
 docker run --rm --network <backend network> \
   -v "$PWD/config.yaml:/config/config.yaml:ro" \
-  ai-model-facade check /config/config.yaml
+  ghcr.io/madreasonable/ai-model-facade:0.1.0 check /config/config.yaml
 ```
 
 ## Connecting Clients
@@ -470,6 +476,7 @@ Each candidate takes:
 ai-model-facade serve <config>    run the gateway
 ai-model-facade check <config>    validate the config and print each candidate's resolved params
 ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
+ai-model-facade version           print the version, which the startup log line also reports
 ```
 
 `serve` and `check` make the same checks; `check` fails on what `serve` only warns about.

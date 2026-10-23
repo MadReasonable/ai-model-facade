@@ -5,6 +5,7 @@
 //	                                  model's resolved params per candidate
 //	ai-model-facade health <config>   exit 0 if the gateway at server.listen
 //	                                  answers /health (for container health checks)
+//	ai-model-facade version           print the version
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -35,9 +37,30 @@ const usage = `usage:
   ai-model-facade serve <config>    run the gateway
   ai-model-facade check <config>    validate the config and print each candidate's resolved params
   ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
+  ai-model-facade version           print the version, which the startup log line also reports
 `
 
+// version is set at build time by the release workflow and the Dockerfile:
+// -ldflags "-X main.version=v0.1.0".
+var version = ""
+
+// currentVersion is the version set at build time, else the module version
+// that `go install ...@v0.1.0` records, else "dev".
+func currentVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "version" {
+		fmt.Println(currentVersion())
+		return
+	}
 	commands := map[string]func(string) error{"serve": serve, "check": check, "health": health}
 	command := commands[""]
 	if len(os.Args) == 3 {
@@ -129,7 +152,7 @@ func serve(path string) error {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	log.Info("listening", "addr", srv.Addr, "models", len(g.Models))
+	log.Info("listening", "addr", srv.Addr, "models", len(g.Models), "version", currentVersion())
 	for running := true; running; {
 		select {
 		case err := <-errs:

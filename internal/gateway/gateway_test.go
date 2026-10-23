@@ -824,8 +824,8 @@ func TestBuildListsBackendsOnce(t *testing.T) {
 	src := `
 server: {listen: ":0"}
 backends:
-  llamaSwap: {type: llamaSwap, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.3}
-  openWebUi: {type: openWebUi, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.3, llamaSwap: {backend: llamaSwap}}
+  llamaSwap: {type: llamaSwap, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.5}
+  openWebUi: {type: openWebUi, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.5, llamaSwap: {backend: llamaSwap}}
   healthy: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
 models:
   task:
@@ -845,7 +845,9 @@ models:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 550*time.Millisecond {
+	// Listed one after the other, the two hung backends take at least 1s; at
+	// the same time, about 0.5s, which leaves room for a slow, race-enabled run.
+	if elapsed := time.Since(start); elapsed > 950*time.Millisecond {
 		t.Errorf("took %v", elapsed)
 	}
 	warnings := fmt.Sprint(g.Warnings)
