@@ -92,7 +92,7 @@ func compileObject(n *yaml.Node) (*value, error) {
 			return nil, fmt.Errorf("line %d: empty params key", k.Line)
 		}
 		if seen[k.Value] {
-			return nil, fmt.Errorf("line %d: duplicate params key %q", k.Line, k.Value)
+			return nil, fmt.Errorf("line %d: duplicate params key '%s'", k.Line, k.Value)
 		}
 		seen[k.Value] = true
 		v, err := compileValue(n.Content[i+1])
@@ -285,7 +285,7 @@ func appendJSON(buf []byte, n *yaml.Node) ([]byte, error) {
 		}
 		b, err := marshal(v)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: value %q can't be encoded as JSON: %w", n.Line, n.Value, err)
+			return nil, fmt.Errorf("line %d: value '%s' can't be encoded as JSON: %w", n.Line, n.Value, err)
 		}
 		return append(buf, b...), nil
 	default:

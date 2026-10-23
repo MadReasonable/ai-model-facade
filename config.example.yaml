@@ -1,101 +1,142 @@
-# OpenAI-compatible gateway
+# Example config for ai-model-facade.
 #
-# Semantics:
-#   - ${NAME} in scalar strings is replaced by environment variable NAME at load time;
-#     an undefined variable is a startup error. No other substitution exists.
-#   - `vars` is ignored by the loader; it exists only as a home for YAML anchors.
-#   - `params` is a map or a list of maps. Each is applied as a JSON Merge Patch
-#     (RFC 7386): objects merge recursively, scalars/arrays replace, null deletes the key.
-#   - Request processing for a virtual model:
-#       client body → route params → winning candidate params → model rewritten → backend
-#     Gateway params override client values (they are patches, not defaults).
+# The gateway serves facades: model names that exist only here. A client asks
+# for a facade by name, and the gateway picks a real model on a backend from
+# the facade's list of candidates, applies the params configured below, and
+# forwards the request. The README explains each part in full; this file is a
+# working starting point.
+#
+# Two facades are active, both on one llama-swap backend:
+#   task-monkey  Open WebUI's background tasks, on whichever LLM is loaded
+#   assistant    a voice assistant, on whichever model has an :Assistant preset
+# A third, commented out at the end, uses an Open WebUI backend to give any
+# client Open WebUI's tools.
+#
+# Conventions:
+#   - ${NAME} is replaced by the environment variable NAME when the config
+#     loads; an undefined one is a startup error. It is meant for secrets.
+#   - `params` are JSON Merge Patches applied to the client's request body,
+#     facade params first, then the winning candidate's: objects merge key by
+#     key, scalars and arrays replace, and null deletes the key. They override
+#     the client; they are not defaults.
 
 server:
   listen: 0.0.0.0:8088
-  # Optional inbound auth. Omit to accept unauthenticated requests.
+  # Without apiKeys, every request is accepted. With them, a client needs one
+  # of these keys, and its name appears in the log.
   # apiKeys:
   #   - name: openWebUi
   #     key: ${GATEWAY_KEY_OPEN_WEBUI}
-  # unknownKeys: reject             # reject | allow (accept and log as "unknown" with a fingerprint)
-  targetHeader: X-Gateway-Target    # response header naming the backend model chosen
+  # unknownKeys: reject             # or allow: accept an unlisted key, logged by fingerprint
+  targetHeader: X-Gateway-Target    # response header naming the model that answered
 
 logging:
   level: info                       # debug | info | warning | error
-  logSelection: true                # one line per request: virtual model, candidates checked, winner, reason
+  logSelection: true                # one line per request: facade, candidates checked, winner, reason
 
+# `vars` is ignored by the gateway. It holds YAML anchors that the entries
+# below reference explicitly, so each facade still shows everything it uses.
 vars:
+  # Qwen3-family chat templates read this flag; other models ignore it.
   noThinking: &noThinking
     chat_template_kwargs: { enable_thinking: false }
 
+  # Background tasks need short answers. `think` is a flag Open WebUI sends in
+  # Ollama's style; llama-server ignores it, so it is removed rather than sent on.
   taskLimits: &taskLimits
     max_tokens: 1000
-    think: null                     # Open WebUI's Ollama-style flag; llama-server ignores it
+    think: null
 
 backends:
   llamaSwap:
     type: llamaSwap
     baseUrl: http://ai-llama-swap:8080
     # apiKey: ${LLAMA_SWAP_API_KEY}
-    # passthroughAuth: true         # chat requests carry the client's own key; apiKey stays for state calls
-    stateCacheSeconds: 2            # cache of GET /running; only models in state "ready" count as loaded
-    stateTimeoutSeconds: 10         # timeout for /running and /v1/models calls (default 10)
+    # passthroughAuth: true         # completion requests carry the client's own key instead
+    stateCacheSeconds: 2            # how long to reuse GET /running between requests
+    stateTimeoutSeconds: 10         # limit for the /running and /v1/models calls
+    listRetrySeconds: 30            # if it was down at startup, how often to ask for its models again
     connectTimeoutSeconds: 5
-    requestTimeoutSeconds: 180      # covers a cold load of a loadIfNone candidate
+    requestTimeoutSeconds: 180      # long enough for a cold load of a loadIfNone candidate
 
-  # ollama:                         # same keys; state from GET /api/ps, plus loads the gateway itself started
+  # An Ollama server takes the same keys. Its candidates use the full
+  # name:tag IDs that `ollama list` shows, such as llama3:latest.
+  # ollama:
   #   type: ollama
   #   baseUrl: http://ollama:11434
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
-  # Ollama candidates use full name:tag IDs, e.g. llama3:latest, not llama3.
 
-  # openWebUi:                      # runs each chat through Open WebUI, so its tools run server-side
+  # An Open WebUI backend runs each request through Open WebUI's own chat
+  # flow, so Open WebUI's tools run on its server and any client gets them.
+  # openWebUi:
   #   type: openWebUi
   #   baseUrl: http://open-webui:8080
-  #   apiKey: ${OPEN_WEBUI_API_KEY} # the account's permissions decide the built-in tools
-  #   stateCacheSeconds: 2          # cache of GET /api/models?refresh=true
+  #   apiKey: ${OPEN_WEBUI_API_KEY} # this account's permissions decide the built-in tools
+  #   passthroughAuth: true         # each caller acts as their own Open WebUI user, with their
+  #                                 # own memories and chats; apiKey stays for state calls
+  #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
   #   chats: delete                 # delete | archive | keep the chat each request creates
-  #   pollIntervalSeconds: 0.25
-  #   llamaSwap: { backend: llamaSwap }  # exact state for Open WebUI's llama-swap models
-  # Tools are params on the virtual model, e.g.
-  #   params: { features: { web_search: true }, tool_ids: [...], params: { think: false } }
+  #   pollIntervalSeconds: 0.25     # how often to read the answer while it is generated
+  #   # Open WebUI reports load state precisely only for Ollama connections. For
+  #   # an OpenAI-compatible connection it passes on that server's own model
+  #   # list, and llama-swap's says "loaded" even while a model is starting or
+  #   # stopping. If Open WebUI uses the same llama-swap as the backend above,
+  #   # this reads those models' state from llama-swap directly instead. Add
+  #   # prefixId if Open WebUI's connection prefixes the model IDs.
+  #   llamaSwap: { backend: llamaSwap }
 
 models:
-  # Open WebUI background tasks: titles, tags, follow-ups, query generation.
-  # Never causes an eviction unless nothing above the last candidate is loaded.
+  # Open WebUI runs titles, tags, follow-ups and search queries on a task
+  # model. Pointing it at this facade keeps those tasks on whichever LLM is
+  # already loaded, with thinking off, instead of loading a model for them.
+  #
+  # Candidates are tried in order: the first one loaded wins; if none is
+  # loaded, the first one still loading; if none is loading either, the
+  # loadIfNone candidate, which the backend then loads. If nothing qualifies,
+  # the request gets 503 and Open WebUI skips the task.
   task-monkey:
     backend: llamaSwap
     description: Background tasks on whichever LLM is already loaded, thinking off
     params: *taskLimits
     candidates:
-      # The first ready candidate (per /running) wins. If none is ready, the first one
-      # still starting wins and the request waits for it. If none is starting either,
-      # the first loadIfNone: true candidate wins, wherever it is in the list, and is loaded.
-      # `*` globs match against loaded model IDs; the concrete matched ID is forwarded.
-      # llama-swap aliases (presets) may be listed too; an alias is loaded when its base
-      # model is, but llama-swap then applies the preset's params over the gateway's.
-      - model: qwen3.6-35b-a3b:q8_0          # daily (always present in daily)
+      - model: qwen3.6-35b-a3b:q8_0
         params: *noThinking
-      - model: qwen3.8-flash-next:iq3_s      # coding
+      - model: qwen3.8-flash-next:iq3_s
         params: *noThinking
-      - model: qwen3.8-27b:*                 # daily Q6_K or a testing quant
+      - model: qwen3.8-27b:*                 # a pattern: whichever quant of this model is loaded
         params: *noThinking
-      - model: qwen2.5-coder-3b:q8_0         # non-thinking; no kwargs needed
-        loadIfNone: true                    # medium/large with nothing loaded: load the 3B
-                                             # (evicts nothing in large; clears medium's image models)
-    # With no loadIfNone candidate, an unmatched request gets 503 and
-    # Open WebUI skips the task.
+      - model: qwen2.5-coder-3b:q8_0         # small and quick to load, and doesn't think
+        loadIfNone: true
 
-  # Home Assistant voice assistant: always answers on whatever is loaded, without a swap.
-  # Each model family defines an `:Assistant` preset in llama-swap (fast, thinking off,
-  # tuned for voice), and the pattern picks whichever one is loaded. No params here,
-  # so the preset's own settings apply unchanged.
+  # A voice assistant needs a fast, non-thinking model whatever else is
+  # loaded. Here each model family has an :Assistant preset in llama-swap, and
+  # the pattern picks whichever one is loaded. A preset carries its own
+  # params, and llama-swap applies them after the gateway's, so this candidate
+  # sets none.
   assistant:
     backend: llamaSwap
-    description: Home Assistant voice assistant on whichever model is loaded
+    description: Voice assistant on whichever model is loaded
     candidates:
       - model: "*:Assistant"                 # quoted: a leading * is YAML alias syntax
-      - model: qwen2.5-coder-3b:q8_0         # nothing with an Assistant preset is loaded
+      - model: qwen2.5-coder-3b:q8_0         # loaded only if no Assistant preset is
         params: *noThinking
         loadIfNone: true
+
+  # With the openWebUi backend above enabled, this facade gives any client
+  # Open WebUI's web search and memories. Tools and features are fields of
+  # Open WebUI's request, so they are set as params. Open WebUI's request has
+  # its own `params` field too, for model options, hence the nested params.
+  # The candidate is a model as Open WebUI names it; it can be a facade of
+  # this same gateway, such as task-monkey above.
+  # researcher:
+  #   backend: openWebUi
+  #   description: Assistant with web search and memory
+  #   params:
+  #     features: { web_search: true, memory: true }
+  #     # tool_ids: [server:mcp:home-assistant]   # tool servers connected to Open WebUI
+  #     params: { think: false }
+  #   candidates:
+  #     - model: task-monkey
+  #       loadIfNone: true

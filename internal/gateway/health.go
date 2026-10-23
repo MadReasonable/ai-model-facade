@@ -14,7 +14,7 @@ import (
 func HealthURL(listen string) (string, error) {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		return "", fmt.Errorf("server.listen %q: %w", listen, err)
+		return "", fmt.Errorf("server.listen '%s': %w", listen, err)
 	}
 	switch host {
 	case "", "0.0.0.0":

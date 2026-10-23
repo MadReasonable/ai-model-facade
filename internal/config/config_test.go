@@ -106,7 +106,7 @@ func TestDecodeStrictNested(t *testing.T) {
 	}
 	var e entry
 	err := DecodeStrict(doc.Content[0], &e)
-	if err == nil || !strings.Contains(err.Error(), `line 5: unknown key "modl"`) {
+	if err == nil || !strings.Contains(err.Error(), `line 5: unknown key 'modl'`) {
 		t.Errorf("got %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestDecodeStrictFollowsAnchorsAndMerges(t *testing.T) {
 	}
 	var r root
 	err := DecodeStrict(doc.Content[0], &r)
-	if err == nil || !strings.Contains(err.Error(), `unknown key "b"`) {
+	if err == nil || !strings.Contains(err.Error(), `unknown key 'b'`) {
 		t.Errorf("got %v", err)
 	}
 }
@@ -151,14 +151,14 @@ func TestDecodeStrictInlineStruct(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("a: 1\nc: 3"), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key "c"`) {
+	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key 'c'`) {
 		t.Errorf("got %v", err)
 	}
 	// The inline field's own name must not be accepted as a key.
 	if err := yaml.Unmarshal([]byte("common: {a: 1}"), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key "common"`) {
+	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key 'common'`) {
 		t.Errorf("got %v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestDecodeStrictInlineMap(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("b: 1\nanything: {y: 2}"), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key "y"`) {
+	if err := DecodeStrict(doc.Content[0], &e); err == nil || !strings.Contains(err.Error(), `unknown key 'y'`) {
 		t.Errorf("got %v", err)
 	}
 }

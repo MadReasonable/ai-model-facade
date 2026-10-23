@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,7 @@ type Config struct {
 	PassthroughAuth       bool    `yaml:"passthroughAuth"` // chat requests carry the client's own Authorization
 	StateCacheSeconds     float64 `yaml:"stateCacheSeconds"`
 	StateTimeoutSeconds   float64 `yaml:"stateTimeoutSeconds"` // state and model-list calls; default 10
+	ListRetrySeconds      float64 `yaml:"listRetrySeconds"`    // asking again for the models of a backend that couldn't be listed; default 30
 	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds"`
 	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds"` // until response headers arrive
 }
@@ -41,12 +44,16 @@ type Client struct {
 	apiKey       string
 	passthrough  bool
 	stateTimeout time.Duration
+	listRetry    time.Duration
 	client       *http.Client
 }
 
 func New(c Config) (*Client, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("baseUrl is required")
+	}
+	if c.ListRetrySeconds < 0 {
+		return nil, fmt.Errorf("listRetrySeconds must not be negative")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: seconds(c.ConnectTimeoutSeconds)}).DialContext
@@ -56,13 +63,24 @@ func New(c Config) (*Client, error) {
 	if stateTimeout == 0 {
 		stateTimeout = 10 * time.Second
 	}
+	listRetry := seconds(c.ListRetrySeconds)
+	if listRetry == 0 {
+		listRetry = 30 * time.Second
+	}
 	return &Client{
 		baseURL:      strings.TrimRight(c.BaseURL, "/"),
 		apiKey:       c.APIKey,
 		passthrough:  c.PassthroughAuth,
 		stateTimeout: stateTimeout,
+		listRetry:    listRetry,
 		client:       &http.Client{Transport: transport},
 	}, nil
+}
+
+// ListRetry is how often the gateway asks this backend for its models again
+// after it couldn't be listed, to run the checks that need them.
+func (c *Client) ListRetry() time.Duration {
+	return c.listRetry
 }
 
 func seconds(s float64) time.Duration {
@@ -115,7 +133,28 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, accep
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
-	return c.client.Do(req)
+	resp, err := c.client.Do(req)
+	return resp, plainURLError(err)
+}
+
+// urlError is a *url.Error reworded with the URL in single quotes. Go's own
+// formatting double-quotes it, which logs and JSON bodies then escape.
+type urlError struct {
+	op, url string
+	err     error
+}
+
+func (e *urlError) Error() string { return e.op + " '" + e.url + "': " + e.err.Error() }
+func (e *urlError) Unwrap() error { return e.err }
+
+// plainURLError rewords a *url.Error from the HTTP client; the cause stays
+// wrapped, so errors.Is still finds timeouts and cancellations.
+func plainURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	return &urlError{op: strings.ToUpper(ue.Op), url: ue.URL, err: ue.Err}
 }
 
 // ReadBody reads and closes a response body, refusing one over the size cap.
@@ -153,7 +192,7 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return plainURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

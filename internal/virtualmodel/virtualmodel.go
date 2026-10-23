@@ -55,16 +55,23 @@ type Handler interface {
 // Env is what types need from the rest of the config while building.
 type Env struct {
 	Backends map[string]backend.Backend
-	// Catalog returns a backend's listed models, fetched once per backend.
-	Catalog func(ctx context.Context, backendName string) (*backend.Catalog, error)
-	Log     *slog.Logger
+	// Catalogs holds each backend's listed models, fetched once at startup. A
+	// backend that couldn't be listed has an Unavailable catalog, already
+	// warned about.
+	Catalogs map[string]*backend.Catalog
+	// Check runs a check against model lists now, or, if a backend it needs
+	// couldn't be listed, once that backend answers. Its warnings are problems
+	// that depend on a backend being up and current, such as a candidate ID
+	// it doesn't list: serve starts anyway, check fails.
+	Check func(backend.ListingCheck)
+	Log   *slog.Logger
 }
 
 // Build validates an entry and returns its handler.
-func Build(ctx context.Context, entry config.Entry, env Env) (Handler, error) {
+func Build(entry config.Entry, env Env) (Handler, error) {
 	switch entry.Type {
 	case "", "candidates":
-		return newCandidates(ctx, entry, env)
+		return newCandidates(entry, env)
 	}
-	return nil, fmt.Errorf("unknown type %q", entry.Type)
+	return nil, fmt.Errorf("unknown type '%s'", entry.Type)
 }

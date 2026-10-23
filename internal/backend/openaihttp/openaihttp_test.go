@@ -2,6 +2,9 @@ package openaihttp
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,5 +81,24 @@ func TestInvalidateDuringRefresh(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("got %d fetches", calls.Load())
+	}
+}
+
+// HTTP client errors name the URL in single quotes, not Go's double quotes,
+// which logs and JSON bodies would escape; the cause stays inspectable.
+func TestURLErrorWording(t *testing.T) {
+	c, err := New(Config{BaseURL: "http://127.0.0.1:1", StateTimeoutSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.GetJSON(context.Background(), "/v1/models", &struct{}{})
+	if err == nil || !strings.HasPrefix(err.Error(), "GET 'http://127.0.0.1:1/v1/models': ") || strings.Contains(err.Error(), `"`) {
+		t.Errorf("got %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = c.Do(ctx, http.MethodPost, "/v1/chat/completions", []byte(`{}`), "", backend.Client{})
+	if !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "POST '") {
+		t.Errorf("cancelled: got %v", err)
 	}
 }

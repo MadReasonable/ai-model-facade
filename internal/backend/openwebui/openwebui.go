@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -50,12 +51,15 @@ type LlamaSwapConfig struct {
 }
 
 type Backend struct {
-	*openaihttp.Client // its Chat is shadowed by the chat flow below
+	*openaihttp.Client        // its Chat is shadowed by the chat flow below
+	name               string // its entry under backends
 	state              *openaihttp.StateCache
 	chats              string
 	poll               time.Duration
 	llamaSwapConfig    *LlamaSwapConfig
-	llamaSwap          *llamaswap.Backend // set by Link
+	llamaSwap          *llamaswap.Backend            // set by Link
+	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkPrefixes
+	swapDown           atomic.Bool                   // the llamaSwap backend's last state read failed
 	log                *slog.Logger
 }
 
@@ -71,7 +75,7 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 		c.Chats = "delete"
 	case "delete", "archive", "keep":
 	default:
-		return nil, fmt.Errorf("chats must be delete, archive or keep, not %q", c.Chats)
+		return nil, fmt.Errorf("chats must be delete, archive or keep, not '%s'", c.Chats)
 	}
 	if c.PollIntervalSeconds < 0 {
 		return nil, fmt.Errorf("pollIntervalSeconds must not be negative")
@@ -87,15 +91,15 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{Client: client, chats: c.Chats, poll: poll, llamaSwapConfig: c.LlamaSwap, log: log}
+	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, llamaSwapConfig: c.LlamaSwap, log: log}
 	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
 	return b, nil
 }
 
-// Link resolves the llamaSwap block once every backend exists, and checks
-// that each llama-swap model Open WebUI lists, prefix removed, is listed by
-// that backend: a wrong prefix or the wrong llama-swap fails at startup.
-func (b *Backend) Link(ctx context.Context, backends map[string]backend.Backend) error {
+// Link resolves the llamaSwap block once every backend exists; naming a
+// backend that isn't a llamaSwap one fails. It then asks for the prefix check
+// (see checkPrefixes), which runs once both backends have been listed.
+func (b *Backend) Link(backends map[string]backend.Backend, check func(backend.ListingCheck)) error {
 	if b.llamaSwapConfig == nil {
 		return nil
 	}
@@ -103,30 +107,34 @@ func (b *Backend) Link(ctx context.Context, backends map[string]backend.Backend)
 	ls, ok := backends[name].(*llamaswap.Backend)
 	if !ok {
 		if backends[name] == nil {
-			return fmt.Errorf("llamaSwap.backend %q is not defined", name)
+			return fmt.Errorf("llamaSwap.backend '%s' is not defined", name)
 		}
-		return fmt.Errorf("llamaSwap.backend %q is not a llamaSwap backend", name)
+		return fmt.Errorf("llamaSwap.backend '%s' is not a llamaSwap backend", name)
 	}
-	listed, err := ls.ListModels(ctx)
-	if err != nil {
-		return fmt.Errorf("llamaSwap.backend %q: listing models: %w", name, err)
-	}
-	catalog := backend.NewCatalog(listed)
-	models, err := b.models(ctx)
-	if err != nil {
-		return fmt.Errorf("listing models: %w", err)
-	}
+	b.llamaSwap = ls
+	check(backend.ListingCheck{Backends: []string{b.name, name}, Run: func(catalogs map[string]*backend.Catalog, warn func(error)) {
+		// Listing this backend stored what Open WebUI listed, entries the
+		// catalog doesn't keep.
+		if models := b.listed.Load(); models != nil {
+			b.checkPrefixes(*models, catalogs[name], func(err error) { warn(fmt.Errorf("backends.%s: %w", b.name, err)) })
+		}
+	}})
+	return nil
+}
+
+// checkPrefixes checks that each llama-swap model Open WebUI lists, prefix
+// removed, is listed by the llamaSwap backend. A mismatch is a config error
+// that never recovers by itself: those models are never found among
+// llama-swap's running models, so they read as unloaded.
+func (b *Backend) checkPrefixes(models []listedModel, catalog *backend.Catalog, warn func(error)) {
 	for _, m := range models {
 		if !m.isLlamaSwap() {
 			continue
 		}
-		id, ok := b.llamaSwapID(m.ID)
-		if !ok || !catalog.Contains(id) {
-			return fmt.Errorf("Open WebUI model %q is a llama-swap model, but %q is not listed by llamaSwap.backend %q; check llamaSwap.prefixId", m.ID, id, name)
+		if id, ok := b.llamaSwapID(m.ID); !ok || !catalog.Contains(id) {
+			warn(fmt.Errorf("Open WebUI model '%s' is a llama-swap model, but '%s' is not listed by llamaSwap.backend '%s', so it never counts as loaded; check llamaSwap.prefixId", m.ID, id, b.llamaSwapConfig.Backend))
 		}
 	}
-	b.llamaSwap = ls
-	return nil
 }
 
 // llamaSwapID turns an Open WebUI model ID into the llama-swap ID it stands
@@ -218,11 +226,15 @@ func rootOf(m listedModel, byID map[string]listedModel) string {
 	return root.ID
 }
 
+// ListModels lists the models with workspace models folded in as aliases. It
+// keeps what Open WebUI listed for checkPrefixes, which needs the entries'
+// meta.
 func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	models, err := b.models(ctx)
 	if err != nil {
 		return nil, err
 	}
+	b.listed.Store(&models)
 	bases, aliases := group(models)
 	infos := make([]backend.ModelInfo, 0, len(bases))
 	for _, m := range bases {
@@ -261,12 +273,7 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var swapStates map[string]modelState
-	if b.llamaSwap != nil {
-		if swapStates, err = b.llamaSwapStates(ctx); err != nil {
-			return nil, err
-		}
-	}
+	swapStates := b.swapStates(ctx)
 	bases, aliases := group(models)
 	var infos []backend.ModelInfo
 	for _, m := range bases {
@@ -323,11 +330,32 @@ func (b *Backend) stateOf(m listedModel, swapStates map[string]modelState) model
 	return unknown
 }
 
+// swapStates returns the llamaSwap backend's states, or nil to read
+// llama-swap's own `status` from Open WebUI's list instead, as if the
+// llamaSwap block weren't set: when the block isn't set, or the backend can't
+// be reached. Going down and coming back are each logged once.
+func (b *Backend) swapStates(ctx context.Context) map[string]modelState {
+	if b.llamaSwap == nil {
+		return nil
+	}
+	states, err := b.llamaSwapStates(ctx)
+	if err != nil {
+		if !b.swapDown.Swap(true) {
+			b.log.Warn(fmt.Sprintf("%v; using llama-swap's status as Open WebUI reports it until it answers", err))
+		}
+		return nil
+	}
+	if b.swapDown.Swap(false) {
+		b.log.Info(fmt.Sprintf("llamaSwap.backend '%s' answers again; using its state", b.llamaSwapConfig.Backend))
+	}
+	return states
+}
+
 // llamaSwapStates maps each running llama-swap model and alias to its state.
 func (b *Backend) llamaSwapStates(ctx context.Context) (map[string]modelState, error) {
 	loaded, err := b.llamaSwap.LoadedModels(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("llamaSwap.backend %q: %w", b.llamaSwapConfig.Backend, err)
+		return nil, fmt.Errorf("llamaSwap.backend '%s': %w", b.llamaSwapConfig.Backend, err)
 	}
 	states := map[string]modelState{}
 	for _, m := range loaded {
@@ -343,7 +371,8 @@ func (b *Backend) llamaSwapStates(ctx context.Context) (map[string]modelState, e
 }
 
 // Chat runs Open WebUI's chat flow for a chat completion. Open WebUI has no
-// legacy completions endpoint.
+// legacy completions endpoint. The chat is cleaned up in the background once
+// the result is known, so the response doesn't wait on that call.
 func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
 	if req.Endpoint != backend.ChatCompletions {
 		return backend.ChatResult{}, fmt.Errorf("Open WebUI serves only %s, not %s", backend.ChatCompletions, req.Endpoint)
@@ -359,13 +388,13 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		return backend.ChatResult{}, err
 	}
 	if resp, err := r.start(ctx, req); err != nil || resp != nil {
-		r.cleanup()
+		go r.cleanup()
 		return backend.ChatResult{Response: resp}, err
 	}
 	if req.Stream {
 		return backend.ChatResult{Stream: r.stream(ctx, gjson.GetBytes(req.Body, "stream_options.include_usage").Bool())}, nil
 	}
-	defer r.cleanup()
+	defer func() { go r.cleanup() }()
 	msg, err := r.wait(ctx, nil)
 	if err != nil {
 		return backend.ChatResult{}, err
@@ -635,13 +664,15 @@ func (r *run) chunk(delta map[string]any, finish any) []byte {
 
 // stream polls in the background and turns each growth of the message into
 // a chunk. Open WebUI only ever appends to the content while a task runs; a
-// snapshot that doesn't extend what was sent waits for one that does.
+// snapshot that doesn't extend what was sent waits for one that does. The
+// chat is cleaned up after the stream has ended, so the client's response
+// doesn't wait on that call.
 func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &chunkStream{events: make(chan streamEvent), cancel: cancel, done: make(chan struct{})}
 	go func() {
-		defer close(s.done)
 		defer r.cleanup()
+		defer close(s.done)
 		defer close(s.events)
 		send := func(data []byte) error {
 			select {
@@ -703,8 +734,8 @@ func (s *chunkStream) Next() ([]byte, error) {
 	return ev.data, ev.err
 }
 
-// Close stops polling (and the task, if it is still running) and waits for
-// the chat's cleanup.
+// Close stops polling (and the task, if it is still running). The chat's
+// cleanup follows in the background; Close doesn't wait for it.
 func (s *chunkStream) Close() error {
 	s.cancel()
 	<-s.done

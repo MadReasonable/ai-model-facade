@@ -28,6 +28,7 @@ type live struct {
 func NewLive(g *Gateway, log *slog.Logger) *Live {
 	l := &Live{log: log}
 	l.current.Store(&live{gateway: g, handler: g.Handler(log)})
+	g.start(log)
 	return l
 }
 
@@ -48,13 +49,15 @@ func (l *Live) Reload(ctx context.Context, cfg *config.Config) (*Gateway, error)
 	defer l.mu.Unlock()
 	old := l.current.Load().gateway
 	if cfg.Server.Listen != old.Config.Server.Listen {
-		return nil, fmt.Errorf("server.listen changed from %q to %q; restart to apply", old.Config.Server.Listen, cfg.Server.Listen)
+		return nil, fmt.Errorf("server.listen changed from '%s' to '%s'; restart to apply", old.Config.Server.Listen, cfg.Server.Listen)
 	}
 	g, err := Build(ctx, cfg, l.log)
 	if err != nil {
 		return nil, err
 	}
 	l.current.Store(&live{gateway: g, handler: g.Handler(l.log)})
+	g.start(l.log)
+	old.stop()
 	old.closeIdleConnections()
 	return g, nil
 }

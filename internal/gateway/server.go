@@ -150,7 +150,7 @@ func (s *server) getModel(w http.ResponseWriter, r *http.Request, client backend
 			return
 		}
 	}
-	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model %q does not exist", id))
+	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
 }
 
 // completions serves one completion endpoint. Chat and legacy completions
@@ -187,14 +187,15 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		return
 	}
 	if key := duplicateKey(parsed); key != "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key %q", key))
+		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key '%s'", key))
 		return
 	}
 	name := gjson.GetBytes(body, "model").String()
-	route, looped := takeRoute(parsed)
+	hop := instanceID + "/" + name
+	route, looped := takeRoute(parsed, hop)
 	if looped {
 		s.log.Warn("routing loop", "model", name, "route", route, "status", http.StatusLoopDetected)
-		writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for %q has already passed through this gateway", name))
+		writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for '%s' has already passed through this virtual model", name))
 		return
 	}
 	if parsed.Get(backend.RouteField).Exists() {
@@ -204,11 +205,11 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 			return
 		}
 	}
-	client.Route = append(route, instanceID)
+	client.Route = append(route, hop)
 	handler := s.models[name]
 	if handler == nil {
 		s.log.Warn("unknown model", "model", name, "status", http.StatusNotFound)
-		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model %q does not exist", name))
+		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
 		return
 	}
 
@@ -240,9 +241,6 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	attrs := []any{"model", name, "checked", res.Checked, "winner", res.Target, "reason", res.Reason, "status", status, "duration", time.Since(start).Round(time.Millisecond)}
 	if endpoint != backend.ChatCompletions {
 		attrs = append(attrs, "endpoint", endpoint)
-	}
-	if res.AliasOf != "" {
-		attrs = append(attrs, "aliasOf", res.AliasOf)
 	}
 	if res.Backend != "" {
 		attrs = append(attrs, "backend", res.Backend)
@@ -315,20 +313,23 @@ func streamErrorEvent(err error) []byte {
 	return event
 }
 
-// instanceID identifies this gateway process in backend.RouteField. It is
-// per process, not per config, so it survives a reload.
+// instanceID identifies this gateway process in backend.RouteField, where
+// each hop is "<instanceID>/<virtual model>". It is per process, not per
+// config, so it survives a reload.
 var instanceID = func() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }()
 
-// takeRoute returns the gateways a request has already passed through, and
-// whether this one is among them.
-func takeRoute(body gjson.Result) (route []string, looped bool) {
-	for _, id := range body.Get(backend.RouteField).Array() {
-		route = append(route, id.String())
-		if id.String() == instanceID {
+// takeRoute returns the hops a request has already made, and whether hop is
+// among them. Passing through the same gateway twice is fine (one virtual
+// model of it can be a candidate of another, via Open WebUI); reaching the
+// same virtual model of the same gateway again is a loop.
+func takeRoute(body gjson.Result, hop string) (route []string, looped bool) {
+	for _, h := range body.Get(backend.RouteField).Array() {
+		route = append(route, h.String())
+		if h.String() == hop {
 			looped = true
 		}
 	}

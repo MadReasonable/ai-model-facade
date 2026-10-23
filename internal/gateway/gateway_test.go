@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -687,11 +688,13 @@ func TestMixedPassthroughWarning(t *testing.T) {
 func TestRouteField(t *testing.T) {
 	swap := &fakeSwap{loaded: []string{"qwen3.6-35b-a3b:q8_0"}}
 	srv := newGateway(t, swap)
-	resp, body := post(t, srv, "secret", `{"model":"task","messages":[],"ai_model_facade_route":["elsewhere","`+instanceID+`"]}`)
+	resp, body := post(t, srv, "secret", `{"model":"task","messages":[],"ai_model_facade_route":["elsewhere/x","`+instanceID+`/task"]}`)
 	if resp.StatusCode != http.StatusLoopDetected || !strings.Contains(body, "loop_detected") || swap.lastBody != "" {
 		t.Errorf("loop: got %d %s; backend saw %q", resp.StatusCode, body, swap.lastBody)
 	}
-	resp, body = post(t, srv, "secret", `{"model":"task","ai_model_facade_route":["elsewhere"],"messages":[]}`)
+	// This gateway's other virtual model on the route is not a loop: one
+	// virtual model can be another's candidate through Open WebUI.
+	resp, body = post(t, srv, "secret", `{"model":"task","ai_model_facade_route":["elsewhere/x","`+instanceID+`/Ava"],"messages":[]}`)
 	if resp.StatusCode != http.StatusOK || strings.Contains(swap.lastBody, "ai_model_facade_route") || !strings.HasPrefix(swap.lastBody, `{"model":"qwen3.6-35b-a3b:q8_0","messages":[]`) {
 		t.Errorf("chain: got %d %s; backend saw %s", resp.StatusCode, body, swap.lastBody)
 	}
@@ -753,21 +756,31 @@ models:
 	}
 }
 
+// A config that is wrong fails to build. What depends on a backend being up
+// and current (listed IDs, a reachable backend) only warns, so a backend
+// that is down or not ready yet doesn't stop the gateway; check reports it.
 func TestBuildValidation(t *testing.T) {
 	backendSrv := httptest.NewServer(&fakeSwap{})
 	defer backendSrv.Close()
-	cases := map[string]struct{ from, to, want string }{
-		"missing exact id":   {"model: qwen2.5-coder-3b:q8_0", "model: qwen9:q1", `"qwen9:q1" is not listed`},
-		"missing tag":        {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b", "did you mean qwen2.5-coder-3b:q8_0?"},
-		"missing tag, many":  {"model: qwen3.8-27b:*", "model: qwen3.8-27b", "did you mean one of qwen3.8-27b:Dreamer, qwen3.8-27b:q6_k?"},
-		"undefined backend":  {"    backend: llamaSwap\n    description", "    backend: nope\n    description", `backend "nope" is not defined`},
-		"unknown model key":  {"    description:", "    descripton:", `unknown key "descripton"`},
-		"unknown cand key":   {"loadIfNone: true", "loadIfNoneed: true", `unknown key "loadIfNoneed"`},
-		"glob not required":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:*", "needs an exact model ID"},
-		"unknown model type": {"    backend: llamaSwap\n    description", "    type: magic\n    backend: llamaSwap\n    description", `unknown type "magic"`},
-		"unknown backend":    {"type: llamaSwap,", "type: vllm,", `unknown type "vllm"`},
-		"no backend at all":  {"    backend: llamaSwap\n    description", "    description", "backend is required, on the model or on the candidate"},
-		"undefined cand bk":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:q8_0\n        backend: nope", `backend "nope" is not defined`},
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	cases := map[string]struct {
+		from, to, want string
+		warning        bool
+	}{
+		"missing exact id":   {"model: qwen2.5-coder-3b:q8_0", "model: qwen9:q1", `'qwen9:q1' is not listed`, true},
+		"missing tag":        {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b", "did you mean qwen2.5-coder-3b:q8_0?", true},
+		"missing tag, many":  {"model: qwen3.8-27b:*", "model: qwen3.8-27b", "did you mean one of qwen3.8-27b:Dreamer, qwen3.8-27b:q6_k?", true},
+		"backend down":       {`baseUrl: "${SWAP_URL}"`, `baseUrl: "` + down.URL + `"`, "backends.llamaSwap: listing models", true},
+		"undefined backend":  {"    backend: llamaSwap\n    description", "    backend: nope\n    description", `backend 'nope' is not defined`, false},
+		"unknown model key":  {"    description:", "    descripton:", `unknown key 'descripton'`, false},
+		"unknown cand key":   {"loadIfNone: true", "loadIfNoneed: true", `unknown key 'loadIfNoneed'`, false},
+		"glob not required":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:*", "needs an exact model ID", false},
+		"unknown model type": {"    backend: llamaSwap\n    description", "    type: magic\n    backend: llamaSwap\n    description", `unknown type 'magic'`, false},
+		"unknown backend":    {"type: llamaSwap,", "type: vllm,", `unknown type 'vllm'`, false},
+		"no backend at all":  {"    backend: llamaSwap\n    description", "    description", "backend is required, on the model or on the candidate", false},
+		"undefined cand bk":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:q8_0\n        backend: nope", `backend 'nope' is not defined`, false},
+		"negative retry":     {`baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", listRetrySeconds: -1`, "listRetrySeconds must not be negative", false},
 	}
 	for name, c := range cases {
 		src := strings.Replace(testConfig, c.from, c.to, 1)
@@ -776,11 +789,132 @@ func TestBuildValidation(t *testing.T) {
 		}
 		vars := map[string]string{"GATEWAY_KEY": "secret", "SWAP_URL": backendSrv.URL}
 		cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { v, ok := vars[n]; return v, ok })
+		var g *Gateway
 		if err == nil {
-			_, err = Build(context.Background(), cfg, discard)
+			g, err = Build(context.Background(), cfg, discard)
 		}
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		if !c.warning {
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: got %v, want error %q", name, err, c.want)
+			}
+			continue
 		}
+		if err != nil {
+			t.Errorf("%s: got error %v, want warning %q", name, err, c.want)
+			continue
+		}
+		if !strings.Contains(fmt.Sprint(g.Warnings), c.want) {
+			t.Errorf("%s: warnings %v, want %q", name, g.Warnings, c.want)
+		}
+	}
+}
+
+// Backends are listed once each, at the same time, so backends that hang
+// cost one stateTimeout together, a backend that answers is still checked,
+// and each one that is down is warned about once.
+func TestBuildListsBackendsOnce(t *testing.T) {
+	var hung atomic.Int32
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hung.Add(1)
+		<-r.Context().Done()
+	}))
+	defer hang.Close()
+	swap := httptest.NewServer(&fakeSwap{})
+	defer swap.Close()
+	src := `
+server: {listen: ":0"}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.3}
+  openWebUi: {type: openWebUi, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.3, llamaSwap: {backend: llamaSwap}}
+  healthy: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
+models:
+  task:
+    backend: healthy
+    candidates: [{model: not-a-model:q1}]
+  tools:
+    backend: openWebUi
+    candidates: [{model: x}]
+`
+	vars := map[string]string{"HANG_URL": hang.URL, "SWAP_URL": swap.URL}
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { v, ok := vars[n]; return v, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 550*time.Millisecond {
+		t.Errorf("took %v", elapsed)
+	}
+	warnings := fmt.Sprint(g.Warnings)
+	if len(g.Warnings) != 3 || strings.Count(warnings, "listing models") != 2 || !strings.Contains(warnings, "'not-a-model:q1' is not listed by backend 'healthy'") {
+		t.Errorf("warnings: %v", g.Warnings)
+	}
+	if hung.Load() != 2 || len(g.pending) != 2 {
+		t.Errorf("%d requests to the hung backends, %d pending checks", hung.Load(), len(g.pending))
+	}
+}
+
+// syncBuffer is a log destination that the background checks and the test
+// can use at the same time.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// Checks against a backend that was down at startup run, once, after it
+// answers.
+func TestPendingChecksRunOnceBackendAnswers(t *testing.T) {
+	var up atomic.Bool
+	swap := &fakeSwap{}
+	backendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !up.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		swap.ServeHTTP(w, r)
+	}))
+	defer backendSrv.Close()
+	unlisted := strings.Replace(testConfig, "model: qwen2.5-coder-3b:q8_0", "model: not-a-model:q1", 1)
+	unlisted = strings.Replace(unlisted, testBackend, `llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", listRetrySeconds: 0.01}`, 1)
+	g, err := Build(context.Background(), parseTestConfig(t, unlisted, backendSrv.URL), discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Warnings) != 1 || !strings.Contains(g.Warnings[0].Error(), "listing models") || len(g.pending) != 3 {
+		t.Fatalf("warnings %v, %d pending checks", g.Warnings, len(g.pending))
+	}
+	// check says the pattern's matches are unknown rather than listing none.
+	var desc bytes.Buffer
+	g.Models[0].Handler.Describe(&desc)
+	if !strings.Contains(desc.String(), "qwen3.8-27b:*\n     base models and aliases: unknown; backend 'llamaSwap' could not be listed\n") || strings.Contains(desc.String(), "aliases: none") {
+		t.Errorf("describe:\n%s", desc.String())
+	}
+	var logs syncBuffer
+	g.start(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer g.stop()
+	time.Sleep(50 * time.Millisecond)
+	up.Store(true)
+	const want = "'not-a-model:q1' is not listed by backend 'llamaSwap'"
+	for deadline := time.Now().Add(2 * time.Second); !strings.Contains(logs.String(), want) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if out := logs.String(); strings.Count(out, want) != 1 || strings.Count(out, "backends.llamaSwap answers") != 1 {
+		t.Errorf("log:\n%s", out)
 	}
 }

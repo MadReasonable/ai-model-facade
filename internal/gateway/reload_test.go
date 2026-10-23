@@ -62,12 +62,25 @@ func TestLiveReload(t *testing.T) {
 	}
 
 	// A config that fails validation leaves the running one in place.
-	bad := strings.Replace(renamed, "model: qwen2.5-coder-3b:q8_0", "model: not-a-model:q1", 1)
-	if _, err := live.Reload(context.Background(), parseTestConfig(t, bad, backendSrv.URL)); err == nil || !strings.Contains(err.Error(), "not-a-model") {
+	bad := strings.Replace(renamed, "loadIfNone: true", "loadIfNoneed: true", 1)
+	if _, err := live.Reload(context.Background(), parseTestConfig(t, bad, backendSrv.URL)); err == nil || !strings.Contains(err.Error(), "loadIfNoneed") {
 		t.Errorf("bad config: got %v", err)
 	}
 	if got := modelIDs(t, srv); got != "renamed" {
 		t.Errorf("after failed reload: %s", got)
+	}
+
+	// A candidate the backend doesn't list yet only warns, and is swapped in.
+	unlisted := strings.Replace(testConfig, "model: qwen2.5-coder-3b:q8_0", "model: not-a-model:q1", 1)
+	g, err = live.Reload(context.Background(), parseTestConfig(t, unlisted, backendSrv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Warnings) != 1 || !strings.Contains(g.Warnings[0].Error(), "not-a-model") {
+		t.Errorf("unlisted: warnings %v", g.Warnings)
+	}
+	if got := modelIDs(t, srv); got != "task" {
+		t.Errorf("after unlisted reload: %s", got)
 	}
 
 	// server.listen can't change without a restart.

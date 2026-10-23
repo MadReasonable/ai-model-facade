@@ -48,7 +48,7 @@ func checkKnown(n *yaml.Node, t reflect.Type) error {
 			ft, ok := fields.fields[k.Value]
 			if !ok {
 				if fields.inlineMap == nil {
-					return fmt.Errorf("line %d: unknown key %q", k.Line, k.Value)
+					return fmt.Errorf("line %d: unknown key '%s'", k.Line, k.Value)
 				}
 				ft = fields.inlineMap // an inline map catches any leftover key
 			}

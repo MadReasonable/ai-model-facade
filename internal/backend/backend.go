@@ -23,7 +23,10 @@ type ModelInfo struct {
 type Catalog struct {
 	Models  []ModelInfo       // base models, as listed
 	AliasOf map[string]string // alias ID -> base model ID
-	byID    map[string]ModelInfo
+	// Unavailable marks an empty catalog for a backend that couldn't be
+	// listed, so nothing can be checked against it.
+	Unavailable bool
+	byID        map[string]ModelInfo
 }
 
 func NewCatalog(models []ModelInfo) *Catalog {
@@ -68,6 +71,15 @@ func (c *Catalog) Model(id string) (ModelInfo, bool) {
 	return m, ok
 }
 
+// ListingCheck is a check against the model lists of some backends, such as
+// a candidate ID that its backend must list. It depends on those backends
+// being up and current, so it runs once every one of them has been listed:
+// at startup, or later, once a backend that couldn't be listed answers.
+type ListingCheck struct {
+	Backends []string
+	Run      func(catalogs map[string]*Catalog, warn func(error))
+}
+
 // Client identifies the caller.
 type Client struct {
 	// Name is the matching server.apiKeys entry, "unknown" for an unlisted
@@ -79,14 +91,14 @@ type Client struct {
 	// Authorization is the client's Authorization header, as sent. Only
 	// backends with passthroughAuth forward it; never log it.
 	Authorization string
-	// Route lists the gateways the request has passed through, ending with
-	// this one. Only adapters that forward to something that may be another
-	// gateway (Open WebUI) send it on, as RouteField in the body.
+	// Route lists the hops the request has made, "<gateway ID>/<virtual
+	// model>", ending with this one. Only adapters that forward to something
+	// that may be a gateway (Open WebUI) send it on, as RouteField in the body.
 	Route []string
 }
 
 // RouteField is the request-body key that carries Client.Route between
-// gateways, so a gateway that finds its own ID in it can refuse a routing loop.
+// gateways, so a gateway that finds its own hop in it can refuse a routing loop.
 const RouteField = "ai_model_facade_route"
 
 type noStateWaitKey struct{}

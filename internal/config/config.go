@@ -89,7 +89,7 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 			return nil, fmt.Errorf("server.apiKeys[%d]: name and key are required", i)
 		}
 		if k.Name == UnknownClient {
-			return nil, fmt.Errorf("server.apiKeys[%d]: name %q is reserved for unlisted keys", i, UnknownClient)
+			return nil, fmt.Errorf("server.apiKeys[%d]: name '%s' is reserved for unlisted keys", i, UnknownClient)
 		}
 	}
 	switch cfg.Server.UnknownKeys {
@@ -97,7 +97,7 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 		cfg.Server.UnknownKeys = "reject"
 	case "reject", "allow":
 	default:
-		return nil, fmt.Errorf("server.unknownKeys: %q is not reject or allow", cfg.Server.UnknownKeys)
+		return nil, fmt.Errorf("server.unknownKeys: '%s' is not reject or allow", cfg.Server.UnknownKeys)
 	}
 	return &cfg, nil
 }

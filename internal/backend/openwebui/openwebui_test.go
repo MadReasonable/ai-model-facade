@@ -1,6 +1,7 @@
 package openwebui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +106,21 @@ func (f *fakeWebUI) callsSnapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// callsEndingWith returns the calls once they end with last, or after a
+// deadline: the chat's cleanup happens in the background, after the result
+// is returned or the stream closed.
+func (f *fakeWebUI) callsEndingWith(t *testing.T, last string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		calls := strings.Join(f.callsSnapshot(), ";")
+		if strings.HasSuffix(calls, last) || time.Now().After(deadline) {
+			return calls
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func newBackend(t *testing.T, src string) *Backend {
@@ -209,8 +226,8 @@ func TestLlamaSwapBlock(t *testing.T) {
 {"id":"swap.a:Slacker","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"alias"}}},
 {"id":"swap.b","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}`}
 	b := serve(t, f, ", llamaSwap: {backend: ls, prefixId: swap}")
-	if err := b.Link(context.Background(), map[string]backend.Backend{"ls": ls}); err != nil {
-		t.Fatal(err)
+	if warned, err := link(t, b, map[string]backend.Backend{"ls": ls}); err != nil || warned != nil {
+		t.Fatal(err, warned)
 	}
 	got, err := b.LoadedModels(context.Background())
 	if err != nil {
@@ -221,17 +238,112 @@ func TestLlamaSwapBlock(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 
-	for name, c := range map[string]struct{ extra, want string }{
-		"wrong prefix":     {", llamaSwap: {backend: ls, prefixId: other}", `"swap.a" is a llama-swap model`},
-		"no prefix":        {", llamaSwap: {backend: ls}", `"swap.a" is not listed`},
-		"undefined":        {", llamaSwap: {backend: nope}", `"nope" is not defined`},
-		"not a llama-swap": {", llamaSwap: {backend: other}", "is not a llamaSwap backend"},
+	// A wrong reference fails; models llama-swap doesn't list only warn,
+	// since that depends on both being up and current.
+	for name, c := range map[string]struct {
+		extra, want string
+		fatal       bool
+	}{
+		"wrong prefix":     {", llamaSwap: {backend: ls, prefixId: other}", `'swap.a' is a llama-swap model`, false},
+		"no prefix":        {", llamaSwap: {backend: ls}", `'swap.a' is not listed`, false},
+		"undefined":        {", llamaSwap: {backend: nope}", `'nope' is not defined`, true},
+		"not a llama-swap": {", llamaSwap: {backend: other}", "is not a llamaSwap backend", true},
 	} {
 		b := serve(t, f, c.extra)
-		err := b.Link(context.Background(), map[string]backend.Backend{"ls": ls, "other": b})
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		warned, err := link(t, b, map[string]backend.Backend{"ls": ls, "other": b})
+		got := strings.Join(warned, "; ")
+		if c.fatal && err != nil {
+			got = err.Error()
 		}
+		if (err != nil) != c.fatal || !strings.Contains(got, c.want) {
+			t.Errorf("%s: got error %v, warnings %q; want %q (fatal %v)", name, err, warned, c.want, c.fatal)
+		}
+	}
+}
+
+// link links b and runs the checks it asks for, as the gateway does once
+// every backend has been listed, and returns their warnings.
+func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {
+	t.Helper()
+	var checks []backend.ListingCheck
+	if err := b.Link(backends, func(c backend.ListingCheck) { checks = append(checks, c) }); err != nil {
+		return nil, err
+	}
+	catalogs := map[string]*backend.Catalog{}
+	for name, other := range map[string]backend.Backend{b.name: b, "ls": backends["ls"]} {
+		models, err := other.ListModels(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalogs[name] = backend.NewCatalog(models)
+	}
+	var warned []string
+	for _, c := range checks {
+		c.Run(catalogs, func(err error) { warned = append(warned, err.Error()) })
+	}
+	return warned, nil
+}
+
+// A llamaSwap backend that can't be reached makes llama-swap models fall
+// back to their `status` in Open WebUI's list, as without the block.
+func TestLlamaSwapBlockFallback(t *testing.T) {
+	var up atomic.Bool
+	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !up.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		switch r.URL.Path {
+		case "/running":
+			io.WriteString(w, `{"running":[{"model":"a","state":"starting"}]}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a"}]}`)
+		}
+	}))
+	defer swap.Close()
+	var doc yaml.Node
+	yaml.Unmarshal([]byte(`{type: llamaSwap, baseUrl: "`+swap.URL+`"}`), &doc)
+	ls, err := llamaswap.New(config.Entry{Node: doc.Content[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeWebUI{models: `
+{"id":"a","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}},
+{"id":"b","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}`}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	var logs bytes.Buffer
+	yaml.Unmarshal([]byte(`{type: openWebUi, baseUrl: "`+srv.URL+`", llamaSwap: {backend: ls}}`), &doc)
+	b, err := New(config.Entry{Node: doc.Content[0]}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Link(map[string]backend.Backend{"ls": ls}, func(backend.ListingCheck) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Down: both read as ready from their status.
+	got, err := b.LoadedModels(context.Background())
+	if err != nil || len(got) != 2 || got[0].Starting || got[1].Starting {
+		t.Errorf("down: got %+v, %v", got, err)
+	}
+	if !strings.Contains(logs.String(), "using llama-swap's status as Open WebUI reports it") {
+		t.Errorf("down log:\n%s", logs.String())
+	}
+
+	// Up: exact state, and coming back is logged once.
+	up.Store(true)
+	for range 2 {
+		if got, err = b.LoadedModels(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 1 || got[0].ID != "a" || !got[0].Starting {
+		t.Errorf("up: got %+v", got)
+	}
+	out := logs.String()
+	if strings.Count(out, "answers again") != 1 || strings.Count(out, "using llama-swap's status") != 1 {
+		t.Errorf("up log:\n%s", out)
 	}
 }
 
@@ -281,7 +393,7 @@ func TestChat(t *testing.T) {
 	if !started.Get("stream").Bool() || started.Get("chat_id").String() != "chat-1" || !strings.HasPrefix(started.Get("session_id").String(), "ai-model-facade-") || started.Get("background_tasks.title_generation").Bool() || started.Get(backend.RouteField).Raw != `["gw1","gw2"]` {
 		t.Errorf("started: %s", f.started)
 	}
-	if calls := strings.Join(f.callsSnapshot(), ";"); !strings.HasSuffix(calls, "GET /api/tasks/chat/chat-1;DELETE /api/v1/chats/chat-1") || strings.Contains(calls, "stop") {
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "GET /api/tasks/chat/chat-1;DELETE /api/v1/chats/chat-1") || strings.Contains(calls, "stop") {
 		t.Errorf("calls: %s", calls)
 	}
 }
@@ -321,8 +433,8 @@ func TestChatStream(t *testing.T) {
 	if strings.Join(deltas, "|") != "|Your| name| is Zorblax." || finish != "stop" || usage != "15" {
 		t.Errorf("deltas %q, finish %q, usage %q", deltas, finish, usage)
 	}
-	if calls := f.callsSnapshot(); calls[len(calls)-1] != "DELETE /api/v1/chats/chat-1" {
-		t.Errorf("calls: %v", calls)
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
+		t.Errorf("calls: %s", calls)
 	}
 }
 
@@ -343,8 +455,10 @@ func TestStreamCloseStopsTask(t *testing.T) {
 		close(f.hold)
 	}()
 	res.Stream.Close()
-	calls := strings.Join(f.callsSnapshot(), ";")
-	if !strings.Contains(calls, "POST /api/tasks/chat/chat-1/stop") || !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
+	if calls := strings.Join(f.callsSnapshot(), ";"); !strings.Contains(calls, "POST /api/tasks/chat/chat-1/stop") {
+		t.Errorf("calls after close: %s", calls)
+	}
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
 		t.Errorf("calls: %s", calls)
 	}
 }
@@ -361,8 +475,8 @@ func TestChatErrors(t *testing.T) {
 	if err != nil || res.Response.Status != http.StatusBadRequest || !strings.Contains(string(res.Response.Body), "Model not found") {
 		t.Errorf("refused start: %+v, %v", res.Response, err)
 	}
-	if calls := f.callsSnapshot(); calls[len(calls)-1] != "DELETE /api/v1/chats/chat-1" {
-		t.Errorf("calls: %v", calls)
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
+		t.Errorf("calls: %s", calls)
 	}
 	// Open WebUI has no legacy completions; nothing is created.
 	f = &fakeWebUI{}
@@ -395,8 +509,8 @@ func TestChatsSetting(t *testing.T) {
 		if _, err := chat(t, serve(t, f, ", chats: "+setting), chatBody, false); err != nil {
 			t.Fatal(err)
 		}
-		if calls := f.callsSnapshot(); calls[len(calls)-1] != want {
-			t.Errorf("%s: calls %v", setting, calls)
+		if calls := f.callsEndingWith(t, want); !strings.HasSuffix(calls, want) {
+			t.Errorf("%s: calls %s", setting, calls)
 		}
 	}
 }

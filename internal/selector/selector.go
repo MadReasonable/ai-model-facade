@@ -85,10 +85,10 @@ func (c Candidate) Validate() error {
 		return nil
 	}
 	if _, err := path.Match(c.Model, ""); err != nil {
-		return fmt.Errorf("bad pattern %q: %w", c.Model, err)
+		return fmt.Errorf("bad pattern '%s': %w", c.Model, err)
 	}
 	if c.LoadIfNone {
-		return fmt.Errorf("loadIfNone needs an exact model ID, not pattern %q", c.Model)
+		return fmt.Errorf("loadIfNone needs an exact model ID, not pattern '%s'", c.Model)
 	}
 	return nil
 }
