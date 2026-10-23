@@ -49,6 +49,18 @@ backends:
   #   requestTimeoutSeconds: 180
   # Ollama candidates use full name:tag IDs, e.g. llama3:latest, not llama3.
 
+  # openWebUi:                      # runs each chat through Open WebUI, so its tools run server-side
+  #   type: openWebUi
+  #   baseUrl: http://open-webui:8080
+  #   apiKey: ${OPEN_WEBUI_API_KEY} # the account's permissions decide the built-in tools
+  #   stateCacheSeconds: 2          # cache of GET /api/models?refresh=true
+  #   requestTimeoutSeconds: 180
+  #   chats: delete                 # delete | archive | keep the chat each request creates
+  #   pollIntervalSeconds: 0.25
+  #   llamaSwap: { backend: llamaSwap }  # exact state for Open WebUI's llama-swap models
+  # Tools are params on the virtual model, e.g.
+  #   params: { features: { web_search: true }, tool_ids: [...], params: { think: false } }
+
 models:
   # Open WebUI background tasks: titles, tags, follow-ups, query generation.
   # Never causes an eviction unless nothing above the last candidate is loaded.

@@ -12,6 +12,7 @@ import (
 type fakeBackend struct {
 	loaded   []string
 	starting []string
+	unknown  []string            // state can't be read
 	aliases  map[string][]string // base model ID -> aliases
 	err      error
 }
@@ -31,6 +32,9 @@ func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, er
 	}
 	for _, id := range f.starting {
 		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id], Starting: true})
+	}
+	for _, id := range f.unknown {
+		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id], Unknown: true})
 	}
 	return models, f.err
 }
@@ -227,6 +231,22 @@ func TestNoMatch(t *testing.T) {
 	}
 	if sel.Index != -1 || sel.Reason != "no candidate loaded" || len(sel.Checked) != 2 {
 		t.Errorf("got %+v", sel)
+	}
+}
+
+// A model whose state is unknown selects like one that isn't loaded, but is
+// logged as unknown; it can still win as the loadIfNone fallback.
+func TestUnknownStateSelectsAsNotLoaded(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "u"}, {Model: "w:*"}, {Model: "r"}, {Model: "u", LoadIfNone: true}}}
+	b := &fakeBackend{loaded: []string{"r"}, unknown: []string{"u", "w:1"}}
+	sel, _ := s.Select(context.Background(), nil, b)
+	if sel.Target != "r" || strings.Join(sel.Checked, "; ") != "u: state unknown; w:*: no match loaded; state unknown for w:1; r: loaded" {
+		t.Errorf("got %+v", sel)
+	}
+	b.loaded = nil
+	sel, _ = s.Select(context.Background(), nil, b)
+	if sel.Target != "u" || sel.Reason != "loadIfNone" {
+		t.Errorf("fallback: got %+v", sel)
 	}
 }
 

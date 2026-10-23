@@ -6,7 +6,7 @@ A client asks for a model name that doesn't exist on any backend, such as `task-
 The gateway decides what that name means: it picks a real model from an ordered candidate list, merges in the request parameters you configured, and forwards the request.
 
 > [!NOTE]
-> **Pre-release.** llama-swap and Ollama are the backends so far; an Open WebUI backend is in progress.
+> **Pre-release.** The backends are llama-swap, Ollama and Open WebUI.
 > Config keys may still change before the first release.
 
 ## Why
@@ -172,6 +172,7 @@ Each virtual model has an ordered list of candidates. The gateway walks the whol
 
 A model that is stopping or stopped never counts.
 Ollama's `/api/ps` lists a model only once it has finished loading, so on an Ollama backend the gateway tracks loads itself: a model counts as starting while a request the gateway forwarded is waiting for it to load. A load started by a client that goes straight to Ollama isn't visible until it finishes.
+A model whose state the backend can't report (see [Open WebUI](#open-webui)) counts as not loaded, so only `loadIfNone` can pick it; the log says `state unknown` for it.
 
 - A pattern such as `qwen3.8-27b:*` matches ready (or starting) models, and the matched ID is forwarded. If several match, the first in sorted order wins.
 - A llama-swap alias (a preset such as `qwen3.6-35b:Slacker`) can be a candidate too. It is ready (or starting) whenever its base model is, and is forwarded under the alias ID so llama-swap applies the preset. Patterns prefer base models over aliases, so `qwen3.8-27b:*` picks the quant rather than its `:Dreamer` preset.
@@ -248,8 +249,9 @@ Whenever a model was chosen, the response has an `X-Gateway-Target` header namin
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching `Authorization: Bearer` key. |
 | `404` | The requested model isn't a virtual model. |
 | `413` | The body is over 100 MiB. |
-| `502` | llama-swap couldn't be reached. |
+| `502` | The backend couldn't be reached, or failed the request. |
 | `503` | No candidate is eligible. |
+| `508` | Routing loop: the request has already passed through this gateway, e.g. via Open WebUI back to itself. |
 
 Once a stream has started, its status can't change.
 If the backend fails mid-stream, the gateway sends a final `data: {"error": {...}}` event and closes without `[DONE]`, so clients show an error instead of a silently cut-off reply.
@@ -281,14 +283,14 @@ Unknown keys are startup errors reported with their line number, and so are unde
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap` or `ollama`. Both take the same keys:
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `ollama` or `openWebUi`. All take these keys:
 
 | Key | Description |
 |-----|-------------|
 | `baseUrl` | The backend's address. Required. |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own `Authorization` header (or none). Default `false`. |
-| `stateCacheSeconds` | How long to cache the list of loaded models (llama-swap's `/running`, Ollama's `/api/ps`). Default `0`, which asks on every request. Concurrent requests share one in-flight check either way. |
+| `stateCacheSeconds` | How long to cache the list of loaded models (llama-swap's `/running`, Ollama's `/api/ps`, Open WebUI's `/api/models`). Default `0`, which asks on every request. Concurrent requests share one in-flight check either way. |
 | `stateTimeoutSeconds` | Timeout for the loaded-model and `/v1/models` calls. Default `10`. |
 | `connectTimeoutSeconds` | Connection timeout. Default `0`, no limit. |
 | `requestTimeoutSeconds` | How long to wait for the backend to start responding. Allow for a cold load of a `loadIfNone` candidate; a stream isn't cut off once it has started. Default `0`, no limit. |
@@ -296,6 +298,42 @@ Each entry is a named backend; `type` selects the adapter: `llamaSwap` or `ollam
 Ollama model IDs are the full `name:tag` form that `ollama list` shows, such as `llama3:latest`.
 A candidate without a tag, such as `llama3`, isn't treated as `llama3:latest`; it's a startup error that suggests the tagged IDs Ollama lists.
 Ollama itself ignores `apiKey`, but a proxy in front of it may need one.
+
+#### Open WebUI
+
+An `openWebUi` backend runs each chat completion through Open WebUI's own chat flow, so Open WebUI's tools (tool servers, web search and its other built-in tools) run server-side, and any OpenAI client gets them.
+The gateway creates a chat, starts the completion as Open WebUI's UI would, polls the chat for the answer, and returns it as a normal OpenAI response or stream.
+Open WebUI has no legacy `/v1/completions`; such a request fails with `502`.
+
+| Key | Description |
+|-----|-------------|
+| `chats` | What happens to the chat after each request: `delete` (default), `archive` or `keep`. |
+| `pollIntervalSeconds` | How often to poll the chat while the answer is generated. Default `0.25`. |
+| `llamaSwap` | Optional: `{backend: <name>, prefixId: <prefix>}`. Takes the state of Open WebUI's llama-swap models from that `llamaSwap` backend, which reports models that are starting or stopping exactly. `prefixId` is the Open WebUI connection's prefix, if it has one. Startup fails if a llama-swap model Open WebUI lists isn't listed by that backend. |
+
+Tools and features are request fields, so set them with `params`, and turn thinking off with Open WebUI's own `params` block:
+
+```yaml
+params:
+  features: { web_search: true }
+  tool_ids: [server:mcp:home-assistant]
+  params: { think: false }
+```
+
+Which built-in tools a request gets depends on the permissions of the account behind `apiKey` (or each client's own account, with `passthroughAuth`).
+On small Ollama models, the built-in tools' definitions take about 2,000 tokens of context; raise the model's context through the same `params` block (e.g. `params: { num_ctx: 8192 }`) or the start of the conversation is cut off.
+
+Model IDs are Open WebUI's. Their loaded state comes from Open WebUI's model list:
+
+- Ollama models: whatever Open WebUI reports from Ollama.
+- llama-swap models: llama-swap's `status`, which also says `loaded` while a model is starting or stopping, unless the `llamaSwap` key is set.
+- Virtual models of another ai-model-facade gateway connected to Open WebUI: that gateway's own `current` selection.
+- Workspace models: their base model's state.
+- Anything else: unknown.
+
+The API key needs these Open WebUI endpoints: `/api/models`, `/api/v1/chats/new`, `/api/chat/completions`, `/api/v1/chats/{id}` (`GET` and `DELETE`), `/api/tasks/chat/{id}` and `/api/tasks/chat/{id}/stop`, plus `/api/v1/chats/{id}/archive` with `chats: archive`.
+
+A gateway can be both a client of Open WebUI and one of its connections. A request that comes back to the gateway it started from is refused with `508`.
 
 ### `models`
 

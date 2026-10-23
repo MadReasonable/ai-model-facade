@@ -3,6 +3,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 )
@@ -13,6 +14,9 @@ type ModelInfo struct {
 	// Starting is set by ModelStateProvider for a model that is loading but
 	// not ready yet. A request to it waits for the load to finish.
 	Starting bool
+	// Unknown is set by ModelStateProvider for a model whose state the
+	// backend can't read. It selects like a model that isn't loaded.
+	Unknown bool
 }
 
 // Catalog indexes a backend's model list for validation and display.
@@ -75,7 +79,33 @@ type Client struct {
 	// Authorization is the client's Authorization header, as sent. Only
 	// backends with passthroughAuth forward it; never log it.
 	Authorization string
+	// Route lists the gateways the request has passed through, ending with
+	// this one. Only adapters that forward to something that may be another
+	// gateway (Open WebUI) send it on, as RouteField in the body.
+	Route []string
 }
+
+// RouteField is the request-body key that carries Client.Route between
+// gateways, so a gateway that finds its own ID in it can refuse a routing loop.
+const RouteField = "ai_model_facade_route"
+
+type noStateWaitKey struct{}
+
+// WithoutStateWait marks ctx so that LoadedModels doesn't wait for a state
+// refresh already in flight: it answers from the last cached state, or fails
+// with ErrStateBusy. /v1/models uses it, because building `current` can loop
+// back into this gateway through Open WebUI, and the nested call would
+// otherwise wait on the refresh that is waiting for it.
+func WithoutStateWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noStateWaitKey{}, true)
+}
+
+// StateWaitAllowed reports whether ctx may wait for a refresh in flight.
+func StateWaitAllowed(ctx context.Context) bool {
+	return ctx.Value(noStateWaitKey{}) == nil
+}
+
+var ErrStateBusy = errors.New("backend state refresh already in flight and nothing cached")
 
 // Endpoint is the OpenAI API endpoint a request was made to.
 type Endpoint string
@@ -123,8 +153,9 @@ type Backend interface {
 // ModelStateProvider is an optional backend capability.
 type ModelStateProvider interface {
 	// LoadedModels returns the models that are ready, plus those still
-	// starting with Starting set, each with its aliases. A model that is
-	// stopping or stopped is not returned.
+	// starting with Starting set and those whose state can't be read with
+	// Unknown set, each with its aliases. A model that is stopping or
+	// stopped is not returned.
 	LoadedModels(ctx context.Context) ([]ModelInfo, error)
 }
 

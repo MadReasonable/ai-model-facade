@@ -9,6 +9,44 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 )
 
+// A caller that may not wait gets the last state while a refresh is in
+// flight, or ErrStateBusy before any state was fetched. With no refresh in
+// flight it fetches and waits like anyone else.
+func TestWithoutStateWait(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{}, 1)
+	s := NewStateCache(Config{}, func(ctx context.Context) ([]backend.ModelInfo, error) {
+		calls.Add(1)
+		<-release
+		return []backend.ModelInfo{{ID: "m"}}, nil
+	})
+	noWait := backend.WithoutStateWait(context.Background())
+	first := make(chan error)
+	go func() {
+		_, err := s.LoadedModels(context.Background())
+		first <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if _, err := s.LoadedModels(noWait); err != backend.ErrStateBusy {
+		t.Errorf("before any state: got %v", err)
+	}
+	release <- struct{}{}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	go s.LoadedModels(context.Background()) // stateCacheSeconds 0: refetches
+	time.Sleep(20 * time.Millisecond)
+	if got, err := s.LoadedModels(noWait); err != nil || len(got) != 1 || got[0].ID != "m" {
+		t.Errorf("during refresh: got %+v, %v", got, err)
+	}
+	release <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
+	release <- struct{}{}
+	if got, err := s.LoadedModels(noWait); err != nil || len(got) != 1 || calls.Load() != 3 {
+		t.Errorf("idle: got %+v, %v after %d fetches", got, err, calls.Load())
+	}
+}
+
 // A refresh that started before Invalidate isn't cached, and callers after
 // Invalidate don't join it.
 func TestInvalidateDuringRefresh(t *testing.T) {

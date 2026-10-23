@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
@@ -113,10 +115,12 @@ type currentObject struct {
 }
 
 // modelObject describes m. If the backend's state can't be read, `current`
-// is left out rather than failing the listing.
+// is left out rather than failing the listing. It never waits on a state
+// refresh already in flight, which may be the one asking: Open WebUI's model
+// refresh calls this gateway's /v1/models while this gateway fetches it.
 func (s *server) modelObject(ctx context.Context, m Model) modelObject {
 	obj := modelObject{ID: m.Name, Object: "model", Created: s.started, OwnedBy: "ai-model-facade", Description: m.Handler.Description()}
-	if cur, err := m.Handler.Current(ctx); err == nil {
+	if cur, err := m.Handler.Current(backend.WithoutStateWait(ctx)); err == nil {
 		obj.Current = &currentObject{Model: cur.Model, AliasOf: cur.AliasOf, Reason: cur.Reason}
 	} else {
 		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
@@ -186,6 +190,20 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		return
 	}
 	name := gjson.GetBytes(body, "model").String()
+	route, looped := takeRoute(parsed)
+	if looped {
+		s.log.Warn("routing loop", "model", name, "route", route, "status", http.StatusLoopDetected)
+		writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for %q has already passed through this gateway", name))
+		return
+	}
+	if parsed.Get(backend.RouteField).Exists() {
+		// Only an adapter that forwards to another gateway puts it back.
+		if body, err = sjson.DeleteBytes(body, backend.RouteField); err != nil {
+			writeError(w, http.StatusInternalServerError, "gateway_error", err.Error())
+			return
+		}
+	}
+	client.Route = append(route, instanceID)
 	handler := s.models[name]
 	if handler == nil {
 		s.log.Warn("unknown model", "model", name, "status", http.StatusNotFound)
@@ -291,6 +309,26 @@ func streamErrorEvent(err error) []byte {
 	}
 	event, _ := json.Marshal(errorBody("backend_error", string(data)))
 	return event
+}
+
+// instanceID identifies this gateway process in backend.RouteField. It is
+// per process, not per config, so it survives a reload.
+var instanceID = func() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}()
+
+// takeRoute returns the gateways a request has already passed through, and
+// whether this one is among them.
+func takeRoute(body gjson.Result) (route []string, looped bool) {
+	for _, id := range body.Get(backend.RouteField).Array() {
+		route = append(route, id.String())
+		if id.String() == instanceID {
+			looped = true
+		}
+	}
+	return route, looped
 }
 
 // duplicateKey returns a key that appears more than once in the same object

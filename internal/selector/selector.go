@@ -44,6 +44,7 @@ func IsGlob(model string) bool {
 //  3. otherwise the first LoadIfNone candidate, which the backend loads.
 //
 // Each step walks the whole list, so a LoadIfNone candidate can sit anywhere.
+// A model whose state the backend can't read counts as not loaded.
 // An alias is ready or starting when its base model is. A glob matches base
 // models first, then their aliases, each in sorted order, so `qwen3.8-27b:*`
 // picks the model itself over its `qwen3.8-27b:Dreamer` preset.
@@ -79,15 +80,18 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 		sel.Reason = "backend state unavailable"
 		return sel, err
 	}
-	var readyModels, startingModels []backend.ModelInfo
+	var readyModels, startingModels, unknownModels []backend.ModelInfo
 	for _, m := range loadedModels {
-		if m.Starting {
+		switch {
+		case m.Unknown:
+			unknownModels = append(unknownModels, m)
+		case m.Starting:
 			startingModels = append(startingModels, m)
-		} else {
+		default:
 			readyModels = append(readyModels, m)
 		}
 	}
-	ready, starting := newModelSet(readyModels), newModelSet(startingModels)
+	ready, starting, unknown := newModelSet(readyModels), newModelSet(startingModels), newModelSet(unknownModels)
 	wait := -1     // first starting candidate, used if nothing is ready
 	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
 	var waitID, waitBase string
@@ -99,6 +103,13 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 			sel.Checked = append(sel.Checked, describe(c.Model, id, base, "starting"))
 			if wait < 0 {
 				wait, waitID, waitBase = i, id, base
+			}
+		} else if id, _, ok := unknown.match(c.Model); ok {
+			// Selects like not loaded, but the log shouldn't claim it isn't.
+			if IsGlob(c.Model) {
+				sel.Checked = append(sel.Checked, c.Model+": no match loaded; state unknown for "+id)
+			} else {
+				sel.Checked = append(sel.Checked, c.Model+": state unknown")
 			}
 		} else if IsGlob(c.Model) {
 			sel.Checked = append(sel.Checked, c.Model+": no match loaded")

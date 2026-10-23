@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -573,6 +574,77 @@ models:
 	defer mu.Unlock()
 	if slices.Contains(forwarded, "b:1") {
 		t.Errorf("b:1 was loaded: %v", forwarded)
+	}
+}
+
+// A request that has already passed through this gateway is refused, and a
+// route from other gateways never reaches a backend that isn't Open WebUI.
+func TestRouteField(t *testing.T) {
+	swap := &fakeSwap{loaded: []string{"qwen3.6-35b-a3b:q8_0"}}
+	srv := newGateway(t, swap)
+	resp, body := post(t, srv, "secret", `{"model":"task","messages":[],"ai_model_facade_route":["elsewhere","`+instanceID+`"]}`)
+	if resp.StatusCode != http.StatusLoopDetected || !strings.Contains(body, "loop_detected") || swap.lastBody != "" {
+		t.Errorf("loop: got %d %s; backend saw %q", resp.StatusCode, body, swap.lastBody)
+	}
+	resp, body = post(t, srv, "secret", `{"model":"task","ai_model_facade_route":["elsewhere"],"messages":[]}`)
+	if resp.StatusCode != http.StatusOK || strings.Contains(swap.lastBody, "ai_model_facade_route") || !strings.HasPrefix(swap.lastBody, `{"model":"qwen3.6-35b-a3b:q8_0","messages":[]`) {
+		t.Errorf("chain: got %d %s; backend saw %s", resp.StatusCode, body, swap.lastBody)
+	}
+}
+
+// Open WebUI's model refresh calls this gateway's /v1/models while the
+// gateway is fetching that refresh for `current`. The nested call must not
+// wait on the fetch that waits for it.
+func TestModelsLoopThroughOpenWebUI(t *testing.T) {
+	var gatewayURL atomic.Value
+	var nested atomic.Int32
+	webui := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if u, _ := gatewayURL.Load().(string); u != "" {
+			resp, err := http.Get(u + "/v1/models") // Open WebUI refreshing its gateway connection
+			if err != nil {
+				t.Error(err)
+			} else {
+				resp.Body.Close()
+				nested.Add(1)
+			}
+		}
+		io.WriteString(w, `{"data":[{"id":"qwen3:1.7b","owned_by":"ollama","loaded":true}]}`)
+	}))
+	defer webui.Close()
+	src := `
+server: {listen: ":0"}
+backends:
+  webui: {type: openWebUi, baseUrl: "${WEBUI_URL}", stateTimeoutSeconds: 5}
+models:
+  assistant:
+    backend: webui
+    candidates:
+      - model: qwen3:1.7b
+`
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { return webui.URL, n == "WEBUI_URL" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	defer srv.Close()
+	gatewayURL.Store(srv.URL)
+	start := time.Now()
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if time.Since(start) > 2*time.Second || nested.Load() != 1 || !strings.Contains(string(body), `"current":{"model":"qwen3:1.7b","reason":"loaded"}`) {
+		t.Errorf("after %v, %d nested calls: %s", time.Since(start), nested.Load(), body)
 	}
 }
 

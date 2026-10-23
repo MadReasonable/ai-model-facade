@@ -71,23 +71,11 @@ func seconds(s float64) time.Duration {
 
 // Chat posts the request to its OpenAI endpoint path on the backend.
 func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	httpReq, err := c.newRequest(ctx, http.MethodPost, string(req.Endpoint), bytes.NewReader(req.Body))
-	if err != nil {
-		return backend.ChatResult{}, err
-	}
-	if c.passthrough {
-		// The client's own credential, or none: a keyless client never
-		// borrows the backend's apiKey.
-		httpReq.Header.Del("Authorization")
-		if req.Client.Authorization != "" {
-			httpReq.Header.Set("Authorization", req.Client.Authorization)
-		}
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	accept := ""
 	if req.Stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
+		accept = "text/event-stream"
 	}
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.Do(ctx, http.MethodPost, string(req.Endpoint), req.Body, accept, req.Client)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -96,15 +84,51 @@ func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.Cha
 	if req.Stream && resp.StatusCode/100 == 2 && mediaType == "text/event-stream" {
 		return backend.ChatResult{Stream: backend.NewSSEStream(resp.Body)}, nil
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	body, err := ReadBody(resp)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
-	if len(body) > maxResponseBytes {
-		return backend.ChatResult{}, fmt.Errorf("backend response exceeds %d bytes", maxResponseBytes)
-	}
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body}}, nil
+}
+
+// Do sends one request made on a client's behalf, with JSON body if body
+// isn't nil. With passthroughAuth it carries the client's own credential, or
+// none: a keyless client never borrows the backend's apiKey.
+func (c *Client) Do(ctx context.Context, method, path string, body []byte, accept string, client backend.Client) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := c.newRequest(ctx, method, path, reader)
+	if err != nil {
+		return nil, err
+	}
+	if c.passthrough {
+		req.Header.Del("Authorization")
+		if client.Authorization != "" {
+			req.Header.Set("Authorization", client.Authorization)
+		}
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	return c.client.Do(req)
+}
+
+// ReadBody reads and closes a response body, refusing one over the size cap.
+func ReadBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxResponseBytes {
+		return nil, fmt.Errorf("backend response exceeds %d bytes", maxResponseBytes)
+	}
+	return body, nil
 }
 
 // CloseIdleConnections releases pooled connections, e.g. after a config
@@ -156,6 +180,7 @@ type StateCache struct {
 	mu        sync.Mutex
 	loaded    []backend.ModelInfo
 	fetchedAt time.Time
+	fetched   bool // loaded holds a fetched state, even once expired or invalidated
 	inFlight  *stateFetch
 	gen       uint64 // bumped by Invalidate; a refresh started earlier isn't cached
 }
@@ -182,6 +207,14 @@ func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, err
 		return models, nil
 	}
 	f := s.inFlight
+	if f != nil && !backend.StateWaitAllowed(ctx) {
+		// Possibly our own refresh, looped back through another service.
+		defer s.mu.Unlock()
+		if !s.fetched {
+			return nil, backend.ErrStateBusy
+		}
+		return append([]backend.ModelInfo(nil), s.loaded...), nil
+	}
 	if f == nil {
 		f = &stateFetch{done: make(chan struct{}), gen: s.gen}
 		s.inFlight = f
@@ -207,6 +240,7 @@ func (s *StateCache) refresh(f *stateFetch) {
 	if err == nil && f.gen == s.gen {
 		s.loaded = models
 		s.fetchedAt = time.Now()
+		s.fetched = true
 	}
 	if s.inFlight == f {
 		s.inFlight = nil

@@ -10,6 +10,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
 )
@@ -35,11 +36,18 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 	}
 	backends := map[string]backend.Backend{}
 	for _, e := range backendEntries {
-		b, err := newBackend(e)
+		b, err := newBackend(e, log)
 		if err != nil {
 			return nil, fmt.Errorf("backends.%s: %w", e.Name, err)
 		}
 		backends[e.Name] = b
+	}
+	for _, e := range backendEntries {
+		if l, ok := backends[e.Name].(linker); ok {
+			if err := l.Link(ctx, backends); err != nil {
+				return nil, fmt.Errorf("backends.%s: %w", e.Name, err)
+			}
+		}
 	}
 	catalogs := map[string]*backend.Catalog{}
 	env := virtualmodel.Env{
@@ -78,12 +86,20 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 	return g, nil
 }
 
-func newBackend(e config.Entry) (backend.Backend, error) {
+// linker is a backend that refers to other backends. Link resolves and
+// checks those references once every backend exists.
+type linker interface {
+	Link(ctx context.Context, backends map[string]backend.Backend) error
+}
+
+func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 	switch e.Type {
 	case "llamaSwap":
 		return llamaswap.New(e)
 	case "ollama":
 		return ollama.New(e)
+	case "openWebUi":
+		return openwebui.New(e, log.With("backend", e.Name))
 	case "":
 		return nil, fmt.Errorf("line %d: type is required", e.Node.Line)
 	}
