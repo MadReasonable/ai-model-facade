@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -28,20 +29,25 @@ type candidatesConfig struct {
 
 type candidateConfig struct {
 	Model      string    `yaml:"model"`
+	Backend    string    `yaml:"backend"` // default: the virtual model's backend
 	LoadIfNone bool      `yaml:"loadIfNone"`
 	Params     yaml.Node `yaml:"params"`
 }
 
 // candidates is the default type: route params, then the first eligible
 // candidate's params, then the model rewritten to the candidate's concrete ID.
+// Candidates may be on different backends.
 type candidates struct {
-	backendName string
-	backend     backend.Backend
-	catalog     *backend.Catalog // the backend's model list at startup
-	description string
-	params      []mergepatch.Patch
-	selector    *selector.FirstLoaded
-	patches     [][]mergepatch.Patch // per candidate
+	backendName  string          // the virtual model's own backend; "" if every candidate names one
+	backend      backend.Backend // nil likewise
+	backendNames []string        // per candidate
+	backends     []backend.Backend
+	catalogs     []*backend.Catalog // per candidate: its backend's model list at startup
+	description  string
+	params       []mergepatch.Patch
+	selector     *selector.FirstLoaded
+	patches      [][]mergepatch.Patch // per candidate
+	passthrough  []string             // backends with passthroughAuth, when more than one
 }
 
 func newCandidates(ctx context.Context, entry config.Entry, env Env) (*candidates, error) {
@@ -50,16 +56,9 @@ func newCandidates(ctx context.Context, entry config.Entry, env Env) (*candidate
 		return nil, err
 	}
 	m := &candidates{backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}}
-	if c.Backend == "" {
-		return nil, fmt.Errorf("line %d: backend is required", entry.Node.Line)
-	}
-	m.backend = env.Backends[c.Backend]
-	if m.backend == nil {
-		return nil, fmt.Errorf("line %d: backend %q is not defined", entry.Node.Line, c.Backend)
-	}
-	for _, capability := range m.selector.Requires() {
-		if !backend.Has(m.backend, capability) {
-			return nil, fmt.Errorf("line %d: backend %q lacks capability %s needed to pick a loaded candidate", entry.Node.Line, c.Backend, capability)
+	if c.Backend != "" {
+		if m.backend = env.Backends[c.Backend]; m.backend == nil {
+			return nil, fmt.Errorf("line %d: backend %q is not defined", entry.Node.Line, c.Backend)
 		}
 	}
 	var err error
@@ -69,48 +68,96 @@ func newCandidates(ctx context.Context, entry config.Entry, env Env) (*candidate
 	if len(c.Candidates) == 0 {
 		return nil, fmt.Errorf("line %d: candidates is required", entry.Node.Line)
 	}
-	if m.catalog, err = env.Catalog(ctx, c.Backend); err != nil {
-		return nil, fmt.Errorf("backend %q: listing models: %w", c.Backend, err)
-	}
+	checked := map[string]bool{} // backends whose capabilities were checked
 	for i := range c.Candidates {
 		node := &c.Candidates[i]
 		var cc candidateConfig
 		if err := config.DecodeStrict(node, &cc); err != nil {
 			return nil, err
 		}
+		name := cc.Backend
+		if name == "" {
+			name = c.Backend
+		}
+		if name == "" {
+			return nil, fmt.Errorf("line %d: backend is required, on the model or on the candidate", node.Line)
+		}
+		b := env.Backends[name]
+		if b == nil {
+			return nil, fmt.Errorf("line %d: backend %q is not defined", node.Line, name)
+		}
+		if !checked[name] {
+			checked[name] = true
+			for _, capability := range m.selector.Requires() {
+				if !backend.Has(b, capability) {
+					return nil, fmt.Errorf("line %d: backend %q lacks capability %s needed to pick a loaded candidate", node.Line, name, capability)
+				}
+			}
+		}
+		catalog, err := env.Catalog(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("backend %q: listing models: %w", name, err)
+		}
 		candidate := selector.Candidate{Model: cc.Model, LoadIfNone: cc.LoadIfNone}
+		if name != c.Backend {
+			candidate.Backend, candidate.BackendName = b, name
+		}
 		if err := candidate.Validate(); err != nil {
 			return nil, fmt.Errorf("line %d: %w", node.Line, err)
 		}
-		if !selector.IsGlob(candidate.Model) && !m.catalog.Contains(candidate.Model) {
-			return nil, fmt.Errorf("line %d: model %q is not listed by backend %q%s", node.Line, candidate.Model, c.Backend, didYouMean(m.catalog.WithTags(candidate.Model)))
+		if !selector.IsGlob(candidate.Model) && !catalog.Contains(candidate.Model) {
+			return nil, fmt.Errorf("line %d: model %q is not listed by backend %q%s", node.Line, candidate.Model, name, didYouMean(catalog.WithTags(candidate.Model)))
 		}
 		patches, err := mergepatch.Compile(&cc.Params)
 		if err != nil {
 			return nil, err
 		}
-		m.noteAliases(env.Log, entry.Name, candidate.Model, len(m.params)+len(patches) > 0)
+		noteAliases(env.Log, entry.Name, candidate.Model, catalog, len(m.params)+len(patches) > 0)
 		m.selector.Candidates = append(m.selector.Candidates, candidate)
+		m.backendNames = append(m.backendNames, name)
+		m.backends = append(m.backends, b)
+		m.catalogs = append(m.catalogs, catalog)
 		m.patches = append(m.patches, patches)
 	}
+	m.notePassthrough(env.Log, entry.Name)
 	return m, nil
+}
+
+// notePassthrough warns when candidates span several backends that forward
+// the client's own key: a client's key is valid on one of them at most, so
+// requests fail or succeed depending on which is loaded, and the key reaches
+// services the client didn't mean it for.
+func (m *candidates) notePassthrough(log *slog.Logger, model string) {
+	seen := map[string]bool{}
+	for i, name := range m.backendNames {
+		p, ok := m.backends[i].(interface{ PassthroughAuth() bool })
+		if !seen[name] && ok && p.PassthroughAuth() {
+			m.passthrough = append(m.passthrough, name)
+		}
+		seen[name] = true
+	}
+	if len(m.passthrough) < 2 {
+		m.passthrough = nil
+		return
+	}
+	log.Warn("candidates span several passthroughAuth backends; a client's key is sent to whichever one wins", "model", model, "backends", m.passthrough)
 }
 
 // noteAliases logs when a candidate can resolve to a backend alias while
 // params are in play: the backend applies the alias's own params after the
 // gateway's (llama-swap's setParamsByID replaces top-level keys), so they may
 // override what the config asked for.
-func (m *candidates) noteAliases(log *slog.Logger, model, candidate string, hasParams bool) {
+func noteAliases(log *slog.Logger, model, candidate string, catalog *backend.Catalog, hasParams bool) {
 	if !hasParams {
 		return
 	}
 	const msg = "candidate can resolve to a backend alias; the backend applies the alias's own params after the gateway's and may override them"
-	if base, ok := m.catalog.AliasOf[candidate]; ok {
+	if base, ok := catalog.AliasOf[candidate]; ok {
 		log.Info(msg, "model", model, "candidate", candidate, "aliasOf", base)
 		return
 	}
 	if selector.IsGlob(candidate) {
-		if _, aliases := selector.Matches(candidate, m.catalog.Models); len(aliases) > 0 {
+		if _, aliases := selector.Matches(candidate, catalog.Models); len(aliases) > 0 {
 			log.Info(msg, "model", model, "candidate", candidate, "aliases", aliases)
 		}
 	}
@@ -125,18 +172,23 @@ func (m *candidates) Current(ctx context.Context) (Current, error) {
 	if err != nil {
 		return Current{}, err
 	}
-	return Current{Model: sel.Target, AliasOf: sel.AliasOf, Reason: sel.Reason}, nil
+	cur := Current{Model: sel.Target, AliasOf: sel.AliasOf, Reason: sel.Reason}
+	if sel.Index >= 0 {
+		cur.Backend = m.selector.Candidates[sel.Index].BackendName
+	}
+	return cur, nil
 }
 
 func (m *candidates) Chat(ctx context.Context, endpoint backend.Endpoint, body []byte, client backend.Client) (Result, error) {
 	sel, err := m.selector.Select(ctx, body, m.backend)
 	res := Result{Target: sel.Target, AliasOf: sel.AliasOf, Checked: sel.Checked, Reason: sel.Reason}
 	if err != nil {
-		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend %q state unavailable: %v", m.backendName, err)}
+		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
 	}
 	if sel.Index < 0 {
 		return res, &Error{Status: http.StatusServiceUnavailable, Type: "no_candidate_loaded", Message: "no candidate model is loaded"}
 	}
+	res.Backend = m.selector.Candidates[sel.Index].BackendName
 	for _, p := range append(append([]mergepatch.Patch(nil), m.params...), m.patches[sel.Index]...) {
 		if body, err = p.Apply(body); err != nil {
 			return res, &Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
@@ -146,25 +198,44 @@ func (m *candidates) Chat(ctx context.Context, endpoint backend.Endpoint, body [
 		return res, &Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
 	}
 	req := backend.ChatRequest{Endpoint: endpoint, Body: body, Stream: gjson.GetBytes(body, "stream").Bool(), Client: client}
-	if res.Chat, err = m.backend.Chat(ctx, req); err != nil {
-		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend %q: %v", m.backendName, err)}
+	if res.Chat, err = m.backends[sel.Index].Chat(ctx, req); err != nil {
+		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend %q: %v", m.backendNames[sel.Index], err)}
 	}
 	return res, nil
 }
 
+// stateError reports that no candidate's backend state could be read.
+func (m *candidates) stateError(err error) string {
+	var names []string
+	for _, name := range m.backendNames {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 1 {
+		return fmt.Sprintf("backend %q state unavailable: %v", names[0], err)
+	}
+	return fmt.Sprintf("backends %s state unavailable: %v", strings.Join(names, ", "), err)
+}
+
 func (m *candidates) Describe(w io.Writer) {
-	fmt.Fprintf(w, "  backend: %s\n", m.backendName)
+	if m.backendName != "" {
+		fmt.Fprintf(w, "  backend: %s\n", m.backendName)
+	}
 	if m.description != "" {
 		fmt.Fprintf(w, "  description: %s\n", m.description)
+	}
+	if m.passthrough != nil {
+		fmt.Fprintf(w, "  note: candidates span several passthroughAuth backends (%s); a client's key is sent to whichever one wins\n", strings.Join(m.passthrough, ", "))
 	}
 	for i, c := range m.selector.Candidates {
 		note := ""
 		if c.LoadIfNone {
 			note = " (loadIfNone)"
 		}
-		fmt.Fprintf(w, "  %d. %s%s\n", i+1, c.Model, note)
+		fmt.Fprintf(w, "  %d. %s%s\n", i+1, c.On(c.Model), note)
 		patches := append(append([]mergepatch.Patch(nil), m.params...), m.patches[i]...)
-		for _, line := range m.describeAliases(c.Model, len(patches) > 0) {
+		for _, line := range describeAliases(c.Model, m.catalogs[i], len(patches) > 0) {
 			fmt.Fprintf(w, "     %s\n", line)
 		}
 		if composed, ok := mergepatch.Compose(patches); ok {
@@ -184,16 +255,16 @@ const aliasOverrideNote = "note: the backend's own params for an alias may overr
 // list fetched at startup: what a pattern matches, or an alias's base model.
 // An exact base model only ever routes to itself, so it gets no lines. The
 // override note only applies when the candidate has params.
-func (m *candidates) describeAliases(candidate string, hasParams bool) []string {
+func describeAliases(candidate string, catalog *backend.Catalog, hasParams bool) []string {
 	if selector.IsGlob(candidate) {
-		bases, aliases := selector.Matches(candidate, m.catalog.Models)
+		bases, aliases := selector.Matches(candidate, catalog.Models)
 		lines := []string{"base models: " + listOrNone(bases), "aliases: " + listOrNone(aliases)}
 		if len(aliases) > 0 && hasParams {
 			lines = append(lines, aliasOverrideNote)
 		}
 		return lines
 	}
-	if base, ok := m.catalog.AliasOf[candidate]; ok {
+	if base, ok := catalog.AliasOf[candidate]; ok {
 		lines := []string{"alias of " + base}
 		if hasParams {
 			lines = append(lines, aliasOverrideNote)

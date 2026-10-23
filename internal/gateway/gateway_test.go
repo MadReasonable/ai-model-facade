@@ -577,6 +577,111 @@ models:
 	}
 }
 
+// buildMixed builds a gateway whose `task` model has llama-swap candidates
+// and an Ollama one, and returns it with the Ollama server's last request body.
+func buildMixed(t *testing.T, swap *fakeSwap, backends string, log *slog.Logger) (*httptest.Server, func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var last string
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"qwen3:1.7b"}]}`)
+		case "/api/ps":
+			io.WriteString(w, `{"models":[{"name":"qwen3:1.7b"}]}`)
+		default:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			last = string(body)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"choices":[]}`)
+		}
+	}))
+	t.Cleanup(ollamaSrv.Close)
+	swapSrv := httptest.NewServer(swap)
+	t.Cleanup(swapSrv.Close)
+	src := `
+server: {listen: ":0"}
+logging: {logSelection: true}
+backends:
+` + backends + `
+models:
+  task:
+    backend: llamaSwap
+    params: {max_tokens: 1000}
+    candidates:
+      - model: qwen3.6-35b-a3b:q8_0
+      - model: qwen3:1.7b
+        backend: ollama
+        params: {think: false}
+      - {model: qwen2.5-coder-3b:q8_0, loadIfNone: true}
+`
+	vars := map[string]string{"SWAP_URL": swapSrv.URL, "OLLAMA_URL": ollamaSrv.URL}
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { v, ok := vars[n]; return v, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(log))
+	t.Cleanup(srv.Close)
+	return srv, func() string { mu.Lock(); defer mu.Unlock(); return last }
+}
+
+const mixedBackends = `  llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
+  ollama: {type: ollama, baseUrl: "${OLLAMA_URL}"}`
+
+// One virtual model can pick among candidates on different backends; the
+// winner's backend gets the request, with the same params flow.
+func TestMixedBackendModel(t *testing.T) {
+	var logs bytes.Buffer
+	swap := &fakeSwap{}
+	srv, ollamaBody := buildMixed(t, swap, mixedBackends, slog.New(slog.NewTextHandler(&logs, nil)))
+	resp, body := post(t, srv, "", `{"model":"task","messages":[]}`)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Gateway-Target") != "qwen3:1.7b" || ollamaBody() != `{"model":"qwen3:1.7b","messages":[],"max_tokens":1000,"think":false}` || swap.lastBody != "" {
+		t.Errorf("got %d %s; ollama saw %s, llama-swap saw %q", resp.StatusCode, body, ollamaBody(), swap.lastBody)
+	}
+	if out := logs.String(); !strings.Contains(out, `checked="[qwen3.6-35b-a3b:q8_0: not loaded qwen3:1.7b on ollama: loaded]"`) || !strings.Contains(out, "backend=ollama") {
+		t.Errorf("log:\n%s", out)
+	}
+	models, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer models.Body.Close()
+	list, _ := io.ReadAll(models.Body)
+	if !strings.Contains(string(list), `"current":{"model":"qwen3:1.7b","backend":"ollama","reason":"loaded"}`) {
+		t.Errorf("models: %s", list)
+	}
+	// A candidate on the virtual model's own backend is shown without one.
+	swap.loaded = []string{"qwen3.6-35b-a3b:q8_0"}
+	resp, _ = post(t, srv, "", `{"model":"task","messages":[]}`)
+	if resp.Header.Get("X-Gateway-Target") != "qwen3.6-35b-a3b:q8_0" || !strings.HasPrefix(swap.lastBody, `{"model":"qwen3.6-35b-a3b:q8_0"`) {
+		t.Errorf("own backend: got %q, llama-swap saw %s", resp.Header.Get("X-Gateway-Target"), swap.lastBody)
+	}
+}
+
+// Candidates across several passthroughAuth backends get a startup warning,
+// since a client's single key is sent to whichever one wins.
+func TestMixedPassthroughWarning(t *testing.T) {
+	for backends, want := range map[string]bool{
+		mixedBackends: false,
+		`  llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", passthroughAuth: true}
+  ollama: {type: ollama, baseUrl: "${OLLAMA_URL}"}`: false,
+		`  llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", passthroughAuth: true}
+  ollama: {type: ollama, baseUrl: "${OLLAMA_URL}", passthroughAuth: true}`: true,
+	} {
+		var logs bytes.Buffer
+		buildMixed(t, &fakeSwap{}, backends, slog.New(slog.NewTextHandler(&logs, nil)))
+		if got := strings.Contains(logs.String(), "several passthroughAuth backends"); got != want {
+			t.Errorf("%s: warned %v, want %v:\n%s", backends, got, want, logs.String())
+		}
+	}
+}
+
 // A request that has already passed through this gateway is refused, and a
 // route from other gateways never reaches a backend that isn't Open WebUI.
 func TestRouteField(t *testing.T) {
@@ -661,6 +766,8 @@ func TestBuildValidation(t *testing.T) {
 		"glob not required":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:*", "needs an exact model ID"},
 		"unknown model type": {"    backend: llamaSwap\n    description", "    type: magic\n    backend: llamaSwap\n    description", `unknown type "magic"`},
 		"unknown backend":    {"type: llamaSwap,", "type: vllm,", `unknown type "vllm"`},
+		"no backend at all":  {"    backend: llamaSwap\n    description", "    description", "backend is required, on the model or on the candidate"},
+		"undefined cand bk":  {"model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:q8_0\n        backend: nope", `backend "nope" is not defined`},
 	}
 	for name, c := range cases {
 		src := strings.Replace(testConfig, c.from, c.to, 1)

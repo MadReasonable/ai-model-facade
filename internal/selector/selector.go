@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 )
@@ -29,6 +30,26 @@ type Selector interface {
 type Candidate struct {
 	Model      string // exact ID or path.Match glob
 	LoadIfNone bool   // eligible even when not loaded; the backend loads it if it wins
+	// Backend serves this candidate; nil means the backend passed to Select.
+	Backend backend.Backend
+	// BackendName, if set, is shown with the model in Checked: a candidate
+	// on another backend than its virtual model's own.
+	BackendName string
+}
+
+// On names a model ID as this candidate's log lines show it.
+func (c Candidate) On(id string) string {
+	if c.BackendName == "" {
+		return id
+	}
+	return id + " on " + c.BackendName
+}
+
+func (c Candidate) backendOr(b backend.Backend) backend.Backend {
+	if c.Backend != nil {
+		return c.Backend
+	}
+	return b
 }
 
 // IsGlob reports whether model is a pattern rather than an exact ID.
@@ -45,6 +66,9 @@ func IsGlob(model string) bool {
 //
 // Each step walks the whole list, so a LoadIfNone candidate can sit anywhere.
 // A model whose state the backend can't read counts as not loaded.
+// Candidates may be on different backends; each backend's state is read
+// once, concurrently. If some backends' state can't be read, their
+// candidates count as not loaded; if none can be, Select fails.
 // An alias is ready or starting when its base model is. A glob matches base
 // models first, then their aliases, each in sorted order, so `qwen3.8-27b:*`
 // picks the model itself over its `qwen3.8-27b:Dreamer` preset.
@@ -75,60 +99,104 @@ func (s *FirstLoaded) Requires() []backend.Capability {
 
 func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend) (Selection, error) {
 	sel := Selection{Index: -1}
-	loadedModels, err := b.(backend.ModelStateProvider).LoadedModels(ctx)
-	if err != nil {
-		sel.Reason = "backend state unavailable"
-		return sel, err
-	}
-	var readyModels, startingModels, unknownModels []backend.ModelInfo
-	for _, m := range loadedModels {
-		switch {
-		case m.Unknown:
-			unknownModels = append(unknownModels, m)
-		case m.Starting:
-			startingModels = append(startingModels, m)
-		default:
-			readyModels = append(readyModels, m)
+	states := s.states(ctx, b)
+	var firstErr error
+	for _, c := range s.Candidates {
+		if err := states[c.backendOr(b)].err; err == nil {
+			firstErr = nil
+			break
+		} else if firstErr == nil {
+			firstErr = err
 		}
 	}
-	ready, starting, unknown := newModelSet(readyModels), newModelSet(startingModels), newModelSet(unknownModels)
+	if firstErr != nil {
+		sel.Reason = "backend state unavailable"
+		return sel, firstErr
+	}
 	wait := -1     // first starting candidate, used if nothing is ready
 	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
 	var waitID, waitBase string
 	for i, c := range s.Candidates {
-		if id, base, ok := ready.match(c.Model); ok {
-			return winner(sel, i, id, base, describe(c.Model, id, base, "loaded"), "loaded"), nil
-		}
-		if id, base, ok := starting.match(c.Model); ok {
-			sel.Checked = append(sel.Checked, describe(c.Model, id, base, "starting"))
+		st := states[c.backendOr(b)]
+		if st.err != nil {
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": state unavailable")
+		} else if id, base, ok := st.ready.match(c.Model); ok {
+			return winner(sel, i, id, base, describe(c, id, base, "loaded"), "loaded"), nil
+		} else if id, base, ok := st.starting.match(c.Model); ok {
+			sel.Checked = append(sel.Checked, describe(c, id, base, "starting"))
 			if wait < 0 {
 				wait, waitID, waitBase = i, id, base
 			}
-		} else if id, _, ok := unknown.match(c.Model); ok {
+		} else if id, _, ok := st.unknown.match(c.Model); ok {
 			// Selects like not loaded, but the log shouldn't claim it isn't.
 			if IsGlob(c.Model) {
-				sel.Checked = append(sel.Checked, c.Model+": no match loaded; state unknown for "+id)
+				sel.Checked = append(sel.Checked, c.On(c.Model)+": no match loaded; state unknown for "+id)
 			} else {
-				sel.Checked = append(sel.Checked, c.Model+": state unknown")
+				sel.Checked = append(sel.Checked, c.On(c.Model)+": state unknown")
 			}
 		} else if IsGlob(c.Model) {
-			sel.Checked = append(sel.Checked, c.Model+": no match loaded")
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": no match loaded")
 		} else {
-			sel.Checked = append(sel.Checked, c.Model+": not loaded")
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": not loaded")
 		}
 		if c.LoadIfNone && fallback < 0 {
 			fallback = i
 		}
 	}
 	if wait >= 0 {
-		return winner(sel, wait, waitID, waitBase, waitID+": waiting for it to finish starting", "starting"), nil
+		return winner(sel, wait, waitID, waitBase, s.Candidates[wait].On(waitID)+": waiting for it to finish starting", "starting"), nil
 	}
 	if fallback >= 0 {
-		model := s.Candidates[fallback].Model
-		return winner(sel, fallback, model, "", model+": loading (loadIfNone)", "loadIfNone"), nil
+		c := s.Candidates[fallback]
+		return winner(sel, fallback, c.Model, "", c.On(c.Model)+": loading (loadIfNone)", "loadIfNone"), nil
 	}
 	sel.Reason = "no candidate loaded"
 	return sel, nil
+}
+
+// backendState is one backend's models, sorted by state, or why they
+// couldn't be read.
+type backendState struct {
+	ready, starting, unknown modelSet
+	err                      error
+}
+
+// states reads the state of every backend the candidates use, once each and
+// concurrently, so a mixed list costs its slowest backend, not their sum.
+func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend.Backend]*backendState {
+	states := map[backend.Backend]*backendState{}
+	var wg sync.WaitGroup
+	for _, c := range s.Candidates {
+		cb := c.backendOr(b)
+		if states[cb] != nil {
+			continue
+		}
+		st := &backendState{}
+		states[cb] = st
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			loadedModels, err := cb.(backend.ModelStateProvider).LoadedModels(ctx)
+			if err != nil {
+				st.err = err
+				return
+			}
+			var readyModels, startingModels, unknownModels []backend.ModelInfo
+			for _, m := range loadedModels {
+				switch {
+				case m.Unknown:
+					unknownModels = append(unknownModels, m)
+				case m.Starting:
+					startingModels = append(startingModels, m)
+				default:
+					readyModels = append(readyModels, m)
+				}
+			}
+			st.ready, st.starting, st.unknown = newModelSet(readyModels), newModelSet(startingModels), newModelSet(unknownModels)
+		}()
+	}
+	wg.Wait()
+	return states
 }
 
 // modelSet is a group of backend models in the order a candidate tries them:
@@ -166,9 +234,9 @@ func (s modelSet) match(candidate string) (id, base string, ok bool) {
 
 // describe is a candidate's line in Selection.Checked, e.g.
 // "qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k" or "m:Slacker: starting (alias of m)".
-func describe(candidate, id, base, state string) string {
-	s := candidate + ": " + state
-	if IsGlob(candidate) {
+func describe(c Candidate, id, base, state string) string {
+	s := c.On(c.Model) + ": " + state
+	if IsGlob(c.Model) {
 		s += " as " + id
 	}
 	if base != "" {

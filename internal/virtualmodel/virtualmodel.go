@@ -28,6 +28,7 @@ func (e *Error) Error() string {
 type Result struct {
 	Target  string // concrete backend model ID, or alias
 	AliasOf string // the base model when Target is an alias
+	Backend string // the winner's backend, when it isn't the virtual model's own
 	Checked []string
 	Reason  string
 	Chat    backend.ChatResult
@@ -38,6 +39,7 @@ type Result struct {
 type Current struct {
 	Model   string
 	AliasOf string
+	Backend string // set when it isn't the virtual model's own
 	Reason  string
 }
 

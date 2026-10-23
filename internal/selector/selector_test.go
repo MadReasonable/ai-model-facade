@@ -15,6 +15,7 @@ type fakeBackend struct {
 	unknown  []string            // state can't be read
 	aliases  map[string][]string // base model ID -> aliases
 	err      error
+	calls    int // LoadedModels calls
 }
 
 func (f *fakeBackend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
@@ -26,6 +27,7 @@ func (f *fakeBackend) Chat(ctx context.Context, req backend.ChatRequest) (backen
 }
 
 func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	f.calls++
 	var models []backend.ModelInfo
 	for _, id := range f.loaded {
 		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id]})
@@ -247,6 +249,55 @@ func TestUnknownStateSelectsAsNotLoaded(t *testing.T) {
 	sel, _ = s.Select(context.Background(), nil, b)
 	if sel.Target != "u" || sel.Reason != "loadIfNone" {
 		t.Errorf("fallback: got %+v", sel)
+	}
+}
+
+// Candidates on different backends are walked in list order as one list;
+// each backend's state is read once, and candidates on another backend than
+// the default are labelled with it.
+func TestMixedBackends(t *testing.T) {
+	def := &fakeBackend{starting: []string{"a"}}
+	other := &fakeBackend{loaded: []string{"b"}}
+	s := &FirstLoaded{Candidates: []Candidate{
+		{Model: "x"},
+		{Model: "b", Backend: other, BackendName: "other"},
+		{Model: "a"},
+		{Model: "c", Backend: other, BackendName: "other", LoadIfNone: true},
+	}}
+	sel, err := s.Select(context.Background(), nil, def)
+	if err != nil || sel.Index != 1 || sel.Target != "b" || strings.Join(sel.Checked, "; ") != "x: not loaded; b on other: loaded" {
+		t.Errorf("got %+v, %v", sel, err)
+	}
+	if def.calls != 1 || other.calls != 1 {
+		t.Errorf("state reads: default %d, other %d", def.calls, other.calls)
+	}
+	// Ready beats starting across backends, starting beats loadIfNone.
+	other.loaded = nil
+	sel, _ = s.Select(context.Background(), nil, def)
+	if sel.Index != 2 || sel.Reason != "starting" {
+		t.Errorf("starting: got %+v", sel)
+	}
+	def.starting = nil
+	sel, _ = s.Select(context.Background(), nil, def)
+	if sel.Index != 3 || sel.Reason != "loadIfNone" || sel.Checked[len(sel.Checked)-1] != "c on other: loading (loadIfNone)" {
+		t.Errorf("fallback: got %+v", sel)
+	}
+}
+
+// A backend whose state can't be read makes its candidates count as not
+// loaded while others still serve; only if no backend can be read does the
+// selection fail.
+func TestMixedBackendStateFailure(t *testing.T) {
+	def := &fakeBackend{err: errors.New("down")}
+	other := &fakeBackend{loaded: []string{"b"}}
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b", Backend: other, BackendName: "other"}}}
+	sel, err := s.Select(context.Background(), nil, def)
+	if err != nil || sel.Target != "b" || sel.Checked[0] != "a: state unavailable" {
+		t.Errorf("got %+v, %v", sel, err)
+	}
+	other.err = errors.New("also down")
+	if sel, err = s.Select(context.Background(), nil, def); err == nil || sel.Reason != "backend state unavailable" {
+		t.Errorf("all down: got %+v, %v", sel, err)
 	}
 }
 

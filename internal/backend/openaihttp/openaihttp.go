@@ -131,6 +131,11 @@ func ReadBody(resp *http.Response) ([]byte, error) {
 	return body, nil
 }
 
+// PassthroughAuth reports whether client requests carry the client's own key.
+func (c *Client) PassthroughAuth() bool {
+	return c.passthrough
+}
+
 // CloseIdleConnections releases pooled connections, e.g. after a config
 // reload replaces this backend.
 func (c *Client) CloseIdleConnections() {

@@ -149,7 +149,7 @@ Model objects have the standard OpenAI fields plus `current`: where a request wo
 
 `reason` is `loaded`; `starting` when nothing is ready and a request would wait for that model to finish loading; or `loadIfNone` when nothing is ready or starting and that model would be loaded.
 When no request would succeed, `current` has no `model` and the reason is `no candidate loaded`.
-`alias_of` is added when `model` is a llama-swap alias.
+`alias_of` is added when `model` is a llama-swap alias, and `backend` when the model is on another backend than the virtual model's own.
 It's a snapshot, so the next request can be routed differently if what's loaded changes. If llama-swap's state can't be read, `current` is left out.
 
 ### Example: Open WebUI task model
@@ -181,6 +181,13 @@ A model whose state the backend can't report (see [Open WebUI](#open-webui)) cou
 - If nothing matches, the request gets `503`. Open WebUI, for example, then skips the task.
 
 There is no failover: a request is never retried against another model.
+
+Candidates can be on different backends: give a candidate its own `backend`, and the list is still walked in order as one list, across backends.
+Each backend's state is read once per request, concurrently.
+If one backend's state can't be read, its candidates count as not loaded (logged as `state unavailable`) and the others still serve; only when none can be read does the request fail with `502`.
+Wherever a candidate's backend isn't the virtual model's own, the log, `check` and `current` name it, e.g. `qwen3:1.7b on ollama: loaded`.
+
+If a virtual model's candidates span two or more backends with `passthroughAuth`, the gateway warns at startup and `check` notes it: a client has one key, but it is sent to whichever of those backends wins, so it may fail on some, and it reaches services the client may not have meant it for.
 
 Prefer base model IDs for anything the gateway must control.
 llama-swap applies a preset's own params after the gateway's, replacing whole top-level keys such as `chat_template_kwargs`, so params on an alias candidate may be overridden.
@@ -341,7 +348,7 @@ Each entry is a virtual model, and its name is what clients request.
 
 | Key | Description |
 |-----|-------------|
-| `backend` | Name of a `backends` entry. Required. |
+| `backend` | Name of a `backends` entry: the default for its candidates. Required unless every candidate names its own. |
 | `candidates` | The models to choose from, in order of preference. Required. |
 | `params` | Applied to every request for this model. Optional. |
 | `description` | Shown in `GET /v1/models`. Optional. |
@@ -352,6 +359,7 @@ Each candidate takes:
 | Key | Description |
 |-----|-------------|
 | `model` | An exact backend model ID or alias, or a pattern using `*`, `?` or `[...]`. |
+| `backend` | The backend this candidate is on. Default: the virtual model's `backend`. |
 | `loadIfNone` | `true`: if no candidate is ready or starting, the first `loadIfNone` candidate is used and llama-swap loads it. Default `false`: only used when ready or starting. Must be an exact ID. |
 | `params` | Applied after the model's `params` when this candidate wins. Optional. |
 

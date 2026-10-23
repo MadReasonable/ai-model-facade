@@ -111,6 +111,7 @@ type modelObject struct {
 type currentObject struct {
 	Model   string `json:"model,omitempty"`
 	AliasOf string `json:"alias_of,omitempty"`
+	Backend string `json:"backend,omitempty"` // when it isn't the virtual model's own
 	Reason  string `json:"reason"`
 }
 
@@ -121,7 +122,7 @@ type currentObject struct {
 func (s *server) modelObject(ctx context.Context, m Model) modelObject {
 	obj := modelObject{ID: m.Name, Object: "model", Created: s.started, OwnedBy: "ai-model-facade", Description: m.Handler.Description()}
 	if cur, err := m.Handler.Current(backend.WithoutStateWait(ctx)); err == nil {
-		obj.Current = &currentObject{Model: cur.Model, AliasOf: cur.AliasOf, Reason: cur.Reason}
+		obj.Current = &currentObject{Model: cur.Model, AliasOf: cur.AliasOf, Backend: cur.Backend, Reason: cur.Reason}
 	} else {
 		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
 	}
@@ -242,6 +243,9 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	}
 	if res.AliasOf != "" {
 		attrs = append(attrs, "aliasOf", res.AliasOf)
+	}
+	if res.Backend != "" {
+		attrs = append(attrs, "backend", res.Backend)
 	}
 	if client.Name != "" {
 		attrs = append(attrs, "client", client.Name)
