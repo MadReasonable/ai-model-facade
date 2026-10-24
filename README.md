@@ -381,6 +381,7 @@ The gateway can be on both sides of Open WebUI at once: a facade with an `openWe
 A request that comes back to the same facade of the same gateway is refused with `508`; passing through one gateway twice for two different facades is fine.
 
 For each request, the gateway creates a chat, starts the completion the way Open WebUI's UI does, polls the chat for the answer while it is generated, and returns it as a normal OpenAI response or stream.
+The model's reasoning comes back as `reasoning_content`, streamed ahead of the answer as llama-server sends it, so a client that shows reasoning has something to show while the model thinks.
 Open WebUI has no legacy `/v1/completions`; such a request fails with `502`.
 
 | Key | Description |

@@ -35,6 +35,8 @@ type fakeWebUI struct {
 	startCode int      // set: /api/chat/completions answers with this status
 	startBody string   // set: /api/chat/completions answers 200 with this body
 
+	reasoning [][]string // set: the text of the reasoning items at each poll
+
 	created    string // body of /api/v1/chats/new
 	started    string // body of /api/chat/completions
 	polls      int
@@ -89,6 +91,15 @@ func (f *fakeWebUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		done := i == len(f.contents)-1
 		id := gjson.Get(f.started, "id").String()
 		msg := map[string]any{"id": id, "role": "assistant", "content": f.contents[i], "done": done}
+		if f.reasoning != nil {
+			// Open WebUI 0.12.3's shape: one reasoning item per model call,
+			// next to the other output items.
+			output := []any{map[string]any{"type": "message", "content": []any{}}}
+			for _, text := range f.reasoning[i] {
+				output = append(output, map[string]any{"type": "reasoning", "status": "in_progress", "content": []any{map[string]any{"type": "output_text", "text": text}}})
+			}
+			msg["output"] = output
+		}
 		if done {
 			msg["usage"] = map[string]any{"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15, "eval_count": 3}
 			if f.errorText != "" {
@@ -447,6 +458,54 @@ func TestChatStream(t *testing.T) {
 	}
 	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
 		t.Errorf("calls: %s", calls)
+	}
+}
+
+// Reasoning reaches the client as reasoning_content: streamed ahead of the
+// content as it grows, and in the message of a non-streamed reply. A tool
+// loop's reasoning items are joined in order.
+func TestReasoning(t *testing.T) {
+	contents := []string{"", "", "", "", "It is"}
+	reasoning := [][]string{{}, {"Think"}, {"Thinking."}, {"Thinking.", "Again"}, {"Thinking.", "Again."}}
+	f := &fakeWebUI{contents: contents, reasoning: reasoning}
+	res, err := chat(t, serve(t, f, ""), chatBody, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []string
+	for {
+		data, err := res.Stream.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		delta := gjson.GetBytes(data, "choices.0.delta")
+		if r := delta.Get("reasoning_content"); r.Exists() {
+			deltas = append(deltas, "r:"+r.String())
+		}
+		if c := delta.Get("content"); c.Exists() && c.String() != "" {
+			deltas = append(deltas, "c:"+c.String())
+		}
+	}
+	res.Stream.Close()
+	if got := strings.Join(deltas, "|"); got != "r:Think|r:ing.|r:\n\nAgain|r:.|c:It is" {
+		t.Errorf("deltas %q", got)
+	}
+
+	f = &fakeWebUI{contents: contents, reasoning: reasoning}
+	res, err = chat(t, serve(t, f, ""), chatBody, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg := gjson.GetBytes(res.Response.Body, "choices.0.message"); msg.Get("reasoning_content").String() != "Thinking.\n\nAgain." || msg.Get("content").String() != "It is" {
+		t.Errorf("message: %s", msg.Raw)
+	}
+	// Without reasoning, the message has no reasoning_content.
+	res, err = chat(t, serve(t, &fakeWebUI{contents: []string{"", "hi"}}, ""), chatBody, false)
+	if err != nil || gjson.GetBytes(res.Response.Body, "choices.0.message.reasoning_content").Exists() {
+		t.Errorf("no reasoning: %s, %v", res.Response.Body, err)
 	}
 }
 

@@ -7,7 +7,8 @@
 //     tool loop, partial output while it runs);
 //  3. poll the chat for the growing message, and the chat's tasks, until the
 //     message is done and no task is left;
-//  4. build an OpenAI response or chunk stream from it, then clean up the chat.
+//  4. build an OpenAI response or chunk stream from it, with the model's
+//     reasoning as reasoning_content, then clean up the chat.
 //
 // Loaded-model state comes from Open WebUI's own model list; see fetchState.
 package openwebui
@@ -501,21 +502,22 @@ func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.Chat
 
 // message is the assistant message as a poll sees it.
 type message struct {
-	content string
-	done    bool
-	usage   gjson.Result
+	content   string
+	reasoning string
+	done      bool
+	usage     gjson.Result
 }
 
 // wait polls until the message is done and the chat has no task left,
-// passing each new snapshot of the content to onContent. If ctx ends first,
-// the task may still be running; the caller stops it with finish.
-func (r *run) wait(ctx context.Context, onContent func(string) error) (message, error) {
+// passing each new snapshot of the message to onPoll. If ctx ends first, the
+// task may still be running; the caller stops it with finish.
+func (r *run) wait(ctx context.Context, onPoll func(message) error) (message, error) {
 	ticker := time.NewTicker(r.b.poll)
 	defer ticker.Stop()
 	for {
 		msg, err := r.poll(ctx)
-		if err == nil && onContent != nil {
-			err = onContent(msg.content)
+		if err == nil && onPoll != nil {
+			err = onPoll(msg)
 		}
 		if err == nil && msg.done {
 			var idle bool
@@ -550,7 +552,29 @@ func (r *run) poll(ctx context.Context) (message, error) {
 		}
 		return message{}, fmt.Errorf("Open WebUI: %s", text)
 	}
-	return message{content: m.Get("content").String(), done: m.Get("done").Bool(), usage: m.Get("usage")}, nil
+	return message{content: m.Get("content").String(), reasoning: reasoningOf(m), done: m.Get("done").Bool(), usage: m.Get("usage")}, nil
+}
+
+// reasoningOf joins the text of the message's reasoning items. Open WebUI
+// keeps the model's reasoning in the message's output list, not in its
+// content, and saves it as it grows (verified on 0.12.3). A tool loop has one
+// reasoning item per model call, each finished before the next starts, so the
+// joined text only grows while the task runs.
+func reasoningOf(m gjson.Result) string {
+	var items []string
+	for _, item := range m.Get("output").Array() {
+		if item.Get("type").String() != "reasoning" {
+			continue
+		}
+		var text strings.Builder
+		for _, part := range item.Get("content").Array() {
+			text.WriteString(part.Get("text").String())
+		}
+		if text.Len() > 0 {
+			items = append(items, text.String())
+		}
+	}
+	return strings.Join(items, "\n\n")
 }
 
 // idle reports whether the chat has no task left running.
@@ -625,6 +649,10 @@ func (r *run) afterwards(method, path string) {
 
 // completion builds the OpenAI response for a finished message.
 func (r *run) completion(msg message) map[string]any {
+	reply := map[string]any{"role": "assistant", "content": msg.content}
+	if msg.reasoning != "" {
+		reply["reasoning_content"] = msg.reasoning
+	}
 	resp := map[string]any{
 		"id":      "chatcmpl-" + r.messageID,
 		"object":  "chat.completion",
@@ -632,7 +660,7 @@ func (r *run) completion(msg message) map[string]any {
 		"model":   r.model,
 		"choices": []any{map[string]any{
 			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": msg.content},
+			"message":       reply,
 			"finish_reason": "stop",
 		}},
 	}
@@ -688,11 +716,10 @@ func (r *run) chunk(delta map[string]any, finish any) []byte {
 	return data
 }
 
-// stream polls in the background and turns each growth of the message into
-// a chunk. Open WebUI only ever appends to the content while a task runs; a
-// snapshot that doesn't extend what was sent waits for one that does. The
-// chat is finished after the stream has ended, so neither the client's
-// response nor Close waits on those calls.
+// stream polls in the background and turns each growth of the message's
+// reasoning and content into a chunk, reasoning first, as llama-server streams
+// reasoning_content ahead of content. The chat is finished after the stream
+// has ended, so neither the client's response nor Close waits on those calls.
 func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &chunkStream{events: make(chan streamEvent), cancel: cancel, done: make(chan struct{})}
@@ -713,14 +740,17 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 			stop = true
 			return
 		}
-		sent := ""
-		msg, err := r.wait(ctx, func(content string) error {
-			if len(content) <= len(sent) || !strings.HasPrefix(content, sent) {
-				return nil
+		var sentReasoning, sentContent string
+		msg, err := r.wait(ctx, func(msg message) error {
+			if delta, ok := growth(msg.reasoning, &sentReasoning); ok {
+				if err := send(r.chunk(map[string]any{"reasoning_content": delta}, nil)); err != nil {
+					return err
+				}
 			}
-			delta := content[len(sent):]
-			sent = content
-			return send(r.chunk(map[string]any{"content": delta}, nil))
+			if delta, ok := growth(msg.content, &sentContent); ok {
+				return send(r.chunk(map[string]any{"content": delta}, nil))
+			}
+			return nil
 		})
 		stop = err != nil && ctx.Err() != nil
 		if err == nil {
@@ -740,6 +770,18 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 		}
 	}()
 	return s
+}
+
+// growth returns what snapshot adds to *sent and records it as sent. Open
+// WebUI only ever appends while a task runs; a snapshot that doesn't extend
+// what was sent waits for one that does.
+func growth(snapshot string, sent *string) (string, bool) {
+	if len(snapshot) <= len(*sent) || !strings.HasPrefix(snapshot, *sent) {
+		return "", false
+	}
+	delta := snapshot[len(*sent):]
+	*sent = snapshot
+	return delta, true
 }
 
 type streamEvent struct {
