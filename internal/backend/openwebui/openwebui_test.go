@@ -33,6 +33,7 @@ type fakeWebUI struct {
 	contents  []string // successive assistant contents; the last is done
 	errorText string   // set: the message ends with this error
 	startCode int      // set: /api/chat/completions answers with this status
+	startBody string   // set: /api/chat/completions answers 200 with this body
 
 	created    string // body of /api/v1/chats/new
 	started    string // body of /api/chat/completions
@@ -70,6 +71,10 @@ func (f *fakeWebUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(f.startCode)
 			io.WriteString(w, `{"detail":"Model not found"}`)
+			return
+		}
+		if f.startBody != "" {
+			io.WriteString(w, f.startBody)
 			return
 		}
 		io.WriteString(w, `{"status":true,"task_ids":["t1"],"chat_id":"chat-1"}`)
@@ -521,6 +526,18 @@ func TestChatErrors(t *testing.T) {
 	}
 	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
 		t.Errorf("calls: %s", calls)
+	}
+	// A start that answers without task_ids is logged as an error, and the
+	// chat is still polled for the reply.
+	f = &fakeWebUI{contents: []string{"hi"}, startBody: `{"choices":[{"message":{"content":"hi"}}]}`}
+	b := serve(t, f, "")
+	var logged bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&logged, nil))
+	if res, err := chat(t, b, chatBody, false); err != nil || !strings.Contains(string(res.Response.Body), `"content":"hi"`) {
+		t.Errorf("no task_ids: %+v, %v", res.Response, err)
+	}
+	if out := logged.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "started no background task") {
+		t.Errorf("log: %s", out)
 	}
 	// Open WebUI has no legacy completions; nothing is created.
 	f = &fakeWebUI{}

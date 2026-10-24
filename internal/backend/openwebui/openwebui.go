@@ -452,8 +452,13 @@ func (r *run) createChat(ctx context.Context, body []byte) error {
 // start sends the completion: the client's body, edited byte-wise, with the
 // chat, message and session that make it a UI request. stream is always on,
 // since Open WebUI only runs native tools on its streaming path; whether the
-// client gets a stream is decided here, not by Open WebUI. A refusal from Open
-// WebUI is returned as the response, like any backend's error.
+// client gets a stream is decided here, not by Open WebUI. With chat_id and
+// session_id set, Open WebUI runs the generation as a background task and
+// answers at once with its task_ids, which is why the content is read by
+// polling the chat (Open WebUI source, main.py chat_completion; not run). An
+// answer without task_ids is logged as an error and the chat is polled
+// anyway: the reply may still arrive, but only once it is finished. A refusal
+// from Open WebUI is returned as the response, like any backend's error.
 func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
 	body := req.Body
 	var err error
@@ -486,6 +491,9 @@ func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.Chat
 	}
 	if resp.StatusCode/100 != 2 {
 		return &backend.ChatResponse{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: data}, nil
+	}
+	if !gjson.GetBytes(data, "task_ids").IsArray() {
+		r.b.log.Error("Open WebUI started no background task; the reply can't stream and arrives only once finished", "chat", r.chatID, "response", snippet(data))
 	}
 	return nil, nil
 }
