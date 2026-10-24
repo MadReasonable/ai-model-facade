@@ -76,6 +76,28 @@ func TestUndefinedEnvIsAnErrorWithPosition(t *testing.T) {
 	}
 }
 
+func TestDuplicateEntryNamesAreErrors(t *testing.T) {
+	cases := map[string]struct {
+		src, section, want string
+	}{
+		"backends": {strings.Replace(minimal, "models:", "  llamaSwap: {type: llamaSwap, baseUrl: \"http://y\"}\nmodels:", 1), "backends", "line 6: backends.llamaSwap is defined again (first at line 5)"},
+		"models":   {minimal + "  task: {backend: llamaSwap}\n", "models", "line 8: models.task is defined again (first at line 7)"},
+	}
+	for name, c := range cases {
+		cfg, err := Parse([]byte(c.src), env(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		section := &cfg.Backends
+		if c.section == "models" {
+			section = &cfg.Models
+		}
+		if _, err := Entries(section, c.section); err == nil || err.Error() != c.want {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
 func TestUnknownKeysAreErrors(t *testing.T) {
 	cases := map[string]string{
 		"top level": minimal + "extra: 1\n",

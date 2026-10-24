@@ -102,7 +102,9 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 	return &cfg, nil
 }
 
-// Entries lists a section's named entries in file order.
+// Entries lists a section's named entries in file order. A repeated name is an
+// error: callers keep entries both in order and in a map by name, and the two
+// would disagree on which definition the name means.
 func Entries(section *yaml.Node, sectionName string) ([]Entry, error) {
 	section = resolve(section)
 	if section.Kind == 0 || isNull(section) {
@@ -112,8 +114,13 @@ func Entries(section *yaml.Node, sectionName string) ([]Entry, error) {
 		return nil, fmt.Errorf("line %d: %s must be a map", section.Line, sectionName)
 	}
 	var entries []Entry
+	seen := map[string]int{}
 	for i := 0; i < len(section.Content); i += 2 {
 		k, v := section.Content[i], resolve(section.Content[i+1])
+		if first, ok := seen[k.Value]; ok {
+			return nil, fmt.Errorf("line %d: %s.%s is defined again (first at line %d)", k.Line, sectionName, k.Value, first)
+		}
+		seen[k.Value] = k.Line
 		if v.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("line %d: %s.%s must be a map", v.Line, sectionName, k.Value)
 		}

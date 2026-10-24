@@ -315,7 +315,7 @@ It is a place to define YAML anchors (`&name`) that entries reference explicitly
 
 ### Errors and warnings
 
-A config that is wrong is a startup error, reported with its line number: unknown keys, undefined environment variables, a reference to a backend that isn't defined.
+A config that is wrong is a startup error, reported with its line number: unknown keys, undefined environment variables, a backend or model name defined twice, a reference to a backend that isn't defined.
 Checks that depend on a backend being up and current only warn: a backend that can't be reached, or an exact candidate ID it doesn't list.
 `serve` logs the warnings and starts, so one backend that is down, or not ready yet, doesn't take the other backends' facades with it; an unlisted candidate never shows as loaded until its backend lists it.
 If a backend that a check needs can't be reached, `serve` asks it for its models again every `listRetrySeconds`, and once it answers, runs the checks that were waiting for it and logs what they find.
