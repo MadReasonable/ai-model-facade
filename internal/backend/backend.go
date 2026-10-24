@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 )
 
 type ModelInfo struct {
@@ -118,6 +119,46 @@ func StateWaitAllowed(ctx context.Context) bool {
 }
 
 var ErrStateBusy = errors.New("backend state refresh already in flight and nothing cached")
+
+type stateSnapshotKey struct{}
+
+// stateSnapshot holds the first state each backend reported under one ctx.
+type stateSnapshot struct {
+	mu    sync.Mutex
+	reads map[ModelStateProvider]*stateRead
+}
+
+type stateRead struct {
+	once   sync.Once
+	models []ModelInfo
+	err    error
+}
+
+// WithStateSnapshot marks ctx so that LoadedModels reads each backend's state
+// at most once under it, and later reads get the same answer. /v1/models uses
+// it: its virtual models are selected one after another, so without it a
+// listing would refresh each backend once per virtual model when the state
+// isn't cached, and two entries could be judged against different states.
+func WithStateSnapshot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, stateSnapshotKey{}, &stateSnapshot{reads: map[ModelStateProvider]*stateRead{}})
+}
+
+// LoadedModels returns p's state, from ctx's snapshot if it has one.
+func LoadedModels(ctx context.Context, p ModelStateProvider) ([]ModelInfo, error) {
+	s, _ := ctx.Value(stateSnapshotKey{}).(*stateSnapshot)
+	if s == nil {
+		return p.LoadedModels(ctx)
+	}
+	s.mu.Lock()
+	r := s.reads[p]
+	if r == nil {
+		r = &stateRead{}
+		s.reads[p] = r
+	}
+	s.mu.Unlock()
+	r.once.Do(func() { r.models, r.err = p.LoadedModels(ctx) })
+	return slices.Clone(r.models), r.err
+}
 
 // Endpoint is the OpenAI API endpoint a request was made to.
 type Endpoint string

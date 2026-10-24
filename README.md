@@ -349,7 +349,7 @@ All take these keys:
 | `baseUrl` | The backend's address. Required. |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own `Authorization` header (or none). Default `false`. |
-| `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks on every request. Concurrent requests share one in-flight check either way. |
+| `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks on every request; a `/v1/models` listing asks once per backend for all its entries. Concurrent requests share one in-flight check either way. |
 | `stateTimeoutSeconds` | Timeout for the state and model-list calls. Default `10`. |
 | `listRetrySeconds` | If the backend couldn't be listed at startup, how often to ask it for its models again, so the checks that need them run once it answers; see [Errors and warnings](#errors-and-warnings). Default `30`. |
 | `connectTimeoutSeconds` | Connection timeout. Default `0`, no limit. |

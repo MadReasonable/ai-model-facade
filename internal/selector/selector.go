@@ -176,7 +176,7 @@ func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			loadedModels, err := cb.(backend.ModelStateProvider).LoadedModels(ctx)
+			loadedModels, err := backend.LoadedModels(ctx, cb.(backend.ModelStateProvider))
 			if err != nil {
 				st.err = err
 				return

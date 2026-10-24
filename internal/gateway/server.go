@@ -134,8 +134,9 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 		Object string        `json:"object"`
 		Data   []modelObject `json:"data"`
 	}{Object: "list", Data: []modelObject{}}
+	ctx := backend.WithStateSnapshot(r.Context())
 	for _, m := range s.gateway.Models {
-		list.Data = append(list.Data, s.modelObject(r.Context(), m))
+		list.Data = append(list.Data, s.modelObject(ctx, m))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)

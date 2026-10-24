@@ -34,6 +34,7 @@ type fakeSwap struct {
 	chatAuth    string // Authorization header of the last chat request
 	stateAuth   string // Authorization header of the last /running request
 	failRunning bool   // answer /running with 500
+	runningN    int    // /running requests answered
 }
 
 func (f *fakeSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +49,7 @@ func (f *fakeSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			`{"id":"qwen3.8-27b:Dreamer","meta":{"llamaswap":{"type":"alias","modelID":"qwen3.8-27b:q6_k"}}},`+
 			`{"id":"qwen2.5-coder-3b:q8_0"}]}`)
 	case "/running":
+		f.runningN++
 		f.stateAuth = r.Header.Get("Authorization")
 		if f.failRunning {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -438,6 +440,38 @@ func TestListModels(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&list)
 	if len(list.Data) != 1 || list.Data[0].ID != "task" || list.Data[0].Description != "Background tasks" {
 		t.Errorf("got %+v", list)
+	}
+}
+
+// A listing reads each backend's state once, however many virtual models use
+// it, and selects every entry against that state.
+func TestListModelsReadsStateOnce(t *testing.T) {
+	swap := &fakeSwap{loaded: []string{"qwen3.8-27b:q6_k"}}
+	srv, _ := buildGateway(t, swap, testConfig+"  other:\n    backend: llamaSwap\n    candidates: [{model: qwen3.8-27b:q6_k}]\n", discard)
+	swap.mu.Lock()
+	swap.runningN = 0
+	swap.mu.Unlock()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var list struct {
+		Data []struct {
+			ID      string
+			Current struct{ Model string }
+		}
+	}
+	json.NewDecoder(resp.Body).Decode(&list)
+	if len(list.Data) != 2 || list.Data[0].Current.Model != "qwen3.8-27b:q6_k" || list.Data[1].Current.Model != "qwen3.8-27b:q6_k" {
+		t.Errorf("got %+v", list)
+	}
+	swap.mu.Lock()
+	defer swap.mu.Unlock()
+	if swap.runningN != 1 {
+		t.Errorf("/running requested %d times, want 1", swap.runningN)
 	}
 }
 
