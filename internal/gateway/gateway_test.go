@@ -404,6 +404,35 @@ func TestErrors(t *testing.T) {
 	}
 }
 
+// Requests refused before selection get a log line of their own, naming the
+// client or the fingerprint of an unlisted key, never the key.
+func TestRejectionsAreLogged(t *testing.T) {
+	old := maxBodyBytes
+	maxBodyBytes = 1024
+	t.Cleanup(func() { maxBodyBytes = old })
+	var logs bytes.Buffer
+	srv, _ := buildGateway(t, &fakeSwap{}, testConfig, slog.New(slog.NewTextHandler(&logs, nil)))
+	sum := sha256.Sum256([]byte("wrong-key"))
+	cases := []struct {
+		key, body, want string
+	}{
+		{"", `{"model":"task"}`, `path=/v1/chat/completions status=401 error="invalid or missing API key"`},
+		{"wrong-key", `{"model":"task"}`, "status=401 fingerprint=" + hex.EncodeToString(sum[:4]) + ` error="invalid or missing API key"`},
+		{"secret", `{"model":`, `status=400 client=openWebUi error="request body must be a JSON object"`},
+		{"secret", `{"model":"task","model":"x"}`, `status=400 client=openWebUi error="request body contains duplicate key 'model'"`},
+		{"secret", `{"model":"task","x":"` + strings.Repeat("a", 2048) + `"}`, `status=413 client=openWebUi error="request body exceeds 1024 bytes"`},
+	}
+	for _, c := range cases {
+		post(t, srv, c.key, c.body)
+		if out := logs.String(); !strings.Contains(out, `msg="request rejected" `) || !strings.Contains(out, c.want) {
+			t.Errorf("want %s in log:\n%s", c.want, out)
+		}
+	}
+	if out := logs.String(); strings.Contains(out, "wrong-key") || strings.Contains(out, "secret") {
+		t.Errorf("log leaks a key:\n%s", out)
+	}
+}
+
 func TestNoCandidateIs503(t *testing.T) {
 	cfg := strings.Replace(testConfig, "        loadIfNone: true\n", "", 1)
 	backendSrv := httptest.NewServer(&fakeSwap{})

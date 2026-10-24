@@ -82,14 +82,16 @@ func (s *server) authenticated(next clientHandler) http.HandlerFunc {
 				}
 			}
 		}
+		if hasToken {
+			sum := sha256.Sum256([]byte(token))
+			client.Fingerprint = hex.EncodeToString(sum[:4])
+		}
 		if len(cfg.APIKeys) > 0 && cfg.UnknownKeys != "allow" {
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")
+			s.reject(w, r, client, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")
 			return
 		}
 		if hasToken {
-			sum := sha256.Sum256([]byte(token))
 			client.Name = config.UnknownClient
-			client.Fingerprint = hex.EncodeToString(sum[:4])
 		}
 		next(w, r, client)
 	}
@@ -172,23 +174,23 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+			s.reject(w, r, client, http.StatusRequestEntityTooLarge, "invalid_request_error", fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "reading request body: "+err.Error())
+		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "reading request body: "+err.Error())
 		return
 	}
 	if !gjson.ValidBytes(body) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
+		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
 		return
 	}
 	parsed := gjson.ParseBytes(body)
 	if !parsed.IsObject() {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
+		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
 		return
 	}
 	if key := duplicateKey(parsed); key != "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key '%s'", key))
+		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key '%s'", key))
 		return
 	}
 	name := gjson.GetBytes(body, "model").String()
@@ -373,6 +375,21 @@ type errorDetail struct {
 
 func errorBody(errType, message string) map[string]errorDetail {
 	return map[string]errorDetail{"error": {Message: message, Type: errType}}
+}
+
+// reject answers a request refused before selection and logs it, since no
+// selection line follows. The client's key is never logged, only its name or
+// fingerprint.
+func (s *server) reject(w http.ResponseWriter, r *http.Request, client backend.Client, status int, errType, message string) {
+	attrs := []any{"path", r.URL.Path, "status", status}
+	if client.Name != "" {
+		attrs = append(attrs, "client", client.Name)
+	}
+	if client.Fingerprint != "" {
+		attrs = append(attrs, "fingerprint", client.Fingerprint)
+	}
+	s.log.Warn("request rejected", append(attrs, "error", message)...)
+	writeError(w, status, errType, message)
 }
 
 func writeError(w http.ResponseWriter, status int, errType, message string) {
