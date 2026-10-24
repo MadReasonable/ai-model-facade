@@ -488,10 +488,14 @@ func TestChatErrors(t *testing.T) {
 
 func TestUsage(t *testing.T) {
 	for raw, want := range map[string]string{
-		`{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"input_tokens":4}`: `{"completion_tokens":3,"prompt_tokens":2,"total_tokens":5}`,
+		`{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,"input_tokens":4}`: `{"completion_tokens":3,"prompt_tokens":4,"total_tokens":7}`,
 		`{"input_tokens":5845,"output_tokens":2,"total_tokens":5847,"cache_n":5841}`:  `{"completion_tokens":2,"prompt_tokens":5845,"total_tokens":5847}`,
 		`{"input_tokens":4,"output_tokens":2}`:                                        `{"completion_tokens":2,"prompt_tokens":4,"total_tokens":6}`,
 		`{"eval_count":3}`:                                                            `null`,
+
+		// A two-call tool loop as Open WebUI merges it: 10+2, then 15+3.
+		`{"input_tokens":25,"output_tokens":5,"total_tokens":30,"prompt_tokens":15,"completion_tokens":3}`: `{"completion_tokens":5,"prompt_tokens":25,"total_tokens":30}`,
+		`{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}`:                                       `{"completion_tokens":3,"prompt_tokens":2,"total_tokens":5}`,
 	} {
 		got, _ := json.Marshal(usageOf(message{usage: gjson.Parse(raw)}))
 		if string(got) != want {

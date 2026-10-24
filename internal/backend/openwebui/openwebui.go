@@ -630,6 +630,13 @@ func (r *run) completion(msg message) map[string]any {
 // by connection: Ollama models carry OpenAI's names, while an OpenAI-type
 // connection (seen through a gateway to llama-swap) carried only
 // input_tokens and output_tokens.
+//
+// input_tokens and output_tokens come first because they cover the entire
+// reply: since v0.11.0, Open WebUI's merge_usage adds input_tokens,
+// output_tokens and total_tokens across the model calls of a tool loop, while
+// prompt_tokens and completion_tokens keep only the last call's values
+// (Open WebUI source, utils/response.py; not run). total_tokens is used only
+// next to both summed counts, so the three always agree.
 func usageOf(msg message) map[string]any {
 	tokens := func(names ...string) (int64, bool) {
 		for _, n := range names {
@@ -639,14 +646,16 @@ func usageOf(msg message) map[string]any {
 		}
 		return 0, false
 	}
-	prompt, okPrompt := tokens("prompt_tokens", "input_tokens")
-	completion, okCompletion := tokens("completion_tokens", "output_tokens")
+	prompt, okPrompt := tokens("input_tokens", "prompt_tokens")
+	completion, okCompletion := tokens("output_tokens", "completion_tokens")
 	if !okPrompt && !okCompletion {
 		return nil
 	}
-	total, ok := tokens("total_tokens")
-	if !ok {
-		total = prompt + completion
+	total := prompt + completion
+	if msg.usage.Get("input_tokens").Exists() && msg.usage.Get("output_tokens").Exists() {
+		if t, ok := tokens("total_tokens"); ok {
+			total = t
+		}
 	}
 	return map[string]any{"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 }
