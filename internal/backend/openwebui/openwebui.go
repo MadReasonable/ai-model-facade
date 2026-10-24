@@ -132,7 +132,7 @@ func (b *Backend) checkPrefixes(models []listedModel, catalog *backend.Catalog, 
 			continue
 		}
 		if id, ok := b.llamaSwapID(m.ID); !ok || !catalog.Contains(id) {
-			warn(fmt.Errorf("Open WebUI model '%s' is a llama-swap model, but '%s' is not listed by llamaSwap.backend '%s', so it never counts as loaded; check llamaSwap.prefixId", m.ID, id, b.llamaSwapConfig.Backend))
+			warn(fmt.Errorf("Open WebUI model '%s' is a llama-swap model, but '%s' is not listed by llamaSwap.backend '%s' and won't count as loaded; check llamaSwap.prefixId", m.ID, id, b.llamaSwapConfig.Backend))
 		}
 	}
 }

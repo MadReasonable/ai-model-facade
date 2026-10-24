@@ -112,7 +112,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 				// Not fatal: the backend may list it later, e.g. Open WebUI once
 				// it has fetched this gateway's own virtual models. Until then it
 				// never shows as loaded.
-				warn(fmt.Errorf("models.%s: line %d: model '%s' is not listed by backend '%s', so it never counts as loaded until it is%s", entry.Name, node.Line, candidate.Model, name, didYouMean(catalog.WithTags(candidate.Model))))
+				warn(fmt.Errorf("models.%s: line %d: model '%s' is not listed by backend '%s' and won't count as loaded until it is%s", entry.Name, node.Line, candidate.Model, name, didYouMean(catalog.WithTags(candidate.Model))))
 			}
 			noteAliases(env.Log, entry.Name, candidate.Model, catalog, hasParams)
 		}})
