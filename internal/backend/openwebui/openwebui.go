@@ -455,10 +455,11 @@ func (r *run) createChat(ctx context.Context, body []byte) error {
 // client gets a stream is decided here, not by Open WebUI. With chat_id and
 // session_id set, Open WebUI runs the generation as a background task and
 // answers at once with its task_ids, which is why the content is read by
-// polling the chat (Open WebUI source, main.py chat_completion; not run). An
-// answer without task_ids is logged as an error and the chat is polled
-// anyway: the reply may still arrive, but only once it is finished. A refusal
-// from Open WebUI is returned as the response, like any backend's error.
+// polling the chat (Open WebUI source, main.py chat_completion; verified on
+// 0.12.3). An answer without task_ids is logged as an error and the chat is
+// polled anyway: the reply may still arrive, but only once it is finished. A
+// refusal from Open WebUI is returned as the response, like any backend's
+// error.
 func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
 	body := req.Body
 	var err error
@@ -650,8 +651,9 @@ func (r *run) completion(msg message) map[string]any {
 // reply: since v0.11.0, Open WebUI's merge_usage adds input_tokens,
 // output_tokens and total_tokens across the model calls of a tool loop, while
 // prompt_tokens and completion_tokens keep only the last call's values
-// (Open WebUI source, utils/response.py; not run). total_tokens is used only
-// next to both summed counts, so the three always agree.
+// (Open WebUI source, utils/response.py; verified on 0.12.3 with a three-call
+// tool loop; the v0.11.0 start is from the source only). total_tokens is used
+// only next to both summed counts, so the three always agree.
 func usageOf(msg message) map[string]any {
 	tokens := func(names ...string) (int64, bool) {
 		for _, n := range names {
