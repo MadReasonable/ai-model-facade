@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,6 +40,7 @@ type fakeWebUI struct {
 	chatID     string
 	calls      []string // method and path of every chat-flow call
 	hold       chan struct{}
+	holdStop   chan struct{} // set: the stop call waits until it is closed
 	modelsAuth string
 }
 
@@ -96,6 +98,11 @@ func (f *fakeWebUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, `{"task_ids":["t1"]}`)
 	case path == "/api/v1/chats/chat-1" && r.Method == http.MethodDelete, path == "/api/v1/chats/chat-1/archive", path == "/api/tasks/chat/chat-1/stop":
+		if path == "/api/tasks/chat/chat-1/stop" && f.holdStop != nil {
+			f.mu.Unlock()
+			<-f.holdStop
+			f.mu.Lock()
+		}
 		io.WriteString(w, `true`)
 	default:
 		http.NotFound(w, r)
@@ -439,9 +446,9 @@ func TestChatStream(t *testing.T) {
 }
 
 // A client that goes away mid-stream stops the task, and the chat is still
-// cleaned up.
+// cleaned up. Close returns without waiting for either call.
 func TestStreamCloseStopsTask(t *testing.T) {
-	f := &fakeWebUI{contents: []string{"", "a", "ab", "abc"}, hold: make(chan struct{})}
+	f := &fakeWebUI{contents: []string{"", "a", "ab", "abc"}, hold: make(chan struct{}), holdStop: make(chan struct{})}
 	b := serve(t, f, "")
 	res, err := chat(t, b, chatBody, true)
 	if err != nil {
@@ -454,11 +461,48 @@ func TestStreamCloseStopsTask(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		close(f.hold)
 	}()
-	res.Stream.Close()
-	if calls := strings.Join(f.callsSnapshot(), ";"); !strings.Contains(calls, "POST /api/tasks/chat/chat-1/stop") {
-		t.Errorf("calls after close: %s", calls)
+	closed := make(chan struct{})
+	go func() {
+		res.Stream.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Error("Close waited for the stop call")
 	}
-	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "DELETE /api/v1/chats/chat-1") {
+	close(f.holdStop)
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "POST /api/tasks/chat/chat-1/stop;DELETE /api/v1/chats/chat-1") {
+		t.Errorf("calls: %s", calls)
+	}
+}
+
+// A non-streaming request whose client goes away returns at once; the task is
+// stopped and the chat cleaned up afterwards.
+func TestChatCancelStopsTask(t *testing.T) {
+	f := &fakeWebUI{contents: []string{"", "a", "ab", "abc"}, hold: make(chan struct{}), holdStop: make(chan struct{})}
+	b := serve(t, f, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+		close(f.hold)
+	}()
+	returned := make(chan error, 1)
+	go func() {
+		_, err := b.Chat(ctx, backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(chatBody)})
+		returned <- err
+	}()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("got %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("Chat waited for the stop call")
+	}
+	close(f.holdStop)
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "POST /api/tasks/chat/chat-1/stop;DELETE /api/v1/chats/chat-1") {
 		t.Errorf("calls: %s", calls)
 	}
 }

@@ -394,8 +394,8 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	if req.Stream {
 		return backend.ChatResult{Stream: r.stream(ctx, gjson.GetBytes(req.Body, "stream_options.include_usage").Bool())}, nil
 	}
-	defer func() { go r.cleanup() }()
 	msg, err := r.wait(ctx, nil)
+	go r.finish(err != nil && ctx.Err() != nil)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -499,7 +499,7 @@ type message struct {
 
 // wait polls until the message is done and the chat has no task left,
 // passing each new snapshot of the content to onContent. If ctx ends first,
-// the task is stopped.
+// the task may still be running; the caller stops it with finish.
 func (r *run) wait(ctx context.Context, onContent func(string) error) (message, error) {
 	ticker := time.NewTicker(r.b.poll)
 	defer ticker.Stop()
@@ -515,14 +515,10 @@ func (r *run) wait(ctx context.Context, onContent func(string) error) (message, 
 			}
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				r.stop()
-			}
 			return message{}, err
 		}
 		select {
 		case <-ctx.Done():
-			r.stop()
 			return message{}, ctx.Err()
 		case <-ticker.C:
 		}
@@ -578,6 +574,17 @@ const cleanupTimeout = 10 * time.Second
 // stop asks Open WebUI to stop the chat's task, best effort.
 func (r *run) stop() {
 	r.afterwards(http.MethodPost, "/api/tasks/chat/"+r.chatID+"/stop")
+}
+
+// finish makes the calls that follow a chat: stop, if the client left while
+// the task may still be running, then cleanup. Callers run it in the
+// background, so neither a response nor Close waits on Open WebUI. Stop comes
+// first, so the task isn't left running against a chat that no longer exists.
+func (r *run) finish(stop bool) {
+	if stop {
+		r.stop()
+	}
+	r.cleanup()
 }
 
 // cleanup deletes, archives or keeps the chat, as configured.
@@ -674,13 +681,14 @@ func (r *run) chunk(delta map[string]any, finish any) []byte {
 // stream polls in the background and turns each growth of the message into
 // a chunk. Open WebUI only ever appends to the content while a task runs; a
 // snapshot that doesn't extend what was sent waits for one that does. The
-// chat is cleaned up after the stream has ended, so the client's response
-// doesn't wait on that call.
+// chat is finished after the stream has ended, so neither the client's
+// response nor Close waits on those calls.
 func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &chunkStream{events: make(chan streamEvent), cancel: cancel, done: make(chan struct{})}
 	go func() {
-		defer r.cleanup()
+		stop := false
+		defer func() { r.finish(stop) }()
 		defer close(s.done)
 		defer close(s.events)
 		send := func(data []byte) error {
@@ -692,7 +700,7 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 			}
 		}
 		if send(r.chunk(map[string]any{"role": "assistant", "content": ""}, nil)) != nil {
-			r.stop()
+			stop = true
 			return
 		}
 		sent := ""
@@ -704,6 +712,7 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 			sent = content
 			return send(r.chunk(map[string]any{"content": delta}, nil))
 		})
+		stop = err != nil && ctx.Err() != nil
 		if err == nil {
 			err = send(r.chunk(map[string]any{}, "stop"))
 		}
@@ -743,8 +752,8 @@ func (s *chunkStream) Next() ([]byte, error) {
 	return ev.data, ev.err
 }
 
-// Close stops polling (and the task, if it is still running). The chat's
-// cleanup follows in the background; Close doesn't wait for it.
+// Close stops polling. Stopping the task, if it is still running, and the
+// chat's cleanup follow in the background; Close doesn't wait for them.
 func (s *chunkStream) Close() error {
 	s.cancel()
 	<-s.done
