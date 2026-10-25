@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,7 +46,8 @@ const usage = `usage:
 var version = ""
 
 // currentVersion is the version set at build time, else the module version
-// that `go install ...@v0.1.0` records, else "dev".
+// that `go install ...@v0.1.0` or a build in a git checkout records, else
+// "dev".
 func currentVersion() string {
 	if version != "" {
 		return version
@@ -145,9 +147,15 @@ func serve(path string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// Listen before logging "listening", so the log line, and anything that
+	// waits for it, never comes before the port is open.
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
 	errs := make(chan error, 1)
 	go func() {
-		errs <- srv.ListenAndServe()
+		errs <- srv.Serve(ln)
 	}()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)

@@ -103,10 +103,11 @@ Each release publishes it for amd64 and arm64 as `ghcr.io/madreasonable/ai-model
 To build it from source instead:
 
 ```bash
-docker build --build-arg VERSION=$(git describe --tags --always) -t ai-model-facade .
+docker build -t ai-model-facade .
 ```
 
-`VERSION` is what `ai-model-facade version` and the startup log report; without it, they report `dev`.
+`ai-model-facade version` and the startup log report the version that Go reads from the git checkout: the tag on a tagged commit, otherwise a pseudo-version such as `v0.1.3-0.20261025182945-7cbab4d5a404`, with `+dirty` if there are uncommitted changes.
+`--build-arg VERSION=...` sets it instead, and outside a git checkout without it, the version is `dev`.
 
 Run it as a service in the same compose project as your backends, so `baseUrl` can use their service names:
 

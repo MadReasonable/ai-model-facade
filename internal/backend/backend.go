@@ -227,7 +227,9 @@ func (r ChatRequest) StateModel() string {
 	return gjson.GetBytes(r.Body, "model").String()
 }
 
-// ChatResponse is a complete, non-streamed response, passed through as-is.
+// ChatResponse is a complete, non-streamed response. Its status, content
+// type and body are passed on unchanged; of the backend's other headers,
+// only Retry-After is kept.
 type ChatResponse struct {
 	Status      int
 	ContentType string

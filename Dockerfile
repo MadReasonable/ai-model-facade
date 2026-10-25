@@ -2,7 +2,10 @@
 # multi-platform build doesn't run the Go compiler under emulation.
 FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 ARG TARGETOS TARGETARCH
-ARG VERSION=dev
+# Without VERSION, go build reads the version from .git, which is why the
+# build context keeps it: a tagged commit gives the tag, any other commit a
+# pseudo-version such as v0.1.3-0.20261025182945-7cbab4d5a404.
+ARG VERSION
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
