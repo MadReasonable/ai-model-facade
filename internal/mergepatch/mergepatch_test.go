@@ -50,7 +50,7 @@ func jsonEqual(t *testing.T, got, want string) {
 
 // RFC 7386 Appendix A, restricted to object targets and object patches (the
 // gateway only ever patches request bodies, which are objects).
-func TestRFC7386Examples(t *testing.T) {
+func TestPatch_RFC7386Examples(t *testing.T) {
 	cases := []struct{ target, patch, want string }{
 		{`{"a":"b"}`, `{"a":"c"}`, `{"a":"c"}`},
 		{`{"a":"b"}`, `{"b":"c"}`, `{"a":"b","b":"c"}`},
@@ -69,7 +69,7 @@ func TestRFC7386Examples(t *testing.T) {
 	}
 }
 
-func TestBodyBytesPreservedExceptPatchedKeys(t *testing.T) {
+func TestPatch_PreservesBytesExceptPatchedKeys(t *testing.T) {
 	body := `{"model":"task","messages":[{"role":"user","content":"hi"}],"max_tokens":50,"think":false,"tools":[{"type":"function"}],"x_vendor":{"n":1.000000000000000001}}`
 	patches := compile(t, `{max_tokens: 1000, think: null, chat_template_kwargs: {enable_thinking: false}}`)
 	got := applyAll(t, patches, body)
@@ -79,7 +79,7 @@ func TestBodyBytesPreservedExceptPatchedKeys(t *testing.T) {
 	}
 }
 
-func TestNestedMergeKeepsClientKeys(t *testing.T) {
+func TestPatch_NestedMergeKeepsClientKeys(t *testing.T) {
 	body := `{"chat_template_kwargs":{"reasoning_effort":"high","enable_thinking":true}}`
 	got := applyAll(t, compile(t, `{chat_template_kwargs: {enable_thinking: false}}`), body)
 	want := `{"chat_template_kwargs":{"reasoning_effort":"high","enable_thinking":false}}`
@@ -88,7 +88,7 @@ func TestNestedMergeKeepsClientKeys(t *testing.T) {
 	}
 }
 
-func TestAddedKeysFollowConfigOrder(t *testing.T) {
+func TestPatch_AddedKeysFollowConfigOrder(t *testing.T) {
 	got := applyAll(t, compile(t, "zeta: 1\nalpha: 2\nmid: {z: 1, a: 2}\n"), `{}`)
 	want := `{"zeta":1,"alpha":2,"mid":{"z":1,"a":2}}`
 	if got != want {
@@ -96,7 +96,7 @@ func TestAddedKeysFollowConfigOrder(t *testing.T) {
 	}
 }
 
-func TestPathSyntaxKeysAreEscaped(t *testing.T) {
+func TestPatch_EscapesPathSyntaxInKeys(t *testing.T) {
 	body := `{"qwen3":1,"qwen3.6":{"a":1}}`
 	patches := compile(t, `{"qwen3.6": {"b": 2}, "a*b?": 3, "p|q#": 4, "@x": 5, "0": 6}`)
 	got := applyAll(t, patches, body)
@@ -108,7 +108,7 @@ func TestPathSyntaxKeysAreEscaped(t *testing.T) {
 
 // sjson reads a leading ':' as its force-key marker, so such keys need extra
 // escaping or they patch the wrong field.
-func TestLeadingColonKeysAreEscaped(t *testing.T) {
+func TestPatch_EscapesLeadingColonKeys(t *testing.T) {
 	body := `{":0":1,"0":2,":x":{"a":1}}`
 	patches := compile(t, `{":0": null, ":x": {"b": 2}, ":new": 3}`)
 	got := applyAll(t, patches, body)
@@ -118,7 +118,7 @@ func TestLeadingColonKeysAreEscaped(t *testing.T) {
 	}
 }
 
-func TestNumericKeyInsideNewObject(t *testing.T) {
+func TestPatch_NumericKeyInsideANewObject(t *testing.T) {
 	got := applyAll(t, compile(t, `{n: {"0": 1, "x": null}}`), `{}`)
 	want := `{"n":{"0":1}}`
 	if got != want {
@@ -126,7 +126,7 @@ func TestNumericKeyInsideNewObject(t *testing.T) {
 	}
 }
 
-func TestListFormAppliesInOrder(t *testing.T) {
+func TestCompile_ListFormAppliesInOrder(t *testing.T) {
 	src := `
 - chat_template_kwargs: {enable_thinking: true, reasoning_effort: low}
 - thinking_budget_tokens: 2048
@@ -139,7 +139,7 @@ func TestListFormAppliesInOrder(t *testing.T) {
 	}
 }
 
-func TestAnchorsResolve(t *testing.T) {
+func TestCompile_ResolvesAnchors(t *testing.T) {
 	src := `
 vars:
   noThinking: &noThinking
@@ -163,7 +163,7 @@ params:
 	}
 }
 
-func TestLiteralsKeepTypesAndOrder(t *testing.T) {
+func TestCompile_LiteralsKeepTypesAndOrder(t *testing.T) {
 	got := applyAll(t, compile(t, `{s: "1", i: 1, f: 1.5, b: true, arr: [null, {z: 1, a: 2}], html: "<a&b>"}`), `{}`)
 	want := `{"s":"1","i":1,"f":1.5,"b":true,"arr":[null,{"z":1,"a":2}],"html":"<a&b>"}`
 	if got != want {
@@ -171,7 +171,7 @@ func TestLiteralsKeepTypesAndOrder(t *testing.T) {
 	}
 }
 
-func TestCompileErrors(t *testing.T) {
+func TestCompile_RejectsWhatIsntAPatch(t *testing.T) {
 	cases := map[string]string{
 		"scalar params":   `5`,
 		"list of scalars": `[1]`,
@@ -195,7 +195,7 @@ func TestCompileErrors(t *testing.T) {
 	}
 }
 
-func TestNullAndMissingParamsYieldNothing(t *testing.T) {
+func TestCompile_NullOrMissingParamsYieldNothing(t *testing.T) {
 	if p, err := Compile(&yaml.Node{}); err != nil || p != nil {
 		t.Errorf("missing: %v %v", p, err)
 	}
@@ -204,14 +204,14 @@ func TestNullAndMissingParamsYieldNothing(t *testing.T) {
 	}
 }
 
-func TestStringKeepsNulls(t *testing.T) {
+func TestPatch_StringKeepsNulls(t *testing.T) {
 	p := compile(t, `{max_tokens: 1000, think: null, k: {a: null}}`)
 	if got := p[0].String(); got != `{"max_tokens":1000,"think":null,"k":{"a":null}}` {
 		t.Errorf("got %s", got)
 	}
 }
 
-func TestCompose(t *testing.T) {
+func TestCompose_MergesPatchesIntoOne(t *testing.T) {
 	route := compile(t, `{max_tokens: 1000, think: null, chat_template_kwargs: {a: 1}}`)
 	cand := compile(t, `{chat_template_kwargs: {enable_thinking: false}, max_tokens: 5}`)
 	all := append(append([]Patch{}, route...), cand...)
@@ -230,7 +230,7 @@ func TestCompose(t *testing.T) {
 	}
 }
 
-func TestComposeInexact(t *testing.T) {
+func TestCompose_ReportsPatchesItCantMergeExactly(t *testing.T) {
 	for _, src := range []string{"- {k: 5}\n- {k: {a: 1}}\n", "- {k: null}\n- {k: {a: 1}}\n"} {
 		if _, ok := Compose(compile(t, src)); ok {
 			t.Errorf("%q: expected inexact composition", strings.TrimSpace(src))

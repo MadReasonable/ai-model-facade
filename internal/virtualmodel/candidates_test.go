@@ -11,7 +11,7 @@ import (
 
 // A preset listed without its base model gets the same override note as an
 // alias, exactly or through a pattern, and only when params are in play.
-func TestPresetOverrideNote(t *testing.T) {
+func TestCandidates_NotesThatAPresetMayOverrideParams(t *testing.T) {
 	catalog := backend.NewCatalog([]backend.ModelInfo{
 		{ID: "a", Aliases: []string{"a:Dreamer"}},
 		{ID: "b:Slacker", Preset: true},

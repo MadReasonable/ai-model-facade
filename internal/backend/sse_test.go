@@ -22,7 +22,7 @@ func stream(src string) *SSEStream {
 	return NewSSEStream(io.NopCloser(strings.NewReader(src)))
 }
 
-func TestSSEStream(t *testing.T) {
+func TestSSEStream_YieldsDataUntilDone(t *testing.T) {
 	src := ": keepalive\n\ndata: {\"a\":1}\n\nevent: x\r\ndata:{\"b\":2}\r\n\r\ndata: line1\ndata: line2\n\ndata: [DONE]\n\n"
 	events, err := readAll(stream(src))
 	if err != io.EOF {
@@ -34,7 +34,7 @@ func TestSSEStream(t *testing.T) {
 	}
 }
 
-func TestSSEStreamTruncated(t *testing.T) {
+func TestSSEStream_EndWithoutDoneIsAnError(t *testing.T) {
 	events, err := readAll(stream("data: 1\n\ndata: 2\n\n"))
 	if !errors.Is(err, io.ErrUnexpectedEOF) || len(events) != 2 {
 		t.Errorf("got %q, %v", events, err)
@@ -43,7 +43,7 @@ func TestSSEStreamTruncated(t *testing.T) {
 
 // An event not followed by a blank line is incomplete and is discarded, as
 // the SSE spec requires, even when its data is [DONE].
-func TestSSEStreamUnterminatedFinalEventIsDiscarded(t *testing.T) {
+func TestSSEStream_DiscardsAnUnterminatedFinalEvent(t *testing.T) {
 	for _, src := range []string{"data: 1\n\ndata: [DONE]", "data: 1\n\ndata: [DONE]\n", "data: 1\n\ndata: {\"truncat"} {
 		events, err := readAll(stream(src))
 		if !errors.Is(err, io.ErrUnexpectedEOF) || len(events) != 1 || events[0] != "1" {
@@ -52,7 +52,7 @@ func TestSSEStreamUnterminatedFinalEventIsDiscarded(t *testing.T) {
 	}
 }
 
-func TestSSEStreamErrorEvent(t *testing.T) {
+func TestSSEStream_ReturnsAnErrorEventAsAnError(t *testing.T) {
 	s := stream("data: ok\n\nevent: error\ndata: {\"error\":{\"message\":\"boom\"}}\n\n")
 	data, err := s.Next()
 	if err != nil || string(data) != "ok" {
@@ -67,7 +67,7 @@ func TestSSEStreamErrorEvent(t *testing.T) {
 
 // A bare line that isn't an SSE field (llama-server and some proxies write a
 // raw JSON error before closing) is surfaced in the truncation error.
-func TestSSEStreamTruncationKeepsLastLineContext(t *testing.T) {
+func TestSSEStream_EndWithoutDoneKeepsTheLastLine(t *testing.T) {
 	for _, src := range []string{"data: 1\n\n{\"error\":{\"code\":500}}\n", "data: 1\n\n{\"error\":{\"code\":500}}"} {
 		events, err := readAll(stream(src))
 		if !errors.Is(err, io.ErrUnexpectedEOF) || len(events) != 1 {
@@ -79,7 +79,7 @@ func TestSSEStreamTruncationKeepsLastLineContext(t *testing.T) {
 	}
 }
 
-func TestSSEStreamLineTooLong(t *testing.T) {
+func TestSSEStream_RejectsATooLongLine(t *testing.T) {
 	src := "data: " + strings.Repeat("x", maxSSELineBytes+1024) + "\n\ndata: [DONE]\n\n"
 	_, err := readAll(stream(src))
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
@@ -87,7 +87,7 @@ func TestSSEStreamLineTooLong(t *testing.T) {
 	}
 }
 
-func TestSSEStreamEventTooLarge(t *testing.T) {
+func TestSSEStream_RejectsATooLargeEvent(t *testing.T) {
 	line := "data: " + strings.Repeat("y", maxSSELineBytes-1024) + "\n"
 	src := strings.Repeat(line, maxSSEEventBytes/maxSSELineBytes+2) + "\n"
 	_, err := readAll(stream(src))

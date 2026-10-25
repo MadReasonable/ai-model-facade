@@ -42,7 +42,7 @@ func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, er
 	return models, f.err
 }
 
-func TestStartingOrder(t *testing.T) {
+func TestFirstLoaded_PrefersReadyThenStartingThenLoadIfNone(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{
 		{Model: "a"},
 		{Model: "b", LoadIfNone: true},
@@ -78,7 +78,7 @@ func TestStartingOrder(t *testing.T) {
 	}
 }
 
-func TestStartingGlob(t *testing.T) {
+func TestFirstLoaded_PatternMatchesAStartingModel(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.8-27b:*"}}}
 	sel, _ := s.Select(context.Background(), nil, &fakeBackend{starting: []string{"qwen3.8-27b:q6_k"}, aliases: qwen36})
 	if sel.Target != "qwen3.8-27b:q6_k" || sel.Reason != "starting" || sel.Checked[0] != "qwen3.8-27b:*: starting as qwen3.8-27b:q6_k" {
@@ -92,7 +92,7 @@ var qwen36 = map[string][]string{
 	"qwen3.8-27b:q6_k":     {"qwen3.8-27b:Dreamer", "qwen3.8-27b:Slacker"},
 }
 
-func TestAliasCandidateIsLoadedWhenItsBaseIs(t *testing.T) {
+func TestFirstLoaded_AliasIsLoadedWhenItsBaseIs(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.6-35b:Slacker"}}}
 	sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.6-35b-a3b:q8_0"}, aliases: qwen36})
 	if err != nil {
@@ -113,7 +113,7 @@ func TestAliasCandidateIsLoadedWhenItsBaseIs(t *testing.T) {
 
 // `qwen3.8-27b:*` must pick the quant, not the `qwen3.8-27b:Dreamer` preset
 // that sorts before it.
-func TestGlobPrefersBaseModelsOverAliases(t *testing.T) {
+func TestFirstLoaded_PatternPrefersBaseModelsOverAliases(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "qwen3.8-27b:*"}}}
 	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.8-27b:q6_k"}, aliases: qwen36})
 	if sel.Target != "qwen3.8-27b:q6_k" || sel.AliasOf != "" {
@@ -121,7 +121,7 @@ func TestGlobPrefersBaseModelsOverAliases(t *testing.T) {
 	}
 }
 
-func TestGlobMatchesAliasesWhenNoBaseDoes(t *testing.T) {
+func TestFirstLoaded_PatternMatchesAliasesWhenNoBaseDoes(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "*:Slacker"}}}
 	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"qwen3.8-27b:q6_k", "qwen3.6-35b-a3b:q8_0"}, aliases: qwen36})
 	if sel.Target != "qwen3.6-35b:Slacker" || sel.AliasOf != "qwen3.6-35b-a3b:q8_0" {
@@ -132,7 +132,7 @@ func TestGlobMatchesAliasesWhenNoBaseDoes(t *testing.T) {
 	}
 }
 
-func TestMatchesOrdersBasesThenAliases(t *testing.T) {
+func TestMatches_OrdersBasesThenAliases(t *testing.T) {
 	models := []backend.ModelInfo{
 		{ID: "qwen3.8-27b:q6_k", Aliases: qwen36["qwen3.8-27b:q6_k"]},
 		{ID: "qwen3.8-27b:iq4_xs"},
@@ -157,7 +157,7 @@ var task = &FirstLoaded{Candidates: []Candidate{
 }}
 
 // The matrix sets from docs/design.md §6.
-func TestTaskAgainstMatrixSets(t *testing.T) {
+func TestFirstLoaded_TaskAgainstTheMatrixSets(t *testing.T) {
 	cases := []struct {
 		set    string
 		loaded []string
@@ -183,7 +183,7 @@ func TestTaskAgainstMatrixSets(t *testing.T) {
 
 // A loadIfNone candidate in the middle of the list keeps its place when it is
 // loaded, but is only loaded on demand after every candidate has been checked.
-func TestLoadIfNoneInMiddleIsFallback(t *testing.T) {
+func TestFirstLoaded_LoadIfNoneIsTheFallbackWhereverItSits(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{
 		{Model: "a"},
 		{Model: "b", LoadIfNone: true},
@@ -218,7 +218,7 @@ func TestLoadIfNoneInMiddleIsFallback(t *testing.T) {
 	}
 }
 
-func TestGlobPicksFirstSortedMatch(t *testing.T) {
+func TestFirstLoaded_PatternPicksTheFirstSortedMatch(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "m:*"}}}
 	sel, _ := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"m:b", "m:a", "x"}})
 	if sel.Target != "m:a" || sel.Index != 0 {
@@ -226,7 +226,7 @@ func TestGlobPicksFirstSortedMatch(t *testing.T) {
 	}
 }
 
-func TestNoMatch(t *testing.T) {
+func TestFirstLoaded_ReportsNoMatch(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b:*"}}}
 	sel, err := s.Select(context.Background(), nil, &fakeBackend{loaded: []string{"c"}})
 	if err != nil {
@@ -239,7 +239,7 @@ func TestNoMatch(t *testing.T) {
 
 // A model whose state is unknown selects like one that isn't loaded, but is
 // logged as unknown; it can still win as the loadIfNone fallback.
-func TestUnknownStateSelectsAsNotLoaded(t *testing.T) {
+func TestFirstLoaded_UnknownStateSelectsAsNotLoaded(t *testing.T) {
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "u"}, {Model: "w:*"}, {Model: "r"}, {Model: "u", LoadIfNone: true}}}
 	b := &fakeBackend{loaded: []string{"r"}, unknown: []string{"u", "w:1"}}
 	sel, _ := s.Select(context.Background(), nil, b)
@@ -256,7 +256,7 @@ func TestUnknownStateSelectsAsNotLoaded(t *testing.T) {
 // Candidates on different backends are walked in list order as one list;
 // each backend's state is read once, and candidates on another backend than
 // the default are labelled with it.
-func TestMixedBackends(t *testing.T) {
+func TestFirstLoaded_WalksCandidatesOnSeveralBackendsAsOneList(t *testing.T) {
 	def := &fakeBackend{starting: []string{"a"}}
 	other := &fakeBackend{loaded: []string{"b"}}
 	s := &FirstLoaded{Candidates: []Candidate{
@@ -288,7 +288,7 @@ func TestMixedBackends(t *testing.T) {
 // A backend whose state can't be read makes its candidates count as not
 // loaded while others still serve; only if no backend can be read does the
 // selection fail.
-func TestMixedBackendStateFailure(t *testing.T) {
+func TestFirstLoaded_ServesWhileOneBackendIsDown(t *testing.T) {
 	def := &fakeBackend{err: errors.New("down")}
 	other := &fakeBackend{loaded: []string{"b"}}
 	s := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b", Backend: other, BackendName: "other"}}}
@@ -302,13 +302,18 @@ func TestMixedBackendStateFailure(t *testing.T) {
 	}
 }
 
-// slowBackend reports loaded as ready, but only once release is closed.
+// slowBackend reports loaded as ready, but only once release is closed. If
+// called is set, each read sends to it first.
 type slowBackend struct {
 	fakeBackend
 	release chan struct{}
+	called  chan struct{}
 }
 
 func (s *slowBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	if s.called != nil {
+		s.called <- struct{}{}
+	}
 	<-s.release
 	var models []backend.ModelInfo
 	for _, id := range s.loaded {
@@ -329,7 +334,7 @@ func selectAsync(s *FirstLoaded, b backend.Backend) <-chan Selection {
 
 // A slow backend holds up selection only when one of its candidates comes
 // before the winner, or when nothing is ready.
-func TestSlowBackend(t *testing.T) {
+func TestFirstLoaded_WaitsOnlyForTheBackendsItNeeds(t *testing.T) {
 	slow := &slowBackend{fakeBackend: fakeBackend{loaded: []string{"b"}}, release: make(chan struct{})}
 
 	// Ready before any candidate on the slow backend: no wait.
@@ -344,7 +349,11 @@ func TestSlowBackend(t *testing.T) {
 	}
 
 	// A candidate on the slow backend comes first, or only a starting
-	// candidate is ready to choose: both wait, then the slow one wins.
+	// candidate is ready to choose: both must wait. The slow backend answers
+	// only after both have asked it, so the slow backend's ready candidate
+	// winning shows they waited, since without waiting the first would pick
+	// a and the second the starting s.
+	slow = &slowBackend{fakeBackend: fakeBackend{loaded: []string{"b"}}, release: make(chan struct{}), called: make(chan struct{}, 2)}
 	cases := map[string]*FirstLoaded{
 		"slow first":        {Candidates: []Candidate{{Model: "b", Backend: slow, BackendName: "slow"}, {Model: "a"}}},
 		"starting vs ready": {Candidates: []Candidate{{Model: "s"}, {Model: "b", Backend: slow, BackendName: "slow"}}},
@@ -353,12 +362,11 @@ func TestSlowBackend(t *testing.T) {
 	for name, s := range cases {
 		results[name] = selectAsync(s, &fakeBackend{loaded: []string{"a"}, starting: []string{"s"}})
 	}
-	time.Sleep(50 * time.Millisecond)
-	for name, out := range results {
+	for range cases {
 		select {
-		case sel := <-out:
-			t.Errorf("%s: chose %+v before the slow backend answered", name, sel)
-		default:
+		case <-slow.called:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a selection never asked the slow backend")
 		}
 	}
 	close(slow.release)
@@ -369,14 +377,14 @@ func TestSlowBackend(t *testing.T) {
 	}
 }
 
-func TestStateErrorPropagates(t *testing.T) {
+func TestFirstLoaded_FailsWhenNoBackendCanBeRead(t *testing.T) {
 	_, err := task.Select(context.Background(), nil, &fakeBackend{err: errors.New("down")})
 	if err == nil {
 		t.Error("expected an error")
 	}
 }
 
-func TestValidate(t *testing.T) {
+func TestCandidate_Validate(t *testing.T) {
 	bad := []Candidate{
 		{Model: ""},
 		{Model: "a["},

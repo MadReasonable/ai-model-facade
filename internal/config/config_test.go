@@ -23,7 +23,7 @@ models:
   task: {backend: llamaSwap}
 `
 
-func TestParseMinimal(t *testing.T) {
+func TestParse_MinimalConfig(t *testing.T) {
 	cfg, err := Parse([]byte(minimal), env(nil))
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestParseMinimal(t *testing.T) {
 	}
 }
 
-func TestEnvExpansion(t *testing.T) {
+func TestParse_ExpandsEnvironmentVariables(t *testing.T) {
 	src := minimal + `
   other:
     backend: llamaSwap
@@ -68,7 +68,7 @@ func TestEnvExpansion(t *testing.T) {
 	}
 }
 
-func TestUndefinedEnvIsAnErrorWithPosition(t *testing.T) {
+func TestParse_UndefinedVariableIsAnErrorWithItsLine(t *testing.T) {
 	src := minimal + "  other: {backend: \"${NOPE}\"}\n"
 	_, err := Parse([]byte(src), env(nil))
 	if err == nil || !strings.Contains(err.Error(), "NOPE") || !strings.Contains(err.Error(), "line 8") {
@@ -76,7 +76,7 @@ func TestUndefinedEnvIsAnErrorWithPosition(t *testing.T) {
 	}
 }
 
-func TestDuplicateEntryNamesAreErrors(t *testing.T) {
+func TestParse_RejectsDuplicateNames(t *testing.T) {
 	cases := map[string]struct {
 		src, section, want string
 	}{
@@ -98,7 +98,7 @@ func TestDuplicateEntryNamesAreErrors(t *testing.T) {
 	}
 }
 
-func TestUnknownKeysAreErrors(t *testing.T) {
+func TestParse_RejectsUnknownKeys(t *testing.T) {
 	cases := map[string]string{
 		"top level": minimal + "extra: 1\n",
 		"server":    strings.Replace(minimal, "listen:", "listn: x\n  listen:", 1),
@@ -112,7 +112,7 @@ func TestUnknownKeysAreErrors(t *testing.T) {
 	}
 }
 
-func TestDecodeStrictNested(t *testing.T) {
+func TestDecodeStrict_RejectsUnknownNestedKeys(t *testing.T) {
 	type candidate struct {
 		Model string `yaml:"model"`
 	}
@@ -133,7 +133,7 @@ func TestDecodeStrictNested(t *testing.T) {
 	}
 }
 
-func TestDecodeStrictFollowsAnchorsAndMerges(t *testing.T) {
+func TestDecodeStrict_FollowsAnchorsAndMerges(t *testing.T) {
 	type limits struct {
 		A int `yaml:"a"`
 	}
@@ -154,7 +154,7 @@ func TestDecodeStrictFollowsAnchorsAndMerges(t *testing.T) {
 	}
 }
 
-func TestDecodeStrictInlineStruct(t *testing.T) {
+func TestDecodeStrict_AcceptsInlinedStructKeys(t *testing.T) {
 	type common struct {
 		A int `yaml:"a"`
 	}
@@ -185,7 +185,7 @@ func TestDecodeStrictInlineStruct(t *testing.T) {
 	}
 }
 
-func TestDecodeStrictInlineMap(t *testing.T) {
+func TestDecodeStrict_AcceptsInlinedMapKeys(t *testing.T) {
 	type inner struct {
 		X int `yaml:"x"`
 	}
@@ -210,14 +210,14 @@ func TestDecodeStrictInlineMap(t *testing.T) {
 	}
 }
 
-func TestAPIKeysRequireNameAndKey(t *testing.T) {
+func TestParse_APIKeysNeedANameAndAKey(t *testing.T) {
 	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a}]", 1)
 	if _, err := Parse([]byte(src), env(nil)); err == nil {
 		t.Error("expected an error")
 	}
 }
 
-func TestExampleConfigParses(t *testing.T) {
+func TestParse_ExampleConfig(t *testing.T) {
 	if _, err := Load("../../config.example.yaml"); err != nil {
 		t.Fatal(err)
 	}
