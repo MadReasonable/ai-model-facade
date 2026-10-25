@@ -244,6 +244,10 @@ type StateCache struct {
 	fetched   bool      // loaded holds a fetched state, even once expired or invalidated
 	inFlight  *stateFetch
 	gen       uint64 // bumped by Invalidate; a refresh started earlier isn't cached
+
+	// waiting, if set, is called by each read that is about to wait for a
+	// fetch, so a test can tell when concurrent readers have all joined one.
+	waiting func()
 }
 
 // stateFetch is one in-flight state refresh. Concurrent requests share it
@@ -372,7 +376,11 @@ func (s *StateCache) cached(ctx context.Context) ([]backend.ModelInfo, error) {
 		s.inFlight = f
 		go s.refresh(f)
 	}
+	waiting := s.waiting
 	s.mu.Unlock()
+	if waiting != nil {
+		waiting()
+	}
 	select {
 	case <-f.done:
 		if f.err != nil {
