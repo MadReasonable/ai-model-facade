@@ -231,6 +231,10 @@ type ChatResponse struct {
 	Status      int
 	ContentType string
 	Body        []byte
+	// RetryAfter is the backend's Retry-After header, the one header passed
+	// on besides Content-Type: it tells a client refused with 429 or 503
+	// when to try again, and reveals nothing about the backend.
+	RetryAfter string
 }
 
 // ChatStream yields the data payloads of a server-sent event stream.

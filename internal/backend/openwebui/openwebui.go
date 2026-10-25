@@ -678,7 +678,7 @@ func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.Chat
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return &backend.ChatResponse{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: data}, nil
+		return &backend.ChatResponse{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: data, RetryAfter: resp.Header.Get("Retry-After")}, nil
 	}
 	if !gjson.GetBytes(data, "task_ids").IsArray() {
 		r.b.log.Error("Open WebUI started no background task; the reply can't stream and arrives only once finished", "chat", r.chatID, "response", snippet(data))

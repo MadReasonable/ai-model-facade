@@ -237,6 +237,9 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		if res.Chat.Response.ContentType != "" {
 			w.Header().Set("Content-Type", res.Chat.Response.ContentType)
 		}
+		if res.Chat.Response.RetryAfter != "" {
+			w.Header().Set("Retry-After", res.Chat.Response.RetryAfter)
+		}
 		w.WriteHeader(status)
 		w.Write(res.Chat.Response.Body)
 	}

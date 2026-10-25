@@ -30,7 +30,7 @@ type fakeSwap struct {
 	starting    []string // reported in state "starting"
 	lastBody    string
 	lastPath    string // path of the last completion request
-	chatMode    string // "json", "stream" or "truncated"
+	chatMode    string // "json", "stream", "truncated", "errorEvent" or "busy"
 	chatAuth    string // Authorization header of the last chat request
 	stateAuth   string // Authorization header of the last /running request
 	failRunning bool   // answer /running with 500
@@ -78,6 +78,12 @@ func (f *fakeSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if f.chatMode == "errorEvent" {
 				io.WriteString(w, "event: error\ndata: {\"error\":{\"message\":\"context full\",\"type\":\"server_error\"}}\n\n")
 			}
+		case "busy": // llama-swap at a model's concurrencyLimit
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "7")
+			w.Header().Set("Server", "llama-swap")
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"message":"concurrency limit reached"}}`)
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `{"choices":[{"message":{"content":"Title"}}],"x_extra":1}`)
@@ -401,6 +407,22 @@ func TestErrors(t *testing.T) {
 		if resp.StatusCode != c.status || !strings.Contains(body, `"error"`) {
 			t.Errorf("%s: got %d %s", c.name, resp.StatusCode, body)
 		}
+	}
+}
+
+// A backend's refusal reaches the client with its status, body and
+// Retry-After, and no other backend header.
+func TestBackendRefusalKeepsRetryAfter(t *testing.T) {
+	srv := newGateway(t, &fakeSwap{loaded: []string{"qwen3.6-35b-a3b:q8_0"}, chatMode: "busy"})
+	resp, body := post(t, srv, "secret", `{"model":"task"}`)
+	if resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(body, "concurrency limit reached") {
+		t.Errorf("got %d %s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "7" {
+		t.Errorf("Retry-After: got %q, want 7", got)
+	}
+	if got := resp.Header.Get("Server"); got != "" {
+		t.Errorf("Server header passed on: %q", got)
 	}
 }
 

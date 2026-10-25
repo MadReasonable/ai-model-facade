@@ -118,7 +118,7 @@ func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.Cha
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
-	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body}}, nil
+	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body, RetryAfter: resp.Header.Get("Retry-After")}}, nil
 }
 
 // Do sends one request made on a client's behalf, with JSON body if body
