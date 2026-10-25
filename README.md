@@ -98,7 +98,8 @@ go build -o ai-model-facade ./cmd/ai-model-facade
 ## Running in Docker
 
 The image is a static binary on distroless, about 10 MB.
-Each release publishes it for amd64 and arm64 as `ghcr.io/madreasonable/ai-model-facade`, tagged with the version, such as `0.1.0`, and `latest`.
+Each release publishes it for amd64 and arm64 as `ghcr.io/madreasonable/ai-model-facade`, tagged with the version, such as `0.1.2`, and `latest`.
+`latest` follows each new release; a version tag stays on that release.
 To build it from source instead:
 
 ```bash
@@ -112,7 +113,7 @@ Run it as a service in the same compose project as your backends, so `baseUrl` c
 ```yaml
 services:
   ai-model-facade:
-    image: ghcr.io/madreasonable/ai-model-facade:0.1.0
+    image: ghcr.io/madreasonable/ai-model-facade:latest
     restart: unless-stopped
     volumes:
       - ./ai-model-facade/config.yaml:/config/config.yaml:ro
@@ -131,7 +132,7 @@ To run `check` in a container, attach it to the backends' network:
 ```bash
 docker run --rm --network <backend network> \
   -v "$PWD/config.yaml:/config/config.yaml:ro" \
-  ghcr.io/madreasonable/ai-model-facade:0.1.0 check /config/config.yaml
+  ghcr.io/madreasonable/ai-model-facade:latest check /config/config.yaml
 ```
 
 ## Connecting Clients
@@ -181,7 +182,7 @@ Each facade has an ordered list of candidates, and each candidate is a model on 
 The gateway reads the backend's state, walks the list up to three times, and stops at the first match:
 
 1. **Ready.** The first candidate that is loaded wins.
-2. **Starting.** If nothing is ready, the first candidate that is still loading wins, and the request waits for that load to finish. This avoids asking the backend to load a second model, which could evict the one already loading.
+2. **Starting.** If nothing is ready, the first candidate that is still loading wins, and the request waits for that load to finish. This avoids an extra swap: asked for a second model during a load, llama-swap finishes the first load, serves its requests, and only then unloads it to load the second.
 3. **Fallback.** If nothing is ready or starting, the first `loadIfNone` candidate wins, and the backend loads it.
 
 A model that is stopping or stopped never counts.
@@ -195,12 +196,12 @@ A candidate's `model` is one of three things.
 
 - **An exact model ID.** If the backend doesn't list it, the gateway warns at startup and `check` reports an error, either way suggesting IDs that differ only by tag.
 - **A pattern** such as `qwen3.8-27b:*`, using `*`, `?` or `[...]`. It matches ready (or starting) models, and the matched ID is forwarded. If several match, the first in sorted order wins. Quote a pattern that starts with `*`, because a leading `*` is YAML alias syntax.
-- **A llama-swap alias**, a preset such as `qwen3.6-35b:Slacker`. It is ready (or starting) whenever its base model is, and is forwarded under the alias ID so llama-swap applies the preset. Patterns prefer base models over aliases, so `qwen3.8-27b:*` picks the quant rather than its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
+- **An alias**, a variant of a base model that the backend serves under its own ID: a llama-swap preset such as `qwen3.6-35b:Slacker`, or, through Open WebUI, a workspace model or a llama-swap preset whose base model Open WebUI also lists. It is ready (or starting) whenever its base model is, and is forwarded under its own ID so the backend applies the variant's settings. A pattern matches base models before aliases, so a pattern that matches both resolves to one well-defined model: `qwen3.8-27b:*` picks the quant, not its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
 
-llama-swap applies a preset's own params after the gateway's, completely replacing top-level keys such as `chat_template_kwargs`, so params on an alias candidate may be overridden.
-Prefer base model IDs for anything the gateway must control.
+A llama-swap preset can set params of its own, and llama-swap applies them after the gateway's.
+Each top-level key the preset sets replaces the gateway's value whole, even an object such as `chat_template_kwargs`; every other key keeps the gateway's value.
 The gateway logs an INFO line at startup for each alias candidate that has params, and `check` notes it.
-Through Open WebUI, a preset counts as an alias when Open WebUI also lists its base model; a preset listed without its base gets the same note, since llama-swap still applies the preset's params.
+That includes a llama-swap preset that Open WebUI lists without its base model: with no base to group it under, it is an ordinary model there, but llama-swap still applies its params.
 
 A candidate with `loadIfNone: true` is used like any other candidate when it is ready or starting, and is also the fallback in step 3.
 It can sit anywhere in the list: its position sets its priority in steps 1 and 2, while the fallback only happens after the entire list has been checked.
@@ -215,7 +216,7 @@ Each backend reports which models are loaded in its own way, and that decides ho
 
 On top of what a backend reports, a model counts as starting while a request the gateway forwarded to it is waiting for the model: until the response headers arrive, or for Open WebUI, until the reply's first output appears.
 This covers a backend that lists a model only once loaded, and a cached state (`stateCacheSeconds`) that predates the load, so a second request waits for that load instead of starting another.
-A request for a llama-swap alias counts for its base model, since loading the alias loads the base.
+A request for an alias counts for its base model, since loading the alias loads the base.
 What the backend reports as ready or starting is kept; only a model it doesn't list, or can't report, is marked starting this way.
 A load started by a client that goes straight to the backend isn't visible this way.
 
@@ -255,8 +256,8 @@ Gateway params override the client: they are patches, not defaults.
 The rest of the request passes through byte-for-byte, including messages, tools, `response_format` and vendor fields, in their original order.
 
 The same params apply to chat and legacy completions.
-Some only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, because no chat template is applied, so a model meant for chat won't have thinking turned off there.
-Give legacy completions their own facade if a client uses them.
+Some params only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, which applies no chat template.
+A separate facade for legacy completions can carry params that work there.
 
 `params` can also be a list of maps, applied in order.
 Use the list form to combine YAML anchors, because YAML's `<<:` merge is shallow and would overwrite nested objects like `chat_template_kwargs`:
@@ -293,7 +294,8 @@ If a facade's candidates span two or more backends with `passthroughAuth`, the g
 
 ### Responses and errors
 
-Responses from llama-swap and Ollama are passed through unchanged, and streams are relayed event by event.
+A response from llama-swap or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
+Of the backend's other headers, only `Retry-After` is passed on, so a client refused with `429` or `503` knows when to try again; the rest describe the backend or the connection to it.
 Responses from Open WebUI are assembled by the gateway from the chat it ran; see [Open WebUI](#open-webui).
 Whenever a model was chosen, the response has an `X-Gateway-Target` header naming it.
 
@@ -368,9 +370,16 @@ All take these keys:
 
 A `llamaSwap` backend is a llama-swap instance, which starts and stops llama-server processes on demand.
 Loaded state comes from its `/running` endpoint, which reports each model as `ready`, `starting` or `stopping`.
-Its model list includes presets (aliases), which can be candidates; see [What a candidate can be](#what-a-candidate-can-be).
+Its presets are aliases, and can be candidates; see [What a candidate can be](#what-a-candidate-can-be).
 llama-swap marks presets and their base models in that list from v241 on; with an earlier version, an alias candidate never counts as loaded.
 It takes no keys beyond the shared ones.
+
+llama-swap decides itself when a model is swapped, and two of its rules affect how long a request through the gateway can take:
+
+- A request whose model needs a busy model unloaded waits until that model has no requests in flight; meanwhile, new requests for the busy model are still served, so a steady stream to it keeps the swap waiting.
+- Each model accepts a limited number of requests in flight or waiting, set by `concurrencyLimit` in llama-swap's config (default 10). llama-swap refuses the rest with `429` and a `Retry-After` header, which the gateway passes on.
+
+Both are from llama-swap v263's source.
 
 #### Ollama
 
@@ -393,6 +402,7 @@ A request that comes back to the same facade of the same gateway is refused with
 For each request, the gateway creates a chat, starts the completion the way Open WebUI's UI does, polls the chat for the answer while it is generated, and returns it as a normal OpenAI response or stream.
 The model's reasoning comes back as `reasoning_content`, streamed ahead of the answer as llama-server sends it, so a client that shows reasoning has something to show while the model thinks.
 Open WebUI has no legacy `/v1/completions`; such a request fails with `502`.
+A refusal from a server behind Open WebUI, such as llama-swap's `429`, reaches the gateway only as an error in the chat, so the client gets `502` with Open WebUI's error text.
 
 | Key | Description |
 |-----|-------------|
@@ -436,14 +446,15 @@ For an OpenAI-compatible connection there is no standard way to ask which models
 - Ollama models: whether Ollama has them loaded, as Open WebUI reports it.
 - llama-swap models: llama-swap's `status` field, which says `loaded` for any model that isn't stopped. A model that is still starting, or already stopping, looks ready.
 - Facades of a gateway connected to Open WebUI: that gateway's own `current` selection.
-- Workspace models: their base model's state.
+- Workspace models: their base model's state, as aliases of it; see [What a candidate can be](#what-a-candidate-can-be).
 - Anything else, such as a hosted OpenAI-compatible provider: unknown, which selects like not loaded.
 
 If Open WebUI uses llama-swap as one of its connections, and the gateway can reach that llama-swap too, the `llamaSwap` key lets the gateway skip Open WebUI for state and ask llama-swap directly.
 llama-swap's `/running` reports each model as `ready`, `starting` or `stopping`, so the selection steps apply exactly, as they do for a `llamaSwap` backend.
-The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list, and counts its requests to llama-swap models through Open WebUI in that backend too, so a load the gateway started through either backend shows as starting for facades on both at once.
-A llama-swap preset takes its base model's state, even if Open WebUI doesn't list the base.
-If Open WebUI lists both, the preset counts as an alias of its base, as on a `llamaSwap` backend, so a pattern such as `qwen3.8-27b:*` prefers the base model over its presets.
+The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list.
+It also counts its own requests to llama-swap models through Open WebUI in that backend.
+So a load the gateway started through either backend shows as starting for facades on both at once.
+A llama-swap preset takes its base model's state this way even if Open WebUI doesn't list the base.
 Set `backend` to the gateway's `llamaSwap` backend entry for that same llama-swap, and `prefixId` to the prefix Open WebUI's connection adds to its model IDs, if it has one:
 
 ```yaml
