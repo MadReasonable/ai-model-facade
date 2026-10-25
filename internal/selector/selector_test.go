@@ -156,7 +156,7 @@ var task = &FirstLoaded{Candidates: []Candidate{
 	{Model: "qwen2.5-coder-3b:q8_0", LoadIfNone: true},
 }}
 
-// The matrix sets from docs/design.md §6.
+// One case per set of models a llama-swap matrix might keep loaded together.
 func TestFirstLoaded_TaskAgainstTheMatrixSets(t *testing.T) {
 	cases := []struct {
 		set    string

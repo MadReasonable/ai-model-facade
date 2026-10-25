@@ -1,5 +1,6 @@
-# Runs go vet and the race-enabled tests on every push to a branch and on
-# every pull request. Version tags are tested by release.yml before it builds.
+# Runs gofmt, go vet and the race-enabled tests on every push to a branch
+# and on every pull request. Version tags are tested by release.yml before
+# it builds.
 name: test
 
 on:
@@ -18,5 +19,15 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # Unformatted code would show up as unrelated whitespace changes in
+      # the diff of whoever next edits the file with format-on-save.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not formatted with gofmt; run 'gofmt -w' on:"
+            echo "$unformatted"
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test -race ./...
