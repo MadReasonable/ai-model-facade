@@ -458,6 +458,95 @@ func TestLlamaSwapBlockReadsAtReadTime(t *testing.T) {
 	}
 }
 
+// With the llamaSwap block, a request through Open WebUI to a llama-swap
+// preset counts as pending for its base model in the llamaSwap backend's
+// cache, so both backends show it starting, even though Open WebUI doesn't
+// list the base. Its release drops that cache, not Open WebUI's.
+func TestLlamaSwapBlockCountsRequestsThroughOpenWebUI(t *testing.T) {
+	var loaded atomic.Bool
+	var running, apiModels atomic.Int32
+	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			running.Add(1)
+			if loaded.Load() {
+				io.WriteString(w, `{"running":[{"model":"a","state":"ready"}]}`)
+				return
+			}
+			io.WriteString(w, `{"running":[]}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a","meta":{"llamaswap":{"type":"model","aliases":["a:Dreamer"]}}},{"id":"a:Dreamer","meta":{"llamaswap":{"type":"alias","modelID":"a"}}}]}`)
+		}
+	}))
+	defer swap.Close()
+	var doc yaml.Node
+	yaml.Unmarshal([]byte(`{type: llamaSwap, baseUrl: "`+swap.URL+`", stateCacheSeconds: 60}`), &doc)
+	ls, err := llamaswap.New(config.Entry{Node: doc.Content[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeWebUI{
+		models:   `{"id":"a:Dreamer","owned_by":"openai","status":{"value":"unloaded"},"meta":{"llamaswap":{"type":"alias","modelID":"a"}}}`,
+		contents: []string{"", "hi"},
+		hold:     make(chan struct{}),
+	}
+	webUI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models" {
+			apiModels.Add(1)
+		}
+		f.ServeHTTP(w, r)
+	}))
+	defer webUI.Close()
+	b := newBackend(t, `{type: openWebUi, baseUrl: "`+webUI.URL+`", apiKey: svc, stateCacheSeconds: 60, pollIntervalSeconds: 0.01, llamaSwap: {backend: ls}}`)
+	if _, err := link(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
+		t.Fatal(err)
+	}
+	states := func() (swapSide, webUISide string) {
+		describe := func(got []backend.ModelInfo, err error, id string) string {
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range got {
+				if m.ID == id && m.Starting {
+					return "starting"
+				} else if m.ID == id {
+					return "ready"
+				}
+			}
+			return "unloaded"
+		}
+		got, err := ls.LoadedModels(context.Background())
+		swapSide = describe(got, err, "a")
+		got, err = b.LoadedModels(context.Background())
+		return swapSide, describe(got, err, "a:Dreamer")
+	}
+	if s, w := states(); s != "unloaded" || w != "unloaded" {
+		t.Fatalf("before: llama-swap %s, Open WebUI %s", s, w)
+	}
+	apiModels.Store(0)
+	running.Store(0)
+	done := make(chan error)
+	go func() {
+		_, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"a:Dreamer","messages":[{"role":"user","content":"x"}]}`)})
+		done <- err
+	}()
+	f.hold <- struct{}{} // first poll: no output yet
+	if s, w := states(); s != "starting" || w != "starting" {
+		t.Errorf("during the run: llama-swap %s, Open WebUI %s", s, w)
+	}
+	loaded.Store(true)
+	f.hold <- struct{}{} // second poll: output
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if s, w := states(); s != "ready" || w != "ready" {
+		t.Errorf("after the first output: llama-swap %s, Open WebUI %s", s, w)
+	}
+	if apiModels.Load() != 0 || running.Load() != 1 {
+		t.Errorf("during and after the run: Open WebUI asked %d times (want 0), llama-swap's /running %d times (want 1)", apiModels.Load(), running.Load())
+	}
+}
+
 // link links b and runs the checks it asks for, as the gateway does once
 // every backend has been listed, and returns their warnings.
 func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {

@@ -173,6 +173,13 @@ func (m listedModel) isLlamaSwap() bool {
 	return len(m.Meta.LlamaSwap) > 0 && string(m.Meta.LlamaSwap) != "null"
 }
 
+// swapBaseID is the llama-swap base model of a llama-swap preset (alias), as
+// llama-swap's own listing names it in meta.llamaswap.modelID, or "" for a
+// base model.
+func (m listedModel) swapBaseID() string {
+	return gjson.GetBytes(m.Meta.LlamaSwap, "modelID").String()
+}
+
 func (m listedModel) baseModelID() string {
 	if m.Info == nil {
 		return ""
@@ -289,7 +296,11 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 		if b.llamaSwap != nil {
 			base := swapBase{id: m.ID, aliases: aliases[m.ID]}
 			if m.isLlamaSwap() {
-				base.swapID, _ = b.llamaSwapID(m.ID)
+				// A preset loads with its base model, so it takes the base's
+				// state, running or not.
+				if base.swapID = m.swapBaseID(); base.swapID == "" {
+					base.swapID, _ = b.llamaSwapID(m.ID)
+				}
 			}
 			list.bases = append(list.bases, base)
 		}
@@ -322,8 +333,34 @@ type swapList struct {
 
 type swapBase struct {
 	id      string
-	swapID  string // empty for a model that isn't llama-swap's
+	swapID  string // the llama-swap base model; empty for a model that isn't llama-swap's
 	aliases []string
+}
+
+// swapIDOf returns the llama-swap base model behind Open WebUI model id, or
+// "" if it isn't a llama-swap model or isn't in the list.
+func (l *swapList) swapIDOf(id string) string {
+	for _, base := range l.bases {
+		if base.id == id {
+			return base.swapID
+		}
+	}
+	return ""
+}
+
+// pending counts a request for Open WebUI model id as pending. With the
+// llamaSwap block, a llama-swap model counts in the llamaSwap backend's
+// cache under its llama-swap base model: every read here applies that
+// cache's state, so facades on both backends see the load, and its release
+// drops that cache (a /running call) rather than this one (a refresh of
+// Open WebUI's list). Any other model counts in this backend's cache.
+func (b *Backend) pending(id string) (release func()) {
+	if list := b.swapList.Load(); b.llamaSwap != nil && list != nil {
+		if swapID := list.swapIDOf(id); swapID != "" {
+			return b.llamaSwap.Pending(swapID)
+		}
+	}
+	return b.state.Pending(id)
 }
 
 // storeSwapList keeps list unless a fetch that began later already stored
@@ -477,7 +514,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		model:     gjson.GetBytes(req.Body, "model").String(),
 		messageID: newID(),
 		created:   time.Now().Unix(),
-		release:   b.state.Pending(req.StateModel()),
+		release:   b.pending(req.StateModel()),
 	}
 	if err := r.createChat(ctx, req.Body); err != nil {
 		r.release()

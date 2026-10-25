@@ -77,6 +77,13 @@ func (b *Backend) LoadedModelsSince(ctx context.Context, since time.Time) ([]bac
 	return b.state.LoadedModelsSince(ctx, since)
 }
 
+// Pending counts a request for model as pending in this backend's state
+// cache, for a request that reaches llama-swap another way, such as through
+// Open WebUI; see openaihttp.StateCache.Pending.
+func (b *Backend) Pending(model string) (release func()) {
+	return b.state.Pending(model)
+}
+
 // fetchState reads loaded-model state for the cache. Readiness comes from
 // /running, which lists base models only; their aliases come from /v1/models.
 func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {

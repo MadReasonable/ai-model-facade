@@ -439,7 +439,8 @@ For an OpenAI-compatible connection there is no standard way to ask which models
 
 If Open WebUI uses llama-swap as one of its connections, and the gateway can reach that llama-swap too, the `llamaSwap` key lets the gateway skip Open WebUI for state and ask llama-swap directly.
 llama-swap's `/running` reports each model as `ready`, `starting` or `stopping`, so the selection steps apply exactly, as they do for a `llamaSwap` backend.
-The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list, so a load the gateway started through the `llamaSwap` backend shows as starting for facades on Open WebUI at once.
+The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list, and counts its requests to llama-swap models through Open WebUI in that backend too, so a load the gateway started through either backend shows as starting for facades on both at once.
+A llama-swap preset takes its base model's state, even if Open WebUI doesn't list the base.
 Set `backend` to the gateway's `llamaSwap` backend entry for that same llama-swap, and `prefixId` to the prefix Open WebUI's connection adds to its model IDs, if it has one:
 
 ```yaml
