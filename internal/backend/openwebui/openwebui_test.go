@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -144,6 +145,15 @@ func (f *fakeWebUI) callsEndingWith(t *testing.T, last string) string {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// stoppedThenDeleted reports whether calls stop the task, then end by
+// deleting the chat. A poll may be recorded between the two: one the client
+// gave up on when it left can still reach the fake's handler after the stop.
+func stoppedThenDeleted(calls string) bool {
+	list := strings.Split(calls, ";")
+	stop := slices.Index(list, "POST /api/tasks/chat/chat-1/stop")
+	return stop >= 0 && stop < len(list)-1 && list[len(list)-1] == "DELETE /api/v1/chats/chat-1"
 }
 
 func newBackend(t *testing.T, src string) *Backend {
@@ -618,7 +628,7 @@ func TestStreamCloseStopsTask(t *testing.T) {
 		t.Error("Close waited for the stop call")
 	}
 	close(f.holdStop)
-	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "POST /api/tasks/chat/chat-1/stop;DELETE /api/v1/chats/chat-1") {
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !stoppedThenDeleted(calls) {
 		t.Errorf("calls: %s", calls)
 	}
 }
@@ -648,7 +658,7 @@ func TestChatCancelStopsTask(t *testing.T) {
 		t.Error("Chat waited for the stop call")
 	}
 	close(f.holdStop)
-	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !strings.HasSuffix(calls, "POST /api/tasks/chat/chat-1/stop;DELETE /api/v1/chats/chat-1") {
+	if calls := f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1"); !stoppedThenDeleted(calls) {
 		t.Errorf("calls: %s", calls)
 	}
 }
@@ -677,6 +687,9 @@ func TestChatErrors(t *testing.T) {
 	if res, err := chat(t, b, chatBody, false); err != nil || !strings.Contains(string(res.Response.Body), `"content":"hi"`) {
 		t.Errorf("no task_ids: %+v, %v", res.Response, err)
 	}
+	// The chat is deleted in the background; reading the log before that
+	// call arrives would race with a failure it might log.
+	f.callsEndingWith(t, "DELETE /api/v1/chats/chat-1")
 	if out := logged.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "started no background task") {
 		t.Errorf("log: %s", out)
 	}
