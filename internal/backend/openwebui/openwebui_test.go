@@ -376,6 +376,88 @@ func TestPendingUntilFirstOutput(t *testing.T) {
 	}
 }
 
+// With the llamaSwap block, each read applies the llamaSwap backend's state
+// at that moment: a load started through that backend shows as starting, and
+// its end as ready, while Open WebUI's own list stays cached.
+func TestLlamaSwapBlockReadsAtReadTime(t *testing.T) {
+	var loaded atomic.Bool
+	var running, apiModels atomic.Int32
+	release := make(chan struct{})
+	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			running.Add(1)
+			if loaded.Load() {
+				io.WriteString(w, `{"running":[{"model":"a","state":"ready"}]}`)
+				return
+			}
+			io.WriteString(w, `{"running":[]}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a"}]}`)
+		case "/v1/chat/completions":
+			<-release // the load
+			loaded.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer swap.Close()
+	var doc yaml.Node
+	yaml.Unmarshal([]byte(`{type: llamaSwap, baseUrl: "`+swap.URL+`", stateCacheSeconds: 60}`), &doc)
+	ls, err := llamaswap.New(config.Entry{Node: doc.Content[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeWebUI{models: `{"id":"a","owned_by":"openai","status":{"value":"unloaded"},"meta":{"llamaswap":{"type":"model"}}}`}
+	webUI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models" {
+			apiModels.Add(1)
+		}
+		f.ServeHTTP(w, r)
+	}))
+	defer webUI.Close()
+	b := newBackend(t, `{type: openWebUi, baseUrl: "`+webUI.URL+`", apiKey: svc, stateCacheSeconds: 60, llamaSwap: {backend: ls}}`)
+	if _, err := link(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
+		t.Fatal(err)
+	}
+	apiModels.Store(0) // listing for link went through /api/models too
+	state := func() string {
+		got, err := b.LoadedModels(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case len(got) == 0:
+			return "unloaded"
+		case got[0].Starting:
+			return "starting"
+		}
+		return "ready"
+	}
+	if got := state(); got != "unloaded" {
+		t.Fatalf("before: %s", got)
+	}
+	done := make(chan error)
+	go func() {
+		_, err := ls.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"a"}`)})
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let the request reach llama-swap
+	if got := state(); got != "starting" {
+		t.Errorf("during a load through the llamaSwap backend: %s", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := state(); got != "ready" {
+		t.Errorf("after the load: %s", got)
+	}
+	if apiModels.Load() != 1 || running.Load() != 2 {
+		t.Errorf("Open WebUI asked %d times (want 1), llama-swap's /running %d times (want 2)", apiModels.Load(), running.Load())
+	}
+}
+
 // link links b and runs the checks it asks for, as the gateway does once
 // every backend has been listed, and returns their warnings.
 func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {

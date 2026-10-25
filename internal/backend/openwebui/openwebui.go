@@ -60,6 +60,7 @@ type Backend struct {
 	llamaSwapConfig    *LlamaSwapConfig
 	llamaSwap          *llamaswap.Backend            // set by Link
 	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkPrefixes
+	swapList           atomic.Pointer[swapList]      // from the latest-started state fetch, with the llamaSwap block
 	swapDown           atomic.Bool                   // the llamaSwap backend's last state read failed
 	log                *slog.Logger
 }
@@ -245,13 +246,13 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 }
 
 func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
-	return b.state.LoadedModels(ctx)
+	return b.LoadedModelsSince(ctx, time.Time{})
 }
 
 // LoadedModelsSince also reuses a state whose fetch began at or after since;
 // see openaihttp.StateCache.LoadedModelsSince.
 func (b *Backend) LoadedModelsSince(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
-	return b.state.LoadedModelsSince(ctx, since)
+	return b.state.LoadedModelsAdjusted(ctx, since, b.applySwapStates)
 }
 
 type modelState int
@@ -267,8 +268,8 @@ const (
 //
 //   - an Ollama model is ready when `loaded` is true;
 //   - a llama-swap model (`meta.llamaswap`) is ready when llama-swap's
-//     `status` is `loaded`, or, with the llamaSwap block, has the state the
-//     named backend reports;
+//     `status` is `loaded`; with the llamaSwap block, each read replaces
+//     that with the named backend's state (applySwapStates);
 //   - an ai-model-facade virtual model (`current`) has the state its own
 //     selection reports: `loaded` is ready, `starting` starting, and
 //     `loadIfNone` or `no candidate loaded` unloaded. The chain behind it
@@ -281,12 +282,19 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	swapStates := b.swapStates(ctx, start)
 	bases, aliases := group(models)
+	list := &swapList{started: start}
 	var infos []backend.ModelInfo
 	for _, m := range bases {
+		if b.llamaSwap != nil {
+			base := swapBase{id: m.ID, aliases: aliases[m.ID]}
+			if m.isLlamaSwap() {
+				base.swapID, _ = b.llamaSwapID(m.ID)
+			}
+			list.bases = append(list.bases, base)
+		}
 		info := backend.ModelInfo{ID: m.ID, Aliases: aliases[m.ID]}
-		switch b.stateOf(m, swapStates) {
+		switch b.stateOf(m) {
 		case ready:
 		case starting:
 			info.Starting = true
@@ -297,10 +305,90 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 		}
 		infos = append(infos, info)
 	}
+	if b.llamaSwap != nil {
+		b.storeSwapList(list)
+	}
 	return infos, nil
 }
 
-func (b *Backend) stateOf(m listedModel, swapStates map[string]modelState) modelState {
+// swapList is what the llamaSwap block needs from one Open WebUI fetch:
+// every base model in Open WebUI's order, with the llama-swap ID of each
+// llama-swap model, so a read can apply llama-swap's state also to models
+// the fetch found unloaded.
+type swapList struct {
+	started time.Time
+	bases   []swapBase
+}
+
+type swapBase struct {
+	id      string
+	swapID  string // empty for a model that isn't llama-swap's
+	aliases []string
+}
+
+// storeSwapList keeps list unless a fetch that began later already stored
+// its own, so fetches that finish out of order don't bring back an older list.
+func (b *Backend) storeSwapList(list *swapList) {
+	for {
+		old := b.swapList.Load()
+		if old != nil && old.started.After(list.started) {
+			return
+		}
+		if b.swapList.CompareAndSwap(old, list) {
+			return
+		}
+	}
+}
+
+// applySwapStates gives Open WebUI's llama-swap models the state the
+// llamaSwap backend reports at the time of the read, in place of the
+// `status` the cached fetch read. That state comes through the backend's own
+// cache, so its pending requests and invalidations show here at once. If
+// this read waited for an Open WebUI fetch, a llama-swap state fetched since
+// that fetch began is reused: a gateway that is an Open WebUI connection may
+// have read llama-swap while answering it. If the backend can't be read, the
+// fetched `status` stands.
+func (b *Backend) applySwapStates(ctx context.Context, models []backend.ModelInfo, fetchStart time.Time) ([]backend.ModelInfo, error) {
+	list := b.swapList.Load()
+	if b.llamaSwap == nil || list == nil {
+		return models, nil
+	}
+	// llama-swap's state doesn't pass through Open WebUI, so this read may
+	// wait even under WithoutStateWait.
+	states := b.swapStates(backend.WithStateWait(ctx), fetchStart)
+	if states == nil {
+		return models, nil
+	}
+	byID := map[string]backend.ModelInfo{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	done := map[string]bool{}
+	var out []backend.ModelInfo
+	for _, base := range list.bases {
+		done[base.id] = true
+		if base.swapID == "" {
+			if m, ok := byID[base.id]; ok {
+				out = append(out, m)
+			}
+			continue
+		}
+		switch states[base.swapID] { // not running: unloaded
+		case ready:
+			out = append(out, backend.ModelInfo{ID: base.id, Aliases: base.aliases})
+		case starting:
+			out = append(out, backend.ModelInfo{ID: base.id, Aliases: base.aliases, Starting: true})
+		}
+	}
+	for _, m := range models {
+		if !done[m.ID] { // from a fetch other than the list's
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (b *Backend) stateOf(m listedModel) modelState {
 	switch {
 	case m.OwnedBy == "ollama":
 		if m.Loaded == nil {
@@ -310,9 +398,6 @@ func (b *Backend) stateOf(m listedModel, swapStates map[string]modelState) model
 			return ready
 		}
 		return unloaded
-	case m.isLlamaSwap() && swapStates != nil:
-		id, _ := b.llamaSwapID(m.ID)
-		return swapStates[id] // unlisted means not running: unloaded
 	case m.isLlamaSwap():
 		if m.Status == nil {
 			return unknown
@@ -359,9 +444,8 @@ func (b *Backend) swapStates(ctx context.Context, since time.Time) map[string]mo
 	return states
 }
 
-// llamaSwapStates maps each running llama-swap model and alias to its state.
-// A state fetched since the Open WebUI read began is reused: a gateway that
-// is an Open WebUI connection may have read it while answering that read.
+// llamaSwapStates maps each running llama-swap model and alias to its state,
+// reusing a state fetched since since.
 func (b *Backend) llamaSwapStates(ctx context.Context, since time.Time) (map[string]modelState, error) {
 	loaded, err := b.llamaSwap.LoadedModelsSince(ctx, since)
 	if err != nil {

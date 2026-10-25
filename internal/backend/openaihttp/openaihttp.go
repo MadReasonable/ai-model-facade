@@ -330,32 +330,50 @@ func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, err
 // during which a gateway behind Open WebUI may already have read the same
 // llama-swap.
 func (s *StateCache) LoadedModelsSince(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
+	return s.LoadedModelsAdjusted(ctx, since, nil)
+}
+
+// Adjust changes a backend's state at read time, before pending requests are
+// added. fetchStart is when the fetch behind models began if this read
+// waited for that fetch, and zero if models came from the cache.
+type Adjust func(ctx context.Context, models []backend.ModelInfo, fetchStart time.Time) ([]backend.ModelInfo, error)
+
+// LoadedModelsAdjusted is LoadedModelsSince with adjust, if not nil, applied
+// to the backend's state on every read: the llamaSwap block of an openWebUi
+// backend applies llama-swap's current state to a cached Open WebUI list.
+func (s *StateCache) LoadedModelsAdjusted(ctx context.Context, since time.Time, adjust Adjust) ([]backend.ModelInfo, error) {
 	// Pending before and after the read: a load that finishes during it is
 	// still in the first set, one that starts during it is in the second.
 	pending := s.pendingModels()
-	models, err := s.cached(ctx, since)
+	models, fetchStart, err := s.cached(ctx, since)
 	if err != nil {
 		return nil, err
+	}
+	if adjust != nil {
+		if models, err = adjust(ctx, models, fetchStart); err != nil {
+			return nil, err
+		}
 	}
 	return addPending(models, append(pending, s.pendingModels()...)), nil
 }
 
-// cached returns a copy of the backend's own state, cached or fetched.
-func (s *StateCache) cached(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
+// cached returns a copy of the backend's own state, cached or fetched, and
+// when the fetch began if the call waited for it.
+func (s *StateCache) cached(ctx context.Context, since time.Time) ([]backend.ModelInfo, time.Time, error) {
 	s.mu.Lock()
 	if !s.fetchedAt.IsZero() && (time.Since(s.fetchedAt) < s.ttl || !since.IsZero() && !s.startedAt.Before(since)) {
 		models := append([]backend.ModelInfo(nil), s.loaded...)
 		s.mu.Unlock()
-		return models, nil
+		return models, time.Time{}, nil
 	}
 	f := s.inFlight
 	if f != nil && !backend.StateWaitAllowed(ctx) {
 		// Possibly our own refresh, looped back through another service.
 		defer s.mu.Unlock()
 		if !s.fetched {
-			return nil, backend.ErrStateBusy
+			return nil, time.Time{}, backend.ErrStateBusy
 		}
-		return append([]backend.ModelInfo(nil), s.loaded...), nil
+		return append([]backend.ModelInfo(nil), s.loaded...), time.Time{}, nil
 	}
 	if f == nil {
 		f = &stateFetch{done: make(chan struct{}), gen: s.gen, started: time.Now()}
@@ -366,11 +384,11 @@ func (s *StateCache) cached(ctx context.Context, since time.Time) ([]backend.Mod
 	select {
 	case <-f.done:
 		if f.err != nil {
-			return nil, f.err
+			return nil, time.Time{}, f.err
 		}
-		return append([]backend.ModelInfo(nil), f.models...), nil
+		return append([]backend.ModelInfo(nil), f.models...), f.started, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, time.Time{}, ctx.Err()
 	}
 }
 

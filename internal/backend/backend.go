@@ -116,6 +116,12 @@ func WithoutStateWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, noStateWaitKey{}, true)
 }
 
+// WithStateWait undoes WithoutStateWait for a state read that can't loop back
+// into this gateway, such as llama-swap's.
+func WithStateWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noStateWaitKey{}, nil)
+}
+
 // StateWaitAllowed reports whether ctx may wait for a refresh in flight.
 func StateWaitAllowed(ctx context.Context) bool {
 	return ctx.Value(noStateWaitKey{}) == nil
