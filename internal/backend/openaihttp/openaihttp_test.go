@@ -84,27 +84,31 @@ func TestInvalidateDuringRefresh(t *testing.T) {
 	}
 }
 
-// LoadedModelsSince reuses a state fetched since the given time even with
-// stateCacheSeconds 0, but not an older one, nor one dropped by Invalidate.
-func TestLoadedModelsSince(t *testing.T) {
+// A read reuses a state fetched since its request arrived even with
+// stateCacheSeconds 0, but not one fetched before, nor one dropped by
+// Invalidate, and a read with no request start reuses nothing.
+func TestRequestStartReuse(t *testing.T) {
 	var calls atomic.Int32
 	s := NewStateCache(Config{}, func(ctx context.Context) ([]backend.ModelInfo, error) {
 		calls.Add(1)
 		return []backend.ModelInfo{{ID: "m"}}, nil
 	})
-	before := time.Now()
-	s.LoadedModels(context.Background())
-	if s.LoadedModelsSince(context.Background(), before); calls.Load() != 1 {
-		t.Errorf("fetched since: got %d fetches, want 1", calls.Load())
+	request := backend.WithRequestStart(context.Background(), time.Now())
+	s.LoadedModels(context.Background()) // fetched after the request arrived
+	if s.LoadedModels(request); calls.Load() != 1 {
+		t.Errorf("fetched since the request arrived: got %d fetches, want 1", calls.Load())
 	}
-	if s.LoadedModelsSince(context.Background(), time.Now()); calls.Load() != 2 {
-		t.Errorf("fetched before: got %d fetches, want 2", calls.Load())
+	if s.LoadedModels(backend.WithRequestStart(context.Background(), time.Now())); calls.Load() != 2 {
+		t.Errorf("fetched before the request arrived: got %d fetches, want 2", calls.Load())
 	}
-	before = time.Now()
+	if s.LoadedModels(context.Background()); calls.Load() != 3 {
+		t.Errorf("no request start: got %d fetches, want 3", calls.Load())
+	}
+	request = backend.WithRequestStart(context.Background(), time.Now())
 	s.LoadedModels(context.Background())
 	s.Invalidate()
-	if s.LoadedModelsSince(context.Background(), before); calls.Load() != 4 {
-		t.Errorf("invalidated: got %d fetches, want 4", calls.Load())
+	if s.LoadedModels(request); calls.Load() != 5 {
+		t.Errorf("invalidated: got %d fetches, want 5", calls.Load())
 	}
 }
 

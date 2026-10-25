@@ -343,8 +343,9 @@ func TestLlamaSwapBlock(t *testing.T) {
 }
 
 // A gateway behind Open WebUI can read the llamaSwap backend's state while
-// answering the adapter's /api/models read; the adapter reuses that state
-// instead of asking llama-swap again, even with stateCacheSeconds 0.
+// answering the adapter's /api/models read, as a request of its own that
+// arrives after the outer one. The outer request reuses that state instead
+// of asking llama-swap again, even with stateCacheSeconds 0.
 func TestLlamaSwapBlockReusesNestedRead(t *testing.T) {
 	var running atomic.Int32
 	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -365,8 +366,8 @@ func TestLlamaSwapBlockReusesNestedRead(t *testing.T) {
 	}
 	f := &fakeWebUI{models: `{"id":"a","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}`}
 	webUI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/models" {
-			ls.LoadedModels(context.Background()) // the gateway's /v1/models, building `current`
+		if r.URL.Path == "/api/models" { // the gateway's /v1/models, building `current`
+			ls.LoadedModels(backend.WithRequestStart(context.Background(), time.Now()))
 		}
 		f.ServeHTTP(w, r)
 	}))
@@ -376,7 +377,7 @@ func TestLlamaSwapBlockReusesNestedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	running.Store(0) // listing for link went through /api/models too
-	got, err := b.LoadedModels(context.Background())
+	got, err := b.LoadedModels(backend.WithRequestStart(context.Background(), time.Now()))
 	if err != nil || len(got) != 1 || got[0].ID != "a" || got[0].Starting {
 		t.Fatalf("got %+v, %v", got, err)
 	}

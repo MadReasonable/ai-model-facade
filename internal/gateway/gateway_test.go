@@ -785,6 +785,75 @@ func TestRouteField(t *testing.T) {
 	}
 }
 
+// One request reads a backend's state once, even through a loop: the
+// listing reads Open WebUI for `ask`, Open WebUI calls this gateway's
+// /v1/models, and that nested request reads llama-swap, which the outer
+// request then reuses for the llamaSwap block and for `task`, with
+// stateCacheSeconds 0.
+func TestOneStateReadPerRequestThroughOpenWebUI(t *testing.T) {
+	swap := &fakeSwap{loaded: []string{"qwen3.6-35b-a3b:q8_0"}}
+	swapSrv := httptest.NewServer(swap)
+	defer swapSrv.Close()
+	var gatewayURL atomic.Value
+	webui := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if u, _ := gatewayURL.Load().(string); u != "" {
+			if resp, err := http.Get(u + "/v1/models"); err == nil { // Open WebUI refreshing its gateway connection
+				resp.Body.Close()
+			}
+		}
+		io.WriteString(w, `{"data":[{"id":"qwen3.6-35b-a3b:q8_0","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}]}`)
+	}))
+	defer webui.Close()
+	src := `
+server: {listen: ":0"}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
+  webui: {type: openWebUi, baseUrl: "${WEBUI_URL}", llamaSwap: {backend: llamaSwap}}
+models:
+  ask:
+    backend: webui
+    candidates:
+      - model: qwen3.6-35b-a3b:q8_0
+  task:
+    backend: llamaSwap
+    candidates:
+      - model: qwen3.6-35b-a3b:q8_0
+`
+	vars := map[string]string{"SWAP_URL": swapSrv.URL, "WEBUI_URL": webui.URL}
+	cfg, err := config.Parse([]byte(src), func(n string) (string, bool) { v, ok := vars[n]; return v, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	defer srv.Close()
+	gatewayURL.Store(srv.URL)
+	swap.mu.Lock()
+	swap.runningN = 0
+	swap.mu.Unlock()
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Count(string(body), `"reason":"loaded"`) != 2 {
+		t.Errorf("listing: %s", body)
+	}
+	swap.mu.Lock()
+	defer swap.mu.Unlock()
+	if swap.runningN != 1 {
+		t.Errorf("llama-swap's /running was read %d times for one listing, want 1", swap.runningN)
+	}
+}
+
 // Open WebUI's model refresh calls this gateway's /v1/models while the
 // gateway is fetching that refresh for `current`. The nested call must not
 // wait on the fetch that waits for it.

@@ -15,7 +15,6 @@ package ollama
 
 import (
 	"context"
-	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
@@ -71,12 +70,6 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 // pending models it doesn't list yet, as starting.
 func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	return b.state.LoadedModels(ctx)
-}
-
-// LoadedModelsSince also reuses a state whose fetch began at or after since;
-// see openaihttp.StateCache.LoadedModelsSince.
-func (b *Backend) LoadedModelsSince(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
-	return b.state.LoadedModelsSince(ctx, since)
 }
 
 // fetchState reads /api/ps. Ollama reports no load state, so every listed

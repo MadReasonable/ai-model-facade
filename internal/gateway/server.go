@@ -50,7 +50,11 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/models/{id...}", s.authenticated(s.getModel))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticated(s.completions(backend.ChatCompletions)))
 	mux.HandleFunc("POST /v1/completions", s.authenticated(s.completions(backend.Completions)))
-	return mux
+	// Every request carries its arrival time, so its state reads reuse any
+	// state fetched since then (backend.WithRequestStart).
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(backend.WithRequestStart(r.Context(), time.Now())))
+	})
 }
 
 // health reports that the gateway is up. It needs no API key, so health
