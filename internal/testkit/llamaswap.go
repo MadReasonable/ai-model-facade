@@ -38,6 +38,7 @@ type LlamaSwap struct {
 	reply     Reply
 	load      *Gate
 	failState bool // /running answers 500
+	down      bool // every request answers 502
 }
 
 // NewLlamaSwap starts a fake llama-swap with these models, none running,
@@ -90,6 +91,14 @@ func (f *LlamaSwap) FailState(fail bool) {
 	f.failState = fail
 }
 
+// SetDown makes every request answer 502, as llama-swap behind a proxy does
+// when it isn't running, or answer normally again.
+func (f *LlamaSwap) SetDown(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = down
+}
+
 // baseOf returns the base model of id, a model or one of its aliases.
 func (f *LlamaSwap) baseOf(id string) string {
 	for _, m := range f.models {
@@ -107,6 +116,13 @@ func (f *LlamaSwap) baseOf(id string) string {
 
 func (f *LlamaSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body := f.record(r)
+	f.mu.Lock()
+	down := f.down
+	f.mu.Unlock()
+	if down {
+		http.Error(w, "down", http.StatusBadGateway)
+		return
+	}
 	switch r.URL.Path {
 	case "/v1/models":
 		f.serveModels(w)
