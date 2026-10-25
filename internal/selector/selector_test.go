@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 )
@@ -298,6 +299,73 @@ func TestMixedBackendStateFailure(t *testing.T) {
 	other.err = errors.New("also down")
 	if sel, err = s.Select(context.Background(), nil, def); err == nil || sel.Reason != "backend state unavailable" {
 		t.Errorf("all down: got %+v, %v", sel, err)
+	}
+}
+
+// slowBackend reports loaded as ready, but only once release is closed.
+type slowBackend struct {
+	fakeBackend
+	release chan struct{}
+}
+
+func (s *slowBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	<-s.release
+	var models []backend.ModelInfo
+	for _, id := range s.loaded {
+		models = append(models, backend.ModelInfo{ID: id})
+	}
+	return models, nil
+}
+
+// selectAsync runs Select and delivers its result on the returned channel.
+func selectAsync(s *FirstLoaded, b backend.Backend) <-chan Selection {
+	out := make(chan Selection, 1)
+	go func() {
+		sel, _ := s.Select(context.Background(), nil, b)
+		out <- sel
+	}()
+	return out
+}
+
+// A slow backend holds up selection only when one of its candidates comes
+// before the winner, or when nothing is ready.
+func TestSlowBackend(t *testing.T) {
+	slow := &slowBackend{fakeBackend: fakeBackend{loaded: []string{"b"}}, release: make(chan struct{})}
+
+	// Ready before any candidate on the slow backend: no wait.
+	after := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b", Backend: slow, BackendName: "slow"}}}
+	select {
+	case sel := <-selectAsync(after, &fakeBackend{loaded: []string{"a"}}):
+		if sel.Target != "a" || sel.Reason != "loaded" {
+			t.Errorf("ready first: got %+v", sel)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready first: waited for the slow backend")
+	}
+
+	// A candidate on the slow backend comes first, or only a starting
+	// candidate is ready to choose: both wait, then the slow one wins.
+	cases := map[string]*FirstLoaded{
+		"slow first":        {Candidates: []Candidate{{Model: "b", Backend: slow, BackendName: "slow"}, {Model: "a"}}},
+		"starting vs ready": {Candidates: []Candidate{{Model: "s"}, {Model: "b", Backend: slow, BackendName: "slow"}}},
+	}
+	results := map[string]<-chan Selection{}
+	for name, s := range cases {
+		results[name] = selectAsync(s, &fakeBackend{loaded: []string{"a"}, starting: []string{"s"}})
+	}
+	time.Sleep(50 * time.Millisecond)
+	for name, out := range results {
+		select {
+		case sel := <-out:
+			t.Errorf("%s: chose %+v before the slow backend answered", name, sel)
+		default:
+		}
+	}
+	close(slow.release)
+	for name, out := range results {
+		if sel := <-out; sel.Target != "b" || sel.Reason != "loaded" {
+			t.Errorf("%s: got %+v", name, sel)
+		}
 	}
 }
 

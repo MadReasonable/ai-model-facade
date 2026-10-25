@@ -216,6 +216,8 @@ Each backend reports which models are loaded in its own way, and that decides ho
 
 Each candidate may name its own `backend`, and the list is still walked in order as one list.
 Each backend's state is read once per request, concurrently.
+A loaded candidate is chosen as soon as its own backend and the backends of every candidate before it have answered, so a slow backend whose candidates all come later doesn't delay the request.
+Choosing a starting or `loadIfNone` candidate waits for every backend, because a loaded candidate anywhere in the list comes first.
 If one backend's state can't be read, its candidates count as not loaded (logged as `state unavailable`) and the others still serve; only when none can be read does the request fail with `502`.
 Wherever a candidate's backend isn't the facade's own, the log, `check` and `current` name it, e.g. `qwen3:1.7b on ollama: loaded`.
 

@@ -7,7 +7,6 @@ import (
 	"path"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 )
@@ -67,8 +66,12 @@ func IsGlob(model string) bool {
 // Each step walks the whole list, so a LoadIfNone candidate can sit anywhere.
 // A model whose state the backend can't read counts as not loaded.
 // Candidates may be on different backends; each backend's state is read
-// once, concurrently. If some backends' state can't be read, their
-// candidates count as not loaded; if none can be, Select fails.
+// once, concurrently. A ready candidate wins once the state of its backend
+// and of every earlier candidate's backend has arrived, so a slow backend
+// delays only lists where one of its candidates comes before the winner;
+// choosing a starting or LoadIfNone candidate waits for every backend, since
+// a ready candidate anywhere beats it. If some backends' state can't be
+// read, their candidates count as not loaded; if none can be, Select fails.
 // An alias is ready or starting when its base model is. A glob matches base
 // models first, then their aliases, each in sorted order, so `qwen3.8-27b:*`
 // picks the model itself over its `qwen3.8-27b:Dreamer` preset.
@@ -100,24 +103,12 @@ func (s *FirstLoaded) Requires() []backend.Capability {
 func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend) (Selection, error) {
 	sel := Selection{Index: -1}
 	states := s.states(ctx, b)
-	var firstErr error
-	for _, c := range s.Candidates {
-		if err := states[c.backendOr(b)].err; err == nil {
-			firstErr = nil
-			break
-		} else if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		sel.Reason = "backend state unavailable"
-		return sel, firstErr
-	}
 	wait := -1     // first starting candidate, used if nothing is ready
 	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
 	var waitID, waitBase string
 	for i, c := range s.Candidates {
 		st := states[c.backendOr(b)]
+		<-st.done
 		if st.err != nil {
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": state unavailable")
 		} else if id, base, ok := st.ready.match(c.Model); ok {
@@ -143,6 +134,19 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 			fallback = i
 		}
 	}
+	// Nothing is ready, and every backend has answered.
+	var firstErr error
+	for _, c := range s.Candidates {
+		if err := states[c.backendOr(b)].err; err == nil {
+			firstErr = nil
+			break
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return Selection{Index: -1, Reason: "backend state unavailable"}, firstErr
+	}
 	if wait >= 0 {
 		return winner(sel, wait, waitID, waitBase, s.Candidates[wait].On(waitID)+": waiting for it to finish starting", "starting"), nil
 	}
@@ -155,27 +159,28 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 }
 
 // backendState is one backend's models, sorted by state, or why they
-// couldn't be read.
+// couldn't be read. The other fields are set once done is closed.
 type backendState struct {
+	done                     chan struct{}
 	ready, starting, unknown modelSet
 	err                      error
 }
 
-// states reads the state of every backend the candidates use, once each and
-// concurrently, so a mixed list costs its slowest backend, not their sum.
+// states starts reading the state of every backend the candidates use, once
+// each and concurrently, and returns without waiting for them: Select waits
+// on each backend only when it reaches a candidate there. A read Select no
+// longer needs finishes in the background.
 func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend.Backend]*backendState {
 	states := map[backend.Backend]*backendState{}
-	var wg sync.WaitGroup
 	for _, c := range s.Candidates {
 		cb := c.backendOr(b)
 		if states[cb] != nil {
 			continue
 		}
-		st := &backendState{}
+		st := &backendState{done: make(chan struct{})}
 		states[cb] = st
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer close(st.done)
 			loadedModels, err := backend.LoadedModels(ctx, cb.(backend.ModelStateProvider))
 			if err != nil {
 				st.err = err
@@ -195,7 +200,6 @@ func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend
 			st.ready, st.starting, st.unknown = newModelSet(readyModels), newModelSet(startingModels), newModelSet(unknownModels)
 		}()
 	}
-	wg.Wait()
 	return states
 }
 
