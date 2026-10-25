@@ -68,6 +68,60 @@ func TestLoadedModelsOnlyReadyAndCached(t *testing.T) {
 	}
 }
 
+// A request the gateway sent shows its model as starting even while the
+// cached /running predates the load, under the base model when the request
+// names an alias; once headers arrive the cache is dropped and the model
+// shows as ready.
+func TestPendingModelIsStarting(t *testing.T) {
+	var loaded atomic.Bool
+	var runningCalls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			runningCalls.Add(1)
+			if loaded.Load() {
+				io.WriteString(w, `{"running":[{"model":"a","state":"ready"}]}`)
+				return
+			}
+			io.WriteString(w, `{"running":[]}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a","meta":{"llamaswap":{"type":"model","aliases":["a:Slacker"]}}},{"id":"a:Slacker","meta":{"llamaswap":{"type":"alias","modelID":"a"}}}]}`)
+		case "/v1/chat/completions":
+			<-release // the load
+			loaded.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	b := newBackend(t, "{type: llamaSwap, baseUrl: \""+srv.URL+"\", stateCacheSeconds: 60}")
+	if got, _ := b.LoadedModels(context.Background()); len(got) != 0 {
+		t.Fatalf("before: %+v", got)
+	}
+	done := make(chan error)
+	go func() {
+		_, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"a:Slacker"}`), AliasOf: "a"})
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let the request reach the backend
+	got, _ := b.LoadedModels(context.Background())
+	if len(got) != 1 || got[0].ID != "a" || !got[0].Starting {
+		t.Errorf("during load: %+v", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, _ = b.LoadedModels(context.Background())
+	if len(got) != 1 || got[0].ID != "a" || got[0].Starting {
+		t.Errorf("after load: %+v", got)
+	}
+	if runningCalls.Load() != 2 {
+		t.Errorf("expected the cache to be refetched once, got %d /running calls", runningCalls.Load())
+	}
+}
+
 func TestNoCacheWithoutStateCacheSeconds(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

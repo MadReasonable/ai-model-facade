@@ -35,6 +35,7 @@ func New(entry config.Entry) (*Backend, error) {
 	}
 	b := &Backend{Client: client}
 	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
+	client.TrackPending(b.state)
 	return b, nil
 }
 

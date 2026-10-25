@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type Client struct {
 	stateTimeout time.Duration
 	listRetry    time.Duration
 	client       *http.Client
+	state        *StateCache // set by TrackPending
 }
 
 func New(c Config) (*Client, error) {
@@ -87,13 +89,23 @@ func seconds(s float64) time.Duration {
 	return time.Duration(s * float64(time.Second))
 }
 
+// TrackPending makes Chat count each request as pending in s until its
+// response headers arrive, so s reports the model as starting meanwhile.
+// Ollama and llama-swap send headers once the model is loaded; a backend
+// that sends them earlier ends the count early, and its own state takes over.
+func (c *Client) TrackPending(s *StateCache) {
+	c.state = s
+}
+
 // Chat posts the request to its OpenAI endpoint path on the backend.
 func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
 	accept := ""
 	if req.Stream {
 		accept = "text/event-stream"
 	}
+	release := c.state.Pending(req.StateModel())
 	resp, err := c.Do(ctx, http.MethodPost, string(req.Endpoint), req.Body, accept, req.Client)
+	release()
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -216,12 +228,16 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 }
 
 // StateCache implements backend.ModelStateProvider's LoadedModels on top of an
-// adapter's fetch function, caching the result for stateCacheSeconds.
+// adapter's fetch function, caching the result for stateCacheSeconds. Each
+// read also reports the models of requests still pending (see Pending) as
+// starting where the backend doesn't report them: a backend may list a model
+// only once loaded, and a cached state can predate a load the gateway began.
 type StateCache struct {
 	ttl   time.Duration
 	fetch func(ctx context.Context) ([]backend.ModelInfo, error)
 
 	mu        sync.Mutex
+	pending   map[string]int // model -> requests sent and not yet released
 	loaded    []backend.ModelInfo
 	fetchedAt time.Time
 	startedAt time.Time // when the fetch behind loaded began
@@ -242,7 +258,65 @@ type stateFetch struct {
 }
 
 func NewStateCache(c Config, fetch func(ctx context.Context) ([]backend.ModelInfo, error)) *StateCache {
-	return &StateCache{ttl: seconds(c.StateCacheSeconds), fetch: fetch}
+	return &StateCache{ttl: seconds(c.StateCacheSeconds), fetch: fetch, pending: map[string]int{}}
+}
+
+// Pending counts a request for model as pending until the returned release
+// is called, which may be called more than once. On release, if the cached
+// state didn't list model as ready, a load has just finished or failed, and
+// may have evicted other models, so the cached state is dropped. On a nil
+// StateCache it does nothing.
+func (s *StateCache) Pending(model string) (release func()) {
+	if s == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	s.pending[model]++
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.pending[model]--; s.pending[model] == 0 {
+				delete(s.pending, model)
+			}
+			ready := slices.ContainsFunc(s.loaded, func(m backend.ModelInfo) bool {
+				return !m.Starting && !m.Unknown && (m.ID == model || slices.Contains(m.Aliases, model))
+			})
+			s.mu.Unlock()
+			if !ready {
+				s.Invalidate()
+			}
+		})
+	}
+}
+
+// pendingModels lists the models with requests pending.
+func (s *StateCache) pendingModels() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var models []string
+	for id := range s.pending {
+		models = append(models, id)
+	}
+	return models
+}
+
+// addPending reports each pending model that models doesn't list, or lists as
+// unknown, as starting. A model the backend reports ready or starting keeps
+// that state. A pending alias counts as its base model.
+func addPending(models []backend.ModelInfo, pending []string) []backend.ModelInfo {
+	slices.Sort(pending)
+	for _, id := range slices.Compact(pending) {
+		i := slices.IndexFunc(models, func(m backend.ModelInfo) bool { return m.ID == id || slices.Contains(m.Aliases, id) })
+		switch {
+		case i < 0:
+			models = append(models, backend.ModelInfo{ID: id, Starting: true})
+		case models[i].Unknown:
+			models[i].Unknown, models[i].Starting = false, true
+		}
+	}
+	return models
 }
 
 func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
@@ -256,6 +330,18 @@ func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, err
 // during which a gateway behind Open WebUI may already have read the same
 // llama-swap.
 func (s *StateCache) LoadedModelsSince(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
+	// Pending before and after the read: a load that finishes during it is
+	// still in the first set, one that starts during it is in the second.
+	pending := s.pendingModels()
+	models, err := s.cached(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	return addPending(models, append(pending, s.pendingModels()...)), nil
+}
+
+// cached returns a copy of the backend's own state, cached or fetched.
+func (s *StateCache) cached(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
 	s.mu.Lock()
 	if !s.fetchedAt.IsZero() && (time.Since(s.fetchedAt) < s.ttl || !since.IsZero() && !s.startedAt.Before(since)) {
 		models := append([]backend.ModelInfo(nil), s.loaded...)

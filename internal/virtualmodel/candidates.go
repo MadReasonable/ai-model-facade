@@ -200,7 +200,7 @@ func (m *candidates) Chat(ctx context.Context, endpoint backend.Endpoint, body [
 	if body, err = sjson.SetBytes(body, "model", sel.Target); err != nil {
 		return res, &Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
 	}
-	req := backend.ChatRequest{Endpoint: endpoint, Body: body, Stream: gjson.GetBytes(body, "stream").Bool(), Client: client}
+	req := backend.ChatRequest{Endpoint: endpoint, Body: body, Stream: gjson.GetBytes(body, "stream").Bool(), Client: client, AliasOf: sel.AliasOf}
 	if res.Chat, err = m.backends[sel.Index].Chat(ctx, req); err != nil {
 		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", m.backendNames[sel.Index], err)}
 	}

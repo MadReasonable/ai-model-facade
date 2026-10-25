@@ -108,6 +108,64 @@ func TestLoadedModelsSince(t *testing.T) {
 	}
 }
 
+// A pending model is reported as starting unless the backend reports it ready
+// or starting; an unknown one becomes starting, and a pending alias counts as
+// its base. Releasing a model the cached state listed as ready keeps the
+// cache; releasing any other drops it. A second release does nothing.
+func TestPending(t *testing.T) {
+	var calls atomic.Int32
+	s := NewStateCache(Config{StateCacheSeconds: 60}, func(ctx context.Context) ([]backend.ModelInfo, error) {
+		calls.Add(1)
+		return []backend.ModelInfo{{ID: "r", Aliases: []string{"r:x"}}, {ID: "s", Starting: true}, {ID: "u", Unknown: true}}, nil
+	})
+	var releases []func()
+	for _, id := range []string{"r", "r:x", "s", "u", "new", "new"} {
+		releases = append(releases, s.Pending(id))
+	}
+	got, _ := s.LoadedModels(context.Background())
+	want := []backend.ModelInfo{{ID: "r", Aliases: []string{"r:x"}}, {ID: "s", Starting: true}, {ID: "u", Starting: true}, {ID: "new", Starting: true}}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID || got[i].Starting != want[i].Starting || got[i].Unknown != want[i].Unknown {
+			t.Errorf("model %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	releases[0]() // r was ready: cache kept
+	if s.LoadedModels(context.Background()); calls.Load() != 1 {
+		t.Errorf("after releasing a ready model: %d fetches, want 1", calls.Load())
+	}
+	releases[4]()
+	releases[4]() // a second release of the same request does nothing
+	got, _ = s.LoadedModels(context.Background())
+	if calls.Load() != 2 || got[len(got)-1].ID != "new" || !got[len(got)-1].Starting {
+		t.Errorf("after releasing one of two 'new' requests: %d fetches, got %+v", calls.Load(), got)
+	}
+}
+
+// A request that becomes pending while a read is fetching still shows in
+// that read.
+func TestPendingDuringFetch(t *testing.T) {
+	fetching, release := make(chan struct{}), make(chan struct{})
+	s := NewStateCache(Config{}, func(ctx context.Context) ([]backend.ModelInfo, error) {
+		close(fetching)
+		<-release
+		return nil, nil
+	})
+	result := make(chan []backend.ModelInfo)
+	go func() {
+		models, _ := s.LoadedModels(context.Background())
+		result <- models
+	}()
+	<-fetching
+	s.Pending("late")
+	close(release)
+	if got := <-result; len(got) != 1 || got[0].ID != "late" || !got[0].Starting {
+		t.Errorf("got %+v", got)
+	}
+}
+
 // HTTP client errors name the URL in single quotes, not Go's double quotes,
 // which logs and JSON bodies would escape; the cause stays inspectable.
 func TestURLErrorWording(t *testing.T) {

@@ -209,8 +209,14 @@ It can sit anywhere in the list: its position sets its priority in steps 1 and 2
 Each backend reports which models are loaded in its own way, and that decides how exact the three steps can be.
 
 - **llama-swap** reports `ready`, `starting` and `stopping` for each running model, so all three steps apply exactly.
-- **Ollama** lists a model only once it has finished loading, so the gateway tracks loads itself: a model counts as starting while a request the gateway forwarded is waiting for it. A load started by a client that goes straight to Ollama isn't visible until it finishes.
+- **Ollama** lists a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
 - **Open WebUI** passes on what its connections report, which varies by connection; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). A model whose state it can't report is **unknown**: it counts as not loaded, so only `loadIfNone` can pick it, and the log says `state unknown`.
+
+On top of what a backend reports, a model counts as starting while a request the gateway forwarded to it is waiting for the model: until the response headers arrive, or for Open WebUI, until the reply's first output appears.
+This covers a backend that lists a model only once loaded, and a cached state (`stateCacheSeconds`) that predates the load, so a second request waits for that load instead of starting another.
+A request for a llama-swap alias counts for its base model, since loading the alias loads the base.
+What the backend reports as ready or starting is kept; only a model it doesn't list, or can't report, is marked starting this way.
+A load started by a client that goes straight to the backend isn't visible this way.
 
 #### Candidates on several backends
 

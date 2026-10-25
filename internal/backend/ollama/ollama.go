@@ -5,19 +5,16 @@
 // them. A bare name is not treated as `name:latest`: candidates name exactly
 // what Ollama reports.
 //
-// /api/ps lists a model only once it has finished loading, so the adapter
-// tracks loads itself: a model with a request forwarded through this backend
-// and still awaiting response headers, but not listed, is reported as
-// starting. Ollama sends headers only once the model is loaded. Loads started
-// by clients that bypass the gateway stay invisible until they finish.
+// /api/ps lists a model only once it has finished loading, so a load shows as
+// starting only through the shared state cache's pending requests: a model
+// with a request forwarded through this backend and still awaiting response
+// headers, but not listed, is reported as starting. Ollama sends headers only
+// once the model is loaded. Loads started by clients that bypass the gateway
+// stay invisible until they finish.
 package ollama
 
 import (
 	"context"
-	"slices"
-	"sync"
-
-	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
@@ -34,10 +31,6 @@ type Config struct {
 type Backend struct {
 	*openaihttp.Client
 	state *openaihttp.StateCache
-
-	mu      sync.Mutex
-	pending map[string]int  // model -> requests forwarded and awaiting response headers
-	listed  map[string]bool // models in the last /api/ps
 }
 
 // New builds the adapter from its config entry.
@@ -50,8 +43,9 @@ func New(entry config.Entry) (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{Client: client, pending: map[string]int{}, listed: map[string]bool{}}
+	b := &Backend{Client: client}
 	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
+	client.TrackPending(b.state)
 	return b, nil
 }
 
@@ -75,25 +69,7 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 // LoadedModels returns the models /api/ps lists, as ready, followed by the
 // pending models it doesn't list yet, as starting.
 func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
-	// Pending first: a load that finishes in between then shows up in one
-	// list or the other, since finishing invalidates the cached state.
-	b.mu.Lock()
-	var pending []string
-	for id := range b.pending {
-		pending = append(pending, id)
-	}
-	b.mu.Unlock()
-	models, err := b.state.LoadedModels(ctx)
-	if err != nil {
-		return nil, err
-	}
-	slices.Sort(pending)
-	for _, id := range pending {
-		if !slices.ContainsFunc(models, func(m backend.ModelInfo) bool { return m.ID == id }) {
-			models = append(models, backend.ModelInfo{ID: id, Starting: true})
-		}
-	}
-	return models, nil
+	return b.state.LoadedModels(ctx)
 }
 
 // fetchState reads /api/ps. Ollama reports no load state, so every listed
@@ -108,34 +84,8 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 		return nil, err
 	}
 	var models []backend.ModelInfo
-	listed := map[string]bool{}
 	for _, m := range ps.Models {
 		models = append(models, backend.ModelInfo{ID: m.Name})
-		listed[m.Name] = true
 	}
-	b.mu.Lock()
-	b.listed = listed
-	b.mu.Unlock()
 	return models, nil
-}
-
-// Chat forwards the request, counting its model as pending until the
-// response headers arrive. If the model wasn't listed, it has just loaded (or
-// failed to), so the cached state is dropped for the next request.
-func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	model := gjson.GetBytes(req.Body, "model").String()
-	b.mu.Lock()
-	b.pending[model]++
-	b.mu.Unlock()
-	res, err := b.Client.Chat(ctx, req)
-	b.mu.Lock()
-	if b.pending[model]--; b.pending[model] == 0 {
-		delete(b.pending, model)
-	}
-	unlisted := !b.listed[model]
-	b.mu.Unlock()
-	if unlisted {
-		b.state.Invalidate()
-	}
-	return res, err
 }

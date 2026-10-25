@@ -327,6 +327,45 @@ func TestLlamaSwapBlockReusesNestedRead(t *testing.T) {
 	}
 }
 
+// A model with a run under way shows as starting until polling sees its first
+// output, and a run that fails to start ends the count too.
+func TestPendingUntilFirstOutput(t *testing.T) {
+	f := &fakeWebUI{contents: []string{"", "hi"}, hold: make(chan struct{})}
+	b := serve(t, f, ", stateCacheSeconds: 60")
+	starting := func() bool {
+		got, err := b.LoadedModels(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got) == 1 && got[0].ID == "m" && got[0].Starting
+	}
+	done := make(chan error)
+	go func() {
+		_, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)})
+		done <- err
+	}()
+	f.hold <- struct{}{} // first poll: no output yet
+	if !starting() {
+		t.Error("before output: not starting")
+	}
+	f.hold <- struct{}{} // second poll: output
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if starting() {
+		t.Error("after output: still starting")
+	}
+
+	f = &fakeWebUI{contents: []string{"x"}, startCode: http.StatusNotFound}
+	b = serve(t, f, ", stateCacheSeconds: 60")
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if starting() {
+		t.Error("after a failed start: still starting")
+	}
+}
+
 // link links b and runs the checks it asks for, as the gateway does once
 // every backend has been listed, and returns their warnings.
 func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {

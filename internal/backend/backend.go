@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/tidwall/gjson"
 )
 
 type ModelInfo struct {
@@ -175,6 +177,16 @@ type ChatRequest struct {
 	Body     []byte // raw JSON, params applied and model rewritten
 	Stream   bool
 	Client   Client
+	AliasOf  string // the base model when the body's model is an alias
+}
+
+// StateModel is the model whose load the request waits for: the base model
+// when the body names an alias, since loading an alias loads its base.
+func (r ChatRequest) StateModel() string {
+	if r.AliasOf != "" {
+		return r.AliasOf
+	}
+	return gjson.GetBytes(r.Body, "model").String()
 }
 
 // ChatResponse is a complete, non-streamed response, passed through as-is.

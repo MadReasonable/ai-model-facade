@@ -387,11 +387,14 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		model:     gjson.GetBytes(req.Body, "model").String(),
 		messageID: newID(),
 		created:   time.Now().Unix(),
+		release:   b.state.Pending(req.StateModel()),
 	}
 	if err := r.createChat(ctx, req.Body); err != nil {
+		r.release()
 		return backend.ChatResult{}, err
 	}
 	if resp, err := r.start(ctx, req); err != nil || resp != nil {
+		r.release()
 		go r.cleanup()
 		return backend.ChatResult{Response: resp}, err
 	}
@@ -399,6 +402,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		return backend.ChatResult{Stream: r.stream(ctx, gjson.GetBytes(req.Body, "stream_options.include_usage").Bool())}, nil
 	}
 	msg, err := r.wait(ctx, nil)
+	r.release()
 	go r.finish(err != nil && ctx.Err() != nil)
 	if err != nil {
 		return backend.ChatResult{}, err
@@ -415,6 +419,10 @@ type run struct {
 	chatID    string
 	messageID string // the assistant message Open WebUI fills in
 	created   int64
+	// release ends the request's pending count in the state cache: at the
+	// first output polling sees, since only a loaded model produces any, or
+	// when the run ends without output.
+	release func()
 }
 
 // createChat creates the chat with the client's last user message and an
@@ -555,7 +563,11 @@ func (r *run) poll(ctx context.Context) (message, error) {
 		}
 		return message{}, fmt.Errorf("Open WebUI: %s", text)
 	}
-	return message{content: m.Get("content").String(), reasoning: reasoningOf(m), done: m.Get("done").Bool(), usage: m.Get("usage")}, nil
+	msg := message{content: m.Get("content").String(), reasoning: reasoningOf(m), done: m.Get("done").Bool(), usage: m.Get("usage")}
+	if msg.content != "" || msg.reasoning != "" || msg.done {
+		r.release()
+	}
+	return msg, nil
 }
 
 // reasoningOf joins the text of the message's reasoning items. Open WebUI
@@ -729,6 +741,7 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 	go func() {
 		stop := false
 		defer func() { r.finish(stop) }()
+		defer r.release()
 		defer close(s.done)
 		defer close(s.events)
 		send := func(data []byte) error {
