@@ -224,7 +224,8 @@ type StateCache struct {
 	mu        sync.Mutex
 	loaded    []backend.ModelInfo
 	fetchedAt time.Time
-	fetched   bool // loaded holds a fetched state, even once expired or invalidated
+	startedAt time.Time // when the fetch behind loaded began
+	fetched   bool      // loaded holds a fetched state, even once expired or invalidated
 	inFlight  *stateFetch
 	gen       uint64 // bumped by Invalidate; a refresh started earlier isn't cached
 }
@@ -233,10 +234,11 @@ type StateCache struct {
 // instead of queueing their own fetches behind the mutex, so one slow call to
 // the backend delays each request at most once.
 type stateFetch struct {
-	done   chan struct{} // closed when models and err are set
-	gen    uint64        // StateCache.gen when the fetch started
-	models []backend.ModelInfo
-	err    error
+	done    chan struct{} // closed when models and err are set
+	gen     uint64        // StateCache.gen when the fetch started
+	started time.Time
+	models  []backend.ModelInfo
+	err     error
 }
 
 func NewStateCache(c Config, fetch func(ctx context.Context) ([]backend.ModelInfo, error)) *StateCache {
@@ -244,8 +246,18 @@ func NewStateCache(c Config, fetch func(ctx context.Context) ([]backend.ModelInf
 }
 
 func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	return s.LoadedModelsSince(ctx, time.Time{})
+}
+
+// LoadedModelsSince is LoadedModels, but also reuses a cached state whose
+// fetch began at or after since, even one older than stateCacheSeconds. A
+// caller whose own work began at since needs nothing fresher: the llamaSwap
+// block of an openWebUi backend passes the start of its Open WebUI read,
+// during which a gateway behind Open WebUI may already have read the same
+// llama-swap.
+func (s *StateCache) LoadedModelsSince(ctx context.Context, since time.Time) ([]backend.ModelInfo, error) {
 	s.mu.Lock()
-	if !s.fetchedAt.IsZero() && time.Since(s.fetchedAt) < s.ttl {
+	if !s.fetchedAt.IsZero() && (time.Since(s.fetchedAt) < s.ttl || !since.IsZero() && !s.startedAt.Before(since)) {
 		models := append([]backend.ModelInfo(nil), s.loaded...)
 		s.mu.Unlock()
 		return models, nil
@@ -260,7 +272,7 @@ func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, err
 		return append([]backend.ModelInfo(nil), s.loaded...), nil
 	}
 	if f == nil {
-		f = &stateFetch{done: make(chan struct{}), gen: s.gen}
+		f = &stateFetch{done: make(chan struct{}), gen: s.gen, started: time.Now()}
 		s.inFlight = f
 		go s.refresh(f)
 	}
@@ -284,6 +296,7 @@ func (s *StateCache) refresh(f *stateFetch) {
 	if err == nil && f.gen == s.gen {
 		s.loaded = models
 		s.fetchedAt = time.Now()
+		s.startedAt = f.started
 		s.fetched = true
 	}
 	if s.inFlight == f {

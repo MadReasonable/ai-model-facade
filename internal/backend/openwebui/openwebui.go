@@ -270,11 +270,12 @@ const (
 //   - a workspace model has its base model's state;
 //   - anything else is unknown.
 func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
+	start := time.Now()
 	models, err := b.models(ctx)
 	if err != nil {
 		return nil, err
 	}
-	swapStates := b.swapStates(ctx)
+	swapStates := b.swapStates(ctx, start)
 	bases, aliases := group(models)
 	var infos []backend.ModelInfo
 	for _, m := range bases {
@@ -335,11 +336,11 @@ func (b *Backend) stateOf(m listedModel, swapStates map[string]modelState) model
 // llama-swap's own `status` from Open WebUI's list instead, as if the
 // llamaSwap block weren't set: when the block isn't set, or the backend can't
 // be reached. Going down and coming back are each logged once.
-func (b *Backend) swapStates(ctx context.Context) map[string]modelState {
+func (b *Backend) swapStates(ctx context.Context, since time.Time) map[string]modelState {
 	if b.llamaSwap == nil {
 		return nil
 	}
-	states, err := b.llamaSwapStates(ctx)
+	states, err := b.llamaSwapStates(ctx, since)
 	if err != nil {
 		if !b.swapDown.Swap(true) {
 			b.log.Warn(fmt.Sprintf("%v; using llama-swap's status as Open WebUI reports it until it answers", err))
@@ -353,8 +354,10 @@ func (b *Backend) swapStates(ctx context.Context) map[string]modelState {
 }
 
 // llamaSwapStates maps each running llama-swap model and alias to its state.
-func (b *Backend) llamaSwapStates(ctx context.Context) (map[string]modelState, error) {
-	loaded, err := b.llamaSwap.LoadedModels(ctx)
+// A state fetched since the Open WebUI read began is reused: a gateway that
+// is an Open WebUI connection may have read it while answering that read.
+func (b *Backend) llamaSwapStates(ctx context.Context, since time.Time) (map[string]modelState, error) {
+	loaded, err := b.llamaSwap.LoadedModelsSince(ctx, since)
 	if err != nil {
 		return nil, fmt.Errorf("llamaSwap.backend '%s': %w", b.llamaSwapConfig.Backend, err)
 	}

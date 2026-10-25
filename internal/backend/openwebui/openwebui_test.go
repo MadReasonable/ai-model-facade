@@ -284,6 +284,49 @@ func TestLlamaSwapBlock(t *testing.T) {
 	}
 }
 
+// A gateway behind Open WebUI can read the llamaSwap backend's state while
+// answering the adapter's /api/models read; the adapter reuses that state
+// instead of asking llama-swap again, even with stateCacheSeconds 0.
+func TestLlamaSwapBlockReusesNestedRead(t *testing.T) {
+	var running atomic.Int32
+	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/running":
+			running.Add(1)
+			io.WriteString(w, `{"running":[{"model":"a","state":"ready"}]}`)
+		case "/v1/models":
+			io.WriteString(w, `{"data":[{"id":"a"}]}`)
+		}
+	}))
+	defer swap.Close()
+	var doc yaml.Node
+	yaml.Unmarshal([]byte(`{type: llamaSwap, baseUrl: "`+swap.URL+`"}`), &doc)
+	ls, err := llamaswap.New(config.Entry{Node: doc.Content[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeWebUI{models: `{"id":"a","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}`}
+	webUI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models" {
+			ls.LoadedModels(context.Background()) // the gateway's /v1/models, building `current`
+		}
+		f.ServeHTTP(w, r)
+	}))
+	defer webUI.Close()
+	b := newBackend(t, `{type: openWebUi, baseUrl: "`+webUI.URL+`", apiKey: svc, llamaSwap: {backend: ls}}`)
+	if _, err := link(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
+		t.Fatal(err)
+	}
+	running.Store(0) // listing for link went through /api/models too
+	got, err := b.LoadedModels(context.Background())
+	if err != nil || len(got) != 1 || got[0].ID != "a" || got[0].Starting {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if running.Load() != 1 {
+		t.Errorf("llama-swap's /running was read %d times, want 1", running.Load())
+	}
+}
+
 // link links b and runs the checks it asks for, as the gateway does once
 // every backend has been listed, and returns their warnings.
 func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {
