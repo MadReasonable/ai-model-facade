@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -126,8 +127,16 @@ type stateSnapshotKey struct{}
 
 // stateSnapshot holds the first state each backend reported under one ctx.
 type stateSnapshot struct {
+	start time.Time
 	mu    sync.Mutex
 	reads map[ModelStateProvider]*stateRead
+}
+
+// StateSinceProvider is a ModelStateProvider that can also reuse a state
+// whose fetch began at or after since, however old its cache setting makes
+// it.
+type StateSinceProvider interface {
+	LoadedModelsSince(ctx context.Context, since time.Time) ([]ModelInfo, error)
 }
 
 type stateRead struct {
@@ -141,8 +150,12 @@ type stateRead struct {
 // it: its virtual models are selected one after another, so without it a
 // listing would refresh each backend once per virtual model when the state
 // isn't cached, and two entries could be judged against different states.
+// A backend's first read also reuses a state fetched since the snapshot
+// began, if the backend offers that (StateSinceProvider): a listing can
+// cause such a fetch itself, when reading Open WebUI's state makes Open
+// WebUI list this gateway's models.
 func WithStateSnapshot(ctx context.Context) context.Context {
-	return context.WithValue(ctx, stateSnapshotKey{}, &stateSnapshot{reads: map[ModelStateProvider]*stateRead{}})
+	return context.WithValue(ctx, stateSnapshotKey{}, &stateSnapshot{start: time.Now(), reads: map[ModelStateProvider]*stateRead{}})
 }
 
 // LoadedModels returns p's state, from ctx's snapshot if it has one.
@@ -158,7 +171,13 @@ func LoadedModels(ctx context.Context, p ModelStateProvider) ([]ModelInfo, error
 		s.reads[p] = r
 	}
 	s.mu.Unlock()
-	r.once.Do(func() { r.models, r.err = p.LoadedModels(ctx) })
+	r.once.Do(func() {
+		if sp, ok := p.(StateSinceProvider); ok {
+			r.models, r.err = sp.LoadedModelsSince(ctx, s.start)
+		} else {
+			r.models, r.err = p.LoadedModels(ctx)
+		}
+	})
 	return slices.Clone(r.models), r.err
 }
 
