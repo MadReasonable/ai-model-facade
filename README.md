@@ -200,6 +200,7 @@ A candidate's `model` is one of three things.
 llama-swap applies a preset's own params after the gateway's, completely replacing top-level keys such as `chat_template_kwargs`, so params on an alias candidate may be overridden.
 Prefer base model IDs for anything the gateway must control.
 The gateway logs an INFO line at startup for each alias candidate that has params, and `check` notes it.
+Through Open WebUI, a preset counts as an alias when Open WebUI also lists its base model; a preset listed without its base gets the same note, since llama-swap still applies the preset's params.
 
 A candidate with `loadIfNone: true` is used like any other candidate when it is ready or starting, and is also the fallback in step 3.
 It can sit anywhere in the list: its position sets its priority in steps 1 and 2, while the fallback only happens after the entire list has been checked.
@@ -368,6 +369,7 @@ All take these keys:
 A `llamaSwap` backend is a llama-swap instance, which starts and stops llama-server processes on demand.
 Loaded state comes from its `/running` endpoint, which reports each model as `ready`, `starting` or `stopping`.
 Its model list includes presets (aliases), which can be candidates; see [What a candidate can be](#what-a-candidate-can-be).
+llama-swap marks presets and their base models in that list from v241 on; with an earlier version, an alias candidate never counts as loaded.
 It takes no keys beyond the shared ones.
 
 #### Ollama
@@ -441,6 +443,7 @@ If Open WebUI uses llama-swap as one of its connections, and the gateway can rea
 llama-swap's `/running` reports each model as `ready`, `starting` or `stopping`, so the selection steps apply exactly, as they do for a `llamaSwap` backend.
 The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list, and counts its requests to llama-swap models through Open WebUI in that backend too, so a load the gateway started through either backend shows as starting for facades on both at once.
 A llama-swap preset takes its base model's state, even if Open WebUI doesn't list the base.
+If Open WebUI lists both, the preset counts as an alias of its base, as on a `llamaSwap` backend, so a pattern such as `qwen3.8-27b:*` prefers the base model over its presets.
 Set `backend` to the gateway's `llamaSwap` backend entry for that same llama-swap, and `prefixId` to the prefix Open WebUI's connection adds to its model IDs, if it has one:
 
 ```yaml

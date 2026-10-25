@@ -236,6 +236,54 @@ func TestListModelsFoldsWorkspaceModels(t *testing.T) {
 	}
 }
 
+// llama-swap presets fold into their base model when Open WebUI lists it,
+// exactly or behind a connection prefix, and stand alone when it doesn't or
+// when the prefix leaves more than one candidate. A workspace model built on
+// a preset folds through it into the base.
+func TestListModelsFoldsLlamaSwapPresets(t *testing.T) {
+	swap := func(id, extra string) string {
+		return `{"id":"` + id + `","owned_by":"openai","status":{"value":"unloaded"},"meta":{"llamaswap":{` + extra + `}}}`
+	}
+	models := strings.Join([]string{
+		swap("a", `"type":"model"`),
+		swap("a:Dreamer", `"type":"alias","modelID":"a"`),
+		swap("a:Slacker", `"type":"alias","modelID":"a"`),
+		swap("b:Slacker", `"type":"alias","modelID":"b"`), // base not listed
+		`{"id":"w","owned_by":"openai","info":{"base_model_id":"a:Dreamer"}}`,
+		swap("p.c", `"type":"model"`),
+		swap("p.c:X", `"type":"alias","modelID":"c"`),
+		swap("q.d", `"type":"model"`),
+		swap("r.d", `"type":"model"`),
+		swap("s.d:Y", `"type":"alias","modelID":"d"`), // two prefixed bases match
+	}, ",")
+	got, err := serve(t, &fakeWebUI{models: models}, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary []string
+	for _, m := range got {
+		s := m.ID + "[" + strings.Join(m.Aliases, ",") + "]"
+		if m.Preset { // standalone presets still get llama-swap's params
+			s += "*"
+		}
+		summary = append(summary, s)
+	}
+	if want := "a[a:Dreamer,a:Slacker,w] b:Slacker[]* p.c[p.c:X] q.d[] r.d[] s.d:Y[]*"; strings.Join(summary, " ") != want {
+		t.Errorf("got %s, want %s", strings.Join(summary, " "), want)
+	}
+}
+
+// A request for a folded preset or a workspace alias counts under its base
+// model's llama-swap ID, like a request for the base itself.
+func TestSwapIDOfAliases(t *testing.T) {
+	list := &swapList{bases: []swapBase{{id: "p.a", swapID: "a", aliases: []string{"p.a:Dreamer", "w"}}, {id: "x"}}}
+	for id, want := range map[string]string{"p.a": "a", "p.a:Dreamer": "a", "w": "a", "x": "", "unlisted": ""} {
+		if got := list.swapIDOf(id); got != want {
+			t.Errorf("%s: got %q, want %q", id, got, want)
+		}
+	}
+}
+
 // With the llamaSwap block, llama-swap models take the named backend's exact
 // states (prefix removed) instead of `status`, which says loaded while starting.
 func TestLlamaSwapBlock(t *testing.T) {
@@ -244,7 +292,7 @@ func TestLlamaSwapBlock(t *testing.T) {
 		case "/running":
 			io.WriteString(w, `{"running":[{"model":"a","state":"starting"},{"model":"b","state":"stopping"}]}`)
 		case "/v1/models":
-			io.WriteString(w, `{"data":[{"id":"a","meta":{"llamaswap":{"type":"model","aliases":["a:Slacker"]}}},{"id":"a:Slacker","meta":{"llamaswap":{"type":"alias"}}},{"id":"b"}]}`)
+			io.WriteString(w, `{"data":[{"id":"a","meta":{"llamaswap":{"type":"model","aliases":["a:Slacker"]}}},{"id":"a:Slacker","meta":{"llamaswap":{"type":"alias","modelID":"a"}}},{"id":"b"}]}`)
 		}
 	}))
 	defer swap.Close()
@@ -256,7 +304,7 @@ func TestLlamaSwapBlock(t *testing.T) {
 	}
 	f := &fakeWebUI{models: `
 {"id":"swap.a","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}},
-{"id":"swap.a:Slacker","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"alias"}}},
+{"id":"swap.a:Slacker","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"alias","modelID":"a"}}},
 {"id":"swap.b","owned_by":"openai","status":{"value":"loaded"},"meta":{"llamaswap":{"type":"model"}}}`}
 	b := serve(t, f, ", llamaSwap: {backend: ls, prefixId: swap}")
 	if warned, err := link(t, b, map[string]backend.Backend{"ls": ls}); err != nil || warned != nil {
@@ -266,8 +314,8 @@ func TestLlamaSwapBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// a and its alias are starting; b is stopping, so it doesn't count.
-	if len(got) != 2 || !got[0].Starting || !got[1].Starting || got[0].ID != "swap.a" || got[1].ID != "swap.a:Slacker" {
+	// a is starting, with its preset folded in; b is stopping, so it doesn't count.
+	if len(got) != 1 || !got[0].Starting || got[0].ID != "swap.a" || strings.Join(got[0].Aliases, ",") != "swap.a:Slacker" {
 		t.Errorf("got %+v", got)
 	}
 

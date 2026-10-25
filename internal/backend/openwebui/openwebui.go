@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -200,10 +201,13 @@ func (b *Backend) models(ctx context.Context) ([]listedModel, error) {
 	return list.Data, nil
 }
 
-// group folds workspace models into their base model as aliases, like
-// llama-swap presets: a workspace model is loaded when its base is. A chain
-// of workspace models resolves to the first model that isn't one; a
-// workspace model whose base isn't listed stands alone.
+// group folds models that load with another into it as aliases, the way the
+// llamaSwap backend reports presets: a workspace model into the model it's
+// built on, and a llama-swap preset into its base model. An alias is loaded
+// when its base is, and a glob prefers bases over aliases. A chain, such as
+// a workspace model built on a preset, resolves to the first model that
+// folds into nothing; a workspace model whose base isn't listed stands
+// alone, and so does a preset whose base model Open WebUI doesn't list.
 func group(models []listedModel) (bases []listedModel, aliases map[string][]string) {
 	byID := map[string]listedModel{}
 	for _, m := range models {
@@ -220,24 +224,62 @@ func group(models []listedModel) (bases []listedModel, aliases map[string][]stri
 	return bases, aliases
 }
 
-// rootOf follows base_model_id to the first listed model that has none, and
-// returns m's own ID if its base isn't listed or the chain loops.
+// rootOf follows base_model_id, then a preset's llama-swap base, to the first
+// listed model that folds into nothing. It returns m's own ID if a
+// workspace model's base isn't listed or the chain loops; a preset whose
+// base isn't listed ends the chain.
 func rootOf(m listedModel, byID map[string]listedModel) string {
 	root := m
-	for seen := map[string]bool{m.ID: true}; root.baseModelID() != ""; {
-		next, ok := byID[root.baseModelID()]
-		if !ok || seen[next.ID] {
+	for seen := map[string]bool{m.ID: true}; ; {
+		var next listedModel
+		if id := root.baseModelID(); id != "" {
+			n, ok := byID[id]
+			if !ok {
+				return m.ID
+			}
+			next = n
+		} else if n, ok := swapBaseOf(root, byID); ok {
+			next = n
+		} else {
+			return root.ID
+		}
+		if seen[next.ID] {
 			return m.ID
 		}
 		seen[next.ID] = true
 		root = next
 	}
-	return root.ID
 }
 
-// ListModels lists the models with workspace models folded in as aliases. It
-// keeps what Open WebUI listed for checkPrefixes, which needs the entries'
-// meta.
+// swapBaseOf returns the listed entry of a llama-swap preset's base model.
+// meta.llamaswap.modelID is llama-swap's own ID, and a connection with a
+// prefix lists the base as `<prefix>.<ID>`, so it matches that ID exactly or
+// after a prefix, and only if exactly one llama-swap base model matches.
+func swapBaseOf(m listedModel, byID map[string]listedModel) (listedModel, bool) {
+	id := m.swapBaseID()
+	if !m.isLlamaSwap() || id == "" {
+		return listedModel{}, false
+	}
+	isBase := func(b listedModel) bool { return b.isLlamaSwap() && b.swapBaseID() == "" }
+	if b, ok := byID[id]; ok && isBase(b) {
+		return b, true
+	}
+	var found []listedModel
+	for listedID, b := range byID {
+		if isBase(b) && strings.HasSuffix(listedID, "."+id) {
+			found = append(found, b)
+		}
+	}
+	if len(found) != 1 {
+		return listedModel{}, false
+	}
+	return found[0], true
+}
+
+// ListModels lists the models with workspace models and llama-swap presets
+// folded in as aliases (see group), and marks a preset left standalone as
+// Preset. It keeps what Open WebUI listed for checkPrefixes, which needs the
+// entries' meta.
 func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	models, err := b.models(ctx)
 	if err != nil {
@@ -247,7 +289,10 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	bases, aliases := group(models)
 	infos := make([]backend.ModelInfo, 0, len(bases))
 	for _, m := range bases {
-		infos = append(infos, backend.ModelInfo{ID: m.ID, Aliases: aliases[m.ID]})
+		// A preset left standalone, its base not listed, still gets
+		// llama-swap's params for the preset after the gateway's.
+		preset := m.isLlamaSwap() && m.swapBaseID() != ""
+		infos = append(infos, backend.ModelInfo{ID: m.ID, Aliases: aliases[m.ID], Preset: preset})
 	}
 	return infos, nil
 }
@@ -281,7 +326,8 @@ const (
 //     selection reports: `loaded` is ready, `starting` starting, and
 //     `loadIfNone` or `no candidate loaded` unloaded. The chain behind it
 //     is never followed;
-//   - a workspace model has its base model's state;
+//   - a workspace model, or a llama-swap preset listed with its base model,
+//     has its base model's state (see group);
 //   - anything else is unknown.
 func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 	start := time.Now()
@@ -337,11 +383,12 @@ type swapBase struct {
 	aliases []string
 }
 
-// swapIDOf returns the llama-swap base model behind Open WebUI model id, or
-// "" if it isn't a llama-swap model or isn't in the list.
+// swapIDOf returns the llama-swap base model behind Open WebUI model id,
+// which may be a model or one of its aliases, or "" if it isn't a llama-swap
+// model or isn't in the list.
 func (l *swapList) swapIDOf(id string) string {
 	for _, base := range l.bases {
-		if base.id == id {
+		if base.id == id || slices.Contains(base.aliases, id) {
 			return base.swapID
 		}
 	}
@@ -481,22 +528,23 @@ func (b *Backend) swapStates(ctx context.Context, since time.Time) map[string]mo
 	return states
 }
 
-// llamaSwapStates maps each running llama-swap model and alias to its state,
+// llamaSwapStates maps each running llama-swap base model to its state,
 // reusing a state fetched since since.
 func (b *Backend) llamaSwapStates(ctx context.Context, since time.Time) (map[string]modelState, error) {
 	loaded, err := b.llamaSwap.LoadedModelsSince(ctx, since)
 	if err != nil {
 		return nil, fmt.Errorf("llamaSwap.backend '%s': %w", b.llamaSwapConfig.Backend, err)
 	}
+	// Base models only: every llama-swap entry of Open WebUI's resolves to
+	// its base before the lookup, a folded preset through its base's entry
+	// and a standalone one through meta.llamaswap.modelID.
 	states := map[string]modelState{}
 	for _, m := range loaded {
 		state := ready
 		if m.Starting {
 			state = starting
 		}
-		for _, id := range append([]string{m.ID}, m.Aliases...) {
-			states[id] = state
-		}
+		states[m.ID] = state
 	}
 	return states, nil
 }

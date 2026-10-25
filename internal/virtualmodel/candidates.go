@@ -146,10 +146,11 @@ func (m *candidates) notePassthrough(log *slog.Logger, model string) {
 	log.Warn("candidates span several passthroughAuth backends; a client's key is sent to whichever one wins", "model", model, "backends", m.passthrough)
 }
 
-// noteAliases logs when a candidate can resolve to a backend alias while
-// params are in play: the backend applies the alias's own params after the
-// gateway's (llama-swap's setParamsByID replaces top-level keys), so they may
-// override what the config asked for.
+// noteAliases logs when a candidate can resolve to a backend alias, or to a
+// preset listed without its base, while params are in play: the backend
+// applies the alias's own params after the gateway's (llama-swap's
+// setParamsByID replaces top-level keys), so they may override what the
+// config asked for.
 func noteAliases(log *slog.Logger, model, candidate string, catalog *backend.Catalog, hasParams bool) {
 	if !hasParams {
 		return
@@ -159,11 +160,27 @@ func noteAliases(log *slog.Logger, model, candidate string, catalog *backend.Cat
 		log.Info(msg, "model", model, "candidate", candidate, "aliasOf", base)
 		return
 	}
+	if catalog.OwnParams(candidate) {
+		log.Info(msg, "model", model, "candidate", candidate, "preset", true)
+		return
+	}
 	if selector.IsGlob(candidate) {
-		if _, aliases := selector.Matches(candidate, catalog.Models); len(aliases) > 0 {
-			log.Info(msg, "model", model, "candidate", candidate, "aliases", aliases)
+		bases, aliases := selector.Matches(candidate, catalog.Models)
+		if presets := presetsAmong(bases, catalog); len(aliases)+len(presets) > 0 {
+			log.Info(msg, "model", model, "candidate", candidate, "aliases", append(aliases, presets...))
 		}
 	}
+}
+
+// presetsAmong returns the IDs in bases that the catalog marks Preset.
+func presetsAmong(bases []string, catalog *backend.Catalog) []string {
+	var presets []string
+	for _, id := range bases {
+		if catalog.OwnParams(id) {
+			presets = append(presets, id)
+		}
+	}
+	return presets
 }
 
 func (m *candidates) Description() string {
@@ -270,13 +287,24 @@ func describeAliases(candidate, backendName string, catalog *backend.Catalog, ha
 	if selector.IsGlob(candidate) {
 		bases, aliases := selector.Matches(candidate, catalog.Models)
 		lines := []string{"base models: " + listOrNone(bases), "aliases: " + listOrNone(aliases)}
-		if len(aliases) > 0 && hasParams {
+		presets := presetsAmong(bases, catalog)
+		if len(presets) > 0 {
+			lines = append(lines, "presets listed without their base model: "+listOrNone(presets))
+		}
+		if len(aliases)+len(presets) > 0 && hasParams {
 			lines = append(lines, aliasOverrideNote)
 		}
 		return lines
 	}
 	if base, ok := catalog.AliasOf[candidate]; ok {
 		lines := []string{"alias of " + base}
+		if hasParams {
+			lines = append(lines, aliasOverrideNote)
+		}
+		return lines
+	}
+	if catalog.OwnParams(candidate) {
+		lines := []string{"preset listed without its base model"}
 		if hasParams {
 			lines = append(lines, aliasOverrideNote)
 		}

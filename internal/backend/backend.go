@@ -21,6 +21,11 @@ type ModelInfo struct {
 	// Unknown is set by ModelStateProvider for a model whose state the
 	// backend can't read. It selects like a model that isn't loaded.
 	Unknown bool
+	// Preset is set in ListModels for a model that is listed on its own but
+	// that the backend treats like an alias, applying params of its own after
+	// the gateway's: a llama-swap preset that Open WebUI lists without its
+	// base model.
+	Preset bool
 }
 
 // Catalog indexes a backend's model list for validation and display.
@@ -73,6 +78,13 @@ func (c *Catalog) WithTags(id string) []string {
 func (c *Catalog) Model(id string) (ModelInfo, bool) {
 	m, ok := c.byID[id]
 	return m, ok
+}
+
+// OwnParams reports whether the backend applies params of its own to
+// requests for id, after the gateway's: an alias, or a model marked Preset.
+func (c *Catalog) OwnParams(id string) bool {
+	_, isAlias := c.AliasOf[id]
+	return isAlias || c.byID[id].Preset
 }
 
 // ListingCheck is a check against the model lists of some backends, such as
