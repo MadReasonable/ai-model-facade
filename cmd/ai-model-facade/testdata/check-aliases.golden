@@ -1,0 +1,26 @@
+direct
+  backend: llamaSwap
+  1. *:Fast
+     base models: none
+     aliases: a:Fast, b:Fast
+     note: the backend's own params for an alias may override the params below
+     params: {"max_tokens":100}
+  2. a:Slow
+     alias of a
+     note: the backend's own params for an alias may override the params below
+     params: {"max_tokens":100}
+  3. a*
+     base models: a
+     aliases: none
+     params: {"max_tokens":100}
+
+through-open-webui
+  backend: openWebUi
+  1. a:Fast
+     alias of a
+     note: the backend's own params for an alias may override the params below
+     params: {"max_tokens":100}
+  2. b:Fast
+     preset listed without its base model
+     note: the backend's own params for an alias may override the params below
+     params: {"max_tokens":100}

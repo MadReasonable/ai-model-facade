@@ -59,27 +59,33 @@ func currentVersion() string {
 }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "version" {
-		fmt.Println(currentVersion())
-		return
-	}
-	commands := map[string]func(string) error{"serve": serve, "check": check, "health": health}
-	command := commands[""]
-	if len(os.Args) == 3 {
-		command = commands[os.Args[1]]
-	}
-	if command == nil {
-		fmt.Fprint(os.Stderr, about+"\n"+usage+"\n")
-		os.Exit(2)
-	}
-	err := command(os.Args[2])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func check(path string) error {
+// run carries out the command in args and returns the exit code: 0 on
+// success, 1 if the command failed, 2 if args name no command.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && args[0] == "version" {
+		fmt.Fprintln(stdout, currentVersion())
+		return 0
+	}
+	commands := map[string]func(path string, stdout, stderr io.Writer) error{"serve": serve, "check": check, "health": health}
+	command := commands[""]
+	if len(args) == 2 {
+		command = commands[args[0]]
+	}
+	if command == nil {
+		fmt.Fprint(stderr, about+"\n"+usage+"\n")
+		return 2
+	}
+	if err := command(args[1], stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+func check(path string, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cfg, err := config.Load(path)
@@ -93,14 +99,14 @@ func check(path string) error {
 	}
 	for i, m := range g.Models {
 		if i > 0 {
-			fmt.Println()
+			fmt.Fprintln(stdout)
 		}
-		fmt.Println(m.Name)
-		m.Handler.Describe(os.Stdout)
+		fmt.Fprintln(stdout, m.Name)
+		m.Handler.Describe(stdout)
 	}
 	// serve starts despite these; check is where they should be caught.
 	for _, w := range g.Warnings {
-		fmt.Fprintln(os.Stderr, "error:", w)
+		fmt.Fprintln(stderr, "error:", w)
 	}
 	if n := len(g.Warnings); n > 0 {
 		return fmt.Errorf("%d check(s) against the backends failed", n)
@@ -110,7 +116,7 @@ func check(path string) error {
 
 // health checks a running gateway. It only parses the config to find
 // server.listen; it contacts no backend.
-func health(path string) error {
+func health(path string, stdout, stderr io.Writer) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
@@ -122,7 +128,7 @@ func health(path string) error {
 	return gateway.CheckHealth(context.Background(), url)
 }
 
-func serve(path string) error {
+func serve(path string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cfg, err := config.Load(path)
@@ -135,7 +141,7 @@ func serve(path string) error {
 	}
 	var levelVar slog.LevelVar // reloadable
 	levelVar.Set(level)
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &levelVar}))
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: &levelVar}))
 	g, err := gateway.Build(ctx, cfg, log)
 	if err != nil {
 		return err

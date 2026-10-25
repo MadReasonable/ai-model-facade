@@ -1,0 +1,23 @@
+task-monkey
+  backend: llamaSwap
+  description: Background tasks on whichever LLM is already loaded, thinking off
+  1. qwen3.6-35b-a3b:q8_0
+     params: {"max_tokens":1000,"think":null,"chat_template_kwargs":{"enable_thinking":false}}
+  2. qwen3.8-flash-next:iq3_s
+     params: {"max_tokens":1000,"think":null,"chat_template_kwargs":{"enable_thinking":false}}
+  3. qwen3.8-27b:*
+     base models: qwen3.8-27b:q6_k
+     aliases: none
+     params: {"max_tokens":1000,"think":null,"chat_template_kwargs":{"enable_thinking":false}}
+  4. qwen2.5-coder-3b:q8_0 (loadIfNone)
+     params: {"max_tokens":1000,"think":null}
+
+assistant
+  backend: llamaSwap
+  description: Voice assistant on whichever model is loaded
+  1. *:Assistant
+     base models: none
+     aliases: qwen3.6-35b:Assistant, qwen3.8-flash-next:Assistant
+     params: {}
+  2. qwen2.5-coder-3b:q8_0 (loadIfNone)
+     params: {"chat_template_kwargs":{"enable_thinking":false}}

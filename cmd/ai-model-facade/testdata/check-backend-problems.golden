@@ -1,0 +1,10 @@
+task
+  backend: llamaSwap
+  1. qwen9:q1
+     params: {}
+  2. qwen3.8-27b
+     params: {}
+--- stderr
+error: models.task: line 9: model 'qwen9:q1' is not listed by backend 'llamaSwap' and won't count as loaded until it is
+error: models.task: line 10: model 'qwen3.8-27b' is not listed by backend 'llamaSwap' and won't count as loaded until it is; did you mean qwen3.8-27b:q6_k?
+error: 2 check(s) against the backends failed
