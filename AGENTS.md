@@ -1,7 +1,7 @@
 # ai-model-facade
 
 An OpenAI-compatible gateway that serves facades: model names that exist only in its config.
-A client asks for a facade such as `task`; the gateway picks a real model from that facade's candidate list, based on which models its backends have loaded, patches the request with the configured params, and forwards it through a backend adapter (llama-swap, Ollama or Open WebUI).
+A client asks for a facade such as `task`; the gateway picks a real model from that facade's candidate list, based on which models its backends have loaded, patches the request with the configured params, and forwards it through a backend adapter (llama-swap, llama-server, Ollama or Open WebUI).
 A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side tools: the `openwebui` adapter runs Open WebUI's multi-request chat flow and returns one ordinary response or stream, so its polling, synthesized responses and route field are the point of that adapter, not inconsistencies to remove.
 
 - `README.md` describes what the gateway does, for users.
@@ -29,7 +29,7 @@ Each has its reasoning in `docs/agents-design.md`, in the section named after it
 3. **Fixed order of application:** client body, then the facade's `params`, then the winning candidate's `params`, then `model` rewritten to the chosen ID. Gateway params override the client.
 4. **Key order is kept** (The walker). Existing body keys stay in place; keys a patch adds are appended to their object in config order. Patches are built from the `yaml.Node` tree, never from a Go map.
 5. **Each facade is self-contained** (The concept: facades). No families or other implicit matching by model ID. Shared settings come only from YAML anchors under `vars:`, referenced explicitly.
-6. **Never trigger a load the list didn't ask for** (Selection). The winner is the first candidate its backend reports ready; else the first one still starting; else the first `loadIfNone: true` candidate, wherever it sits. Stopping or stopped models never count. An alias has its base model's state; patterns prefer base models over aliases.
+6. **Never trigger a load the list didn't ask for** (Selection). The winner is the first candidate its backend reports ready; else the first one still starting; else the first `loadIfNone: true` candidate, wherever it sits. A backend loading a model is sent nothing while it loads that it would refuse. Stopping or stopped models never count. An alias has its base model's state; patterns prefer base models over aliases.
 7. **Adapters may stream.** An adapter returns a complete response or a chunk stream, and the front end handles both.
 8. **Fail only on a wrong config** (Errors and warnings). Unknown keys, an undefined `${ENV}`, a duplicated name, an undefined backend reference, or a selector whose required capability the backend lacks are startup errors. A check that depends on a backend being up and current is a warning (`Gateway.Warnings`): `serve` and reloads log it and start, `check` reports it as an error and exits non-zero.
 9. **Selections are observable** (Observability). One log line per request (facade, candidates checked, winner, reason) and the `X-Gateway-Target` response header.
@@ -63,7 +63,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/mergepatch`: params compiled from YAML and applied to raw bodies.
 - `internal/backend`: the interfaces adapters implement, optional capabilities (`backend.Has`), and the context helpers for sharing state reads.
 - `internal/backend/openaihttp`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
-- `internal/backend/llamaswap`, `ollama`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.
+- `internal/backend/llamaswap`, `llamaserver`, `ollama`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.
 - `internal/testkit`: fake backends. Tests live in the package they test; see `CONTRIBUTING.md`.
 
 ## Program commands

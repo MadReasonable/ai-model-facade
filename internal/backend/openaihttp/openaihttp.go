@@ -92,8 +92,9 @@ func seconds(s float64) time.Duration {
 
 // trackPending makes Chat count each request as pending in s until its
 // response headers arrive, so s reports the model as starting meanwhile.
-// Ollama and llama-swap send headers once the model is loaded; a backend
-// that sends them earlier ends the count early, and its own state takes over.
+// Ollama, llama-swap and llama-server send headers once the model is
+// loaded; a backend that sends them earlier ends the count early, and its
+// own state takes over.
 func (c *Client) trackPending(s *StateCache) {
 	c.state = s
 }
@@ -246,13 +247,24 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", path, resp.Status)
+		return &StatusError{Path: path, Code: resp.StatusCode, Status: resp.Status}
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(out); err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
 	}
 	return nil
 }
+
+// StatusError is GetJSON's error for a response other than 200, so an
+// adapter can tell a status that describes the backend's state, such as
+// llama-server's 503 while it loads, from a failure.
+type StatusError struct {
+	Path   string
+	Code   int
+	Status string // as sent, e.g. "503 Service Unavailable"
+}
+
+func (e *StatusError) Error() string { return "GET " + e.Path + ": " + e.Status }
 
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)

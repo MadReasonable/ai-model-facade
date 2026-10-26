@@ -3,6 +3,7 @@ package selector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -109,6 +110,10 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 	for i, c := range s.Candidates {
 		st := states[c.backendOr(b)]
 		<-st.done
+		if st.busy {
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": "+backend.ErrLoading.Error())
+			continue
+		}
 		if st.err != nil {
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": state unavailable")
 		} else if id, base, ok := st.ready.match(c.Model); ok {
@@ -134,14 +139,16 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 			fallback = i
 		}
 	}
-	// Nothing is ready, and every backend has answered.
+	// Nothing is ready, and every backend has answered. A busy backend's
+	// state was read, so only backends that couldn't be read at all fail
+	// the request.
 	var firstErr error
 	for _, c := range s.Candidates {
-		if err := states[c.backendOr(b)].err; err == nil {
+		if st := states[c.backendOr(b)]; st.err == nil || st.busy {
 			firstErr = nil
 			break
 		} else if firstErr == nil {
-			firstErr = err
+			firstErr = st.err
 		}
 	}
 	if firstErr != nil {
@@ -164,6 +171,11 @@ type backendState struct {
 	done                     chan struct{}
 	ready, starting, unknown modelSet
 	err                      error
+	// busy is set for a backend loading a model that serves nothing until it
+	// has: its read failed with backend.ErrLoading. None of its candidates
+	// can be used, but its state was read, so it doesn't count as
+	// unavailable.
+	busy bool
 }
 
 // states starts reading the state of every backend the candidates use, once
@@ -184,6 +196,7 @@ func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend
 			loadedModels, err := backend.LoadedModels(ctx, cb.(backend.ModelStateProvider))
 			if err != nil {
 				st.err = err
+				st.busy = errors.Is(err, backend.ErrLoading)
 				return
 			}
 			var readyModels, startingModels, unknownModels []backend.ModelInfo

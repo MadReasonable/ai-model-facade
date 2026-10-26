@@ -157,7 +157,9 @@ func noteAliases(log *slog.Logger, model, candidate string, catalog *backend.Cat
 	}
 	const msg = "candidate can resolve to a backend alias; the backend applies the alias's own params after the gateway's and may override them"
 	if base, ok := catalog.AliasOf[candidate]; ok {
-		log.Info(msg, "model", model, "candidate", candidate, "aliasOf", base)
+		if catalog.OwnParams(candidate) {
+			log.Info(msg, "model", model, "candidate", candidate, "aliasOf", base)
+		}
 		return
 	}
 	if catalog.OwnParams(candidate) {
@@ -166,21 +168,23 @@ func noteAliases(log *slog.Logger, model, candidate string, catalog *backend.Cat
 	}
 	if selector.IsGlob(candidate) {
 		bases, aliases := selector.Matches(candidate, catalog.Models)
-		if presets := presetsAmong(bases, catalog); len(aliases)+len(presets) > 0 {
-			log.Info(msg, "model", model, "candidate", candidate, "aliases", append(aliases, presets...))
+		if overriding := append(ownParamsAmong(aliases, catalog), ownParamsAmong(bases, catalog)...); len(overriding) > 0 {
+			log.Info(msg, "model", model, "candidate", candidate, "aliases", overriding)
 		}
 	}
 }
 
-// presetsAmong returns the IDs in bases that the catalog marks Preset.
-func presetsAmong(bases []string, catalog *backend.Catalog) []string {
-	var presets []string
-	for _, id := range bases {
+// ownParamsAmong returns the IDs in ids that the backend applies params of
+// its own to: among base models, the presets; among aliases, those that
+// aren't plain names.
+func ownParamsAmong(ids []string, catalog *backend.Catalog) []string {
+	var own []string
+	for _, id := range ids {
 		if catalog.OwnParams(id) {
-			presets = append(presets, id)
+			own = append(own, id)
 		}
 	}
-	return presets
+	return own
 }
 
 func (m *candidates) Description() string {
@@ -287,18 +291,18 @@ func describeAliases(candidate, backendName string, catalog *backend.Catalog, ha
 	if selector.IsGlob(candidate) {
 		bases, aliases := selector.Matches(candidate, catalog.Models)
 		lines := []string{"base models: " + listOrNone(bases), "aliases: " + listOrNone(aliases)}
-		presets := presetsAmong(bases, catalog)
+		presets := ownParamsAmong(bases, catalog)
 		if len(presets) > 0 {
 			lines = append(lines, "presets listed without their base model: "+listOrNone(presets))
 		}
-		if len(aliases)+len(presets) > 0 && hasParams {
+		if len(ownParamsAmong(aliases, catalog))+len(presets) > 0 && hasParams {
 			lines = append(lines, aliasOverrideNote)
 		}
 		return lines
 	}
 	if base, ok := catalog.AliasOf[candidate]; ok {
 		lines := []string{"alias of " + base}
-		if hasParams {
+		if hasParams && catalog.OwnParams(candidate) {
 			lines = append(lines, aliasOverrideNote)
 		}
 		return lines

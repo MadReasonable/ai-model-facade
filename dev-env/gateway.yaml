@@ -24,6 +24,16 @@ vars:
     params: { think: false }
 
 backends:
+  llamaRouter:
+    type: llamaServer
+    baseUrl: http://127.0.0.1:18080
+    requestTimeoutSeconds: 60
+
+  llamaServer:
+    type: llamaServer
+    baseUrl: http://127.0.0.1:18081
+    requestTimeoutSeconds: 60
+
   llamaSwap:
     type: llamaSwap
     baseUrl: http://127.0.0.1:18082
@@ -44,6 +54,25 @@ backends:
     llamaSwap: { backend: llamaSwap }
 
 models:
+  # Whichever of the router's first two models is loaded, loading one only
+  # if neither is: a request for llamaRouter-llm-3 evicts one of them, the
+  # one used least recently, and the next request here shows which.
+  router:
+    backend: llamaRouter
+    params: *llamaCppNoThinking
+    candidates:
+      - model: llamaRouter-llm-1
+      - model: llamaRouter-llm-2
+        loadIfNone: true
+
+  # The single-model server, which holds its one model while it runs.
+  single:
+    backend: llamaServer
+    params: *llamaCppNoThinking
+    candidates:
+      - model: llamaServer-llm-1
+        loadIfNone: true
+
   # Whichever of llama-swap's first two models is loaded, loading one only
   # if neither is: a request for llamaSwap-llm-3 evicts one of them, and the
   # next request here shows which.

@@ -70,6 +70,14 @@ backends:
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
 
+  # llama.cpp's own llama-server takes the same keys too, in router mode or
+  # with a single model; the gateway asks the server which.
+  # llamaServer:
+  #   type: llamaServer
+  #   baseUrl: http://llama-server:8080
+  #   stateCacheSeconds: 2
+  #   requestTimeoutSeconds: 180
+
   # An Open WebUI backend runs each request through Open WebUI's own chat
   # flow, so Open WebUI's tools run on its server and any client gets them.
   # openWebUi:

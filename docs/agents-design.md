@@ -147,9 +147,15 @@ It walks the list up to three times:
 A model that is stopping or stopped never counts, since a request to it would load it again.
 A model whose state can't be read counts as not loaded, so only `loadIfNone` can pick it.
 
-Aliases (llama-swap presets, Open WebUI workspace models) are candidates with their base model's state, since loading an alias loads its base.
+A backend that serves nothing until a load ends is skipped whole while it loads: a request sent then would fail, so none of its candidates is waited on or picked as the fallback.
+An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503.
+The log calls such a backend's candidates busy, and since its state was read, a request that finds nothing else gets `503` as with no candidate loaded, not the `502` of a backend whose state can't be read.
+Every other backend serves a second request once its load ends, so a candidate starting there is still waited on.
+
+Aliases (llama-swap presets, Open WebUI workspace models, llama-server aliases) are candidates with their base model's state, since loading an alias loads its base.
 A pattern matches base models before aliases, each in sorted order, so a pattern matching both resolves to one well-defined model; it says nothing about which is better.
 An alias is forwarded under its own ID so the backend applies its settings, and those settings are applied after the gateway's params, which is why an alias candidate with params gets a startup note.
+A llama-server alias is only another name for its model, with no settings of its own, so the adapter marks the model `PlainAliases` and its aliases get no note (llama-server).
 
 ### Candidates on several backends
 
@@ -190,9 +196,9 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap` and `ollama` are built on it.
+Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver` and `ollama` are built on it.
 An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
-A request is released when its response headers arrive, since llama-swap and Ollama both send headers only once the model is loaded (Ollama verified on 0.40.8: headers arrive with the first token).
+A request is released when its response headers arrive, since llama-swap, llama-server's router and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, and on llama-server b11580).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
 On release, if the cached state didn't list the model as ready, a load just finished or failed and may have evicted other models, so the cache is dropped (`StateCache.Invalidate`); a refresh already in flight is then neither cached nor joined, since it may predate the change.
 
@@ -214,7 +220,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
@@ -226,6 +232,41 @@ A load already under way for the same model is joined, a ready model with nothin
 So llama-swap never stops a model mid-load or mid-request, and a wrong choice by the gateway costs an extra swap and the wait for it, not a lost load; the pending count exists to avoid that swap.
 A queued swap waits for the model to go idle, so a steady stream of requests to a ready model can hold a swap off.
 Each model admits at most `concurrencyLimit` requests (default 10) and refuses more with a 429 and `Retry-After`, which the gateway passes on.
+
+### llama-server
+
+llama.cpp's own server runs either as a router, which loads and unloads models on demand, or with one model for as long as it runs.
+Everything here was verified on b11580, using the environment in `dev-env/`, unless marked as source.
+
+The adapter takes the mode from `GET /props` on every state read: a router's has `role: router`, a single-model server's has no `role` (source, `server-models.cpp`).
+In single-model mode `/props` is the state anyway, and in router mode it costs one small request, so a server restarted in the other mode behind the same address is read correctly without a reload.
+Decided against: a `mode` config key, which could disagree with the server.
+
+In router mode, state is each model's `status.value` in `/v1/models`, which then lists the same entries as `/models`.
+`loaded` is ready and `loading` is starting.
+`unloaded`, `sleeping`, `downloading` and `incomplete` don't count, because a request to any of them loads the model; a failed load reads as `unloaded`, with `failed: true`.
+A sleeping model is one that `--sleep-idle-seconds` unloaded from memory, and the next request takes a full load (the router's memory fell to 68 MiB, and the request waited for the load).
+
+How the router schedules loads (source, `server_lru_sched`; the order also seen with three IDs and `--models-max 2`) decides what a wrong choice costs.
+With `--models-max` models loaded, a new load first unloads the least recently used idle model: never one with a request in flight, one still loading, or one that a queued request waits for.
+If every loaded model is busy, the request waits in a queue until one finishes.
+So, as with llama-swap, a wrong choice by the gateway costs an extra load and the wait for it, not a lost request.
+
+Limit: the router reports no stopping state.
+It tracks the models it is stopping (`stopping_models`), but `/models` lists them as `loaded` until they are gone: 0.1 to 0.2 s for an idle model after `POST /models/unload`, and at most the preset's `stop-timeout` (default 10 s) before the process is killed.
+In that window a facade can pick the model as ready, and its request then loads it again.
+This applies to every unload, an eviction the gateway's own request caused included, since the pending count covers only the model being loaded.
+
+In single-model mode the one model is ready, unless `/props` reports `is_sleeping`.
+While the model loads, the server answers every endpoint with 503 "Loading model", a chat included (source, `middleware_server_state` in `server-http.cpp`; seen on `/health` and `/props`), so a request sent then fails rather than waits.
+So the adapter reports the 503 as `backend.ErrLoading`, and selection skips the server while it loads (Selection), rather than send a request into the 503 as a starting model or the fallback.
+The adapter reads any 503 from `/props` this way, so a proxy in front of a llama-server that is down, answering 503, reads as busy rather than as state that can't be read, and a request that finds nothing else gets `503`.
+The server ignores the request's `model` (any name was answered), so only the startup check catches a candidate with the wrong ID; selection treats that candidate as unlisted, never loaded.
+
+Decided: llama-server aliases are plain names.
+A preset's `alias` key gives its model more IDs, which the router resolves to the same instance with the same arguments (source, alias lookup in `server_models`), so an alias has no params of its own.
+The adapter marks each model `PlainAliases`, and `Catalog.OwnParams`, and through it the startup note and `check`, treat its aliases as the model itself.
+In single-model mode the list repeats the model's own ID among its aliases, and the adapter drops it.
 
 ### Ollama
 

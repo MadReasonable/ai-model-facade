@@ -81,6 +81,62 @@ func TestOllama_ListsModelOnlyOnceLoaded(t *testing.T) {
 	}
 }
 
+// llama-server in router mode names its role in /props, lists each model's
+// status, and shows a load as loading until it finishes; a model it doesn't
+// have is a 400.
+func TestLlamaServer_RouterListsStatusAndShowsLoads(t *testing.T) {
+	f := NewLlamaServerRouter(t, ServerModel{ID: "a", Aliases: []string{"a-alt"}})
+	if props := get(t, f.URL+"/props"); gjson.Get(props, "role").String() != "router" {
+		t.Fatalf("props: %s", props)
+	}
+	load := f.HoldLoads()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"a-alt"}`); resp != nil {
+			resp.Body.Close()
+		}
+	}()
+	f.WaitFor(t, "POST /v1/chat/completions", 1)
+	if models := get(t, f.URL+"/v1/models"); gjson.Get(models, "data.0.status.value").String() != "loading" || gjson.Get(models, "data.0.aliases.0").String() != "a-alt" {
+		t.Errorf("during the load: %s", models)
+	}
+	load.Open()
+	<-done
+	if f.Status("a") != "loaded" {
+		t.Errorf("after the load: %q", f.Status("a"))
+	}
+	if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp == nil || resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("unknown model: %+v", resp)
+	} else {
+		resp.Body.Close()
+	}
+}
+
+// llama-server in single-model mode has no role in /props, lists its model
+// with its own ID among the aliases, and answers every request with 503
+// while the model loads.
+func TestLlamaServer_SingleRefusesEverythingWhileLoading(t *testing.T) {
+	f := NewLlamaServerSingle(t, ServerModel{ID: "a"})
+	if props := get(t, f.URL+"/props"); gjson.Get(props, "role").Exists() || gjson.Get(props, "is_sleeping").Bool() {
+		t.Errorf("props: %s", props)
+	}
+	if models := get(t, f.URL+"/v1/models"); gjson.Get(models, "data.0.aliases.0").String() != "a" {
+		t.Errorf("models: %s", models)
+	}
+	f.SetStatus("a", "loading")
+	for _, path := range []string{"/props", "/v1/models"} {
+		resp, err := http.Get(f.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("%s while loading: %d", path, resp.StatusCode)
+		}
+	}
+}
+
 // Open WebUI answers the model list only with refresh=true, and runs
 // OnModels while answering it.
 func TestOpenWebUI_ModelListNeedsRefresh(t *testing.T) {
