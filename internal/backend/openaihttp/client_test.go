@@ -120,6 +120,20 @@ func TestClient_StateCallsHaveTheirOwnTimeout(t *testing.T) {
 	}
 }
 
+// A state call answered with another status than 200 fails with a
+// StatusError carrying the code, so an adapter can read a status as state.
+func TestClient_StateCallErrorsCarryTheStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"Loading model"}}`, http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	err := newClient(t, Config{BaseURL: srv.URL}).GetJSON(context.Background(), "/props", &struct{}{})
+	var status *StatusError
+	if !errors.As(err, &status) || status.Code != http.StatusServiceUnavailable || err.Error() != "GET /props: 503 Service Unavailable" {
+		t.Errorf("got %v", err)
+	}
+}
+
 // The backend's apiKey goes on every call, unless passthroughAuth puts the
 // client's own key, or none, on chat requests; the gateway's own calls keep
 // the apiKey either way.

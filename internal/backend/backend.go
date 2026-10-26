@@ -26,6 +26,9 @@ type ModelInfo struct {
 	// the gateway's: a llama-swap preset that Open WebUI lists without its
 	// base model.
 	Preset bool
+	// PlainAliases is set in ListModels for a model whose aliases are only
+	// other names for it, with no params of their own: llama-server's.
+	PlainAliases bool
 }
 
 // Catalog indexes a backend's model list for validation and display.
@@ -81,10 +84,13 @@ func (c *Catalog) Model(id string) (ModelInfo, bool) {
 }
 
 // OwnParams reports whether the backend applies params of its own to
-// requests for id, after the gateway's: an alias, or a model marked Preset.
+// requests for id, after the gateway's: an alias, unless its base model's
+// aliases are plain names, or a model marked Preset.
 func (c *Catalog) OwnParams(id string) bool {
-	_, isAlias := c.AliasOf[id]
-	return isAlias || c.byID[id].Preset
+	if base, isAlias := c.AliasOf[id]; isAlias {
+		return !c.byID[base].PlainAliases
+	}
+	return c.byID[id].Preset
 }
 
 // ListingCheck is a check against the model lists of some backends, such as
@@ -140,6 +146,14 @@ func StateWaitAllowed(ctx context.Context) bool {
 }
 
 var ErrStateBusy = errors.New("backend state refresh already in flight and nothing cached")
+
+// ErrLoading is wrapped in a ModelStateProvider's error by a backend whose
+// state read fails because it is loading a model and serves nothing until it
+// has, whoever started the load: single-model llama-server answers 503 then.
+// Selection treats the backend as busy: none of its candidates is used, the
+// loadIfNone fallback included, since a request sent then would fail, and a
+// request that finds nothing else gets 503.
+var ErrLoading = errors.New("busy loading a model")
 
 type requestStartKey struct{}
 

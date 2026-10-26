@@ -8,7 +8,7 @@ Models, quants and even backends can be swapped without any change on the client
 
 It is one static binary and one YAML file, with no runtime dependencies.
 The smallest useful config is a backend address and one facade mapped to one model.
-Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
+Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
 
 > [!NOTE]
 > **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
@@ -30,7 +30,7 @@ A facade moves that decision out of every client and into one place, where it is
 ## Quick Start
 
 This walkthrough uses llama-swap as the backend, so you need a running instance.
-Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
+llama-server, Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
 You need a binary from the [releases page](https://github.com/MadReasonable/ai-model-facade/releases), Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
 
 ```bash
@@ -187,6 +187,7 @@ The gateway reads the backend's state, walks the list up to three times, and sto
 3. **Fallback.** If nothing is ready or starting, the first `loadIfNone` candidate wins, and the backend loads it.
 
 A model that is stopping or stopped never counts.
+A backend that serves nothing while it loads a model is skipped until it has: single-model llama-server answers every request with an error then.
 If nothing matches, the request gets `503`; Open WebUI, for example, then skips the task.
 
 There is no failover: a request is never retried against another model.
@@ -197,12 +198,13 @@ A candidate's `model` is one of three things.
 
 - **An exact model ID.** If the backend doesn't list it, the gateway warns at startup and `check` reports an error, either way suggesting IDs that differ only by tag.
 - **A pattern** such as `qwen3.8-27b:*`, using `*`, `?` or `[...]`. It matches ready (or starting) models, and the matched ID is forwarded. If several match, the first in sorted order wins. Quote a pattern that starts with `*`, because a leading `*` is YAML alias syntax.
-- **An alias**, a variant of a base model that the backend serves under its own ID: a llama-swap preset such as `qwen3.6-35b:Slacker`, or, through Open WebUI, a workspace model or a llama-swap preset whose base model Open WebUI also lists. It is ready (or starting) whenever its base model is, and is forwarded under its own ID so the backend applies the variant's settings. A pattern matches base models before aliases, so a pattern that matches both resolves to one well-defined model: `qwen3.8-27b:*` picks the quant, not its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
+- **An alias**, a variant of a base model that the backend serves under its own ID: a llama-swap preset such as `qwen3.6-35b:Slacker`, a llama-server alias, or, through Open WebUI, a workspace model or a llama-swap preset whose base model Open WebUI also lists. It is ready (or starting) whenever its base model is, and is forwarded under its own ID so the backend applies the variant's settings. A pattern matches base models before aliases, so a pattern that matches both resolves to one well-defined model: `qwen3.8-27b:*` picks the quant, not its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
 
 A llama-swap preset can set params of its own, and llama-swap applies them after the gateway's.
 Each top-level key the preset sets replaces the gateway's value whole, even an object such as `chat_template_kwargs`; every other key keeps the gateway's value.
 The gateway logs an INFO line at startup for each alias candidate that has params, and `check` notes it.
 That includes a llama-swap preset that Open WebUI lists without its base model: with no base to group it under, it is an ordinary model there, but llama-swap still applies its params.
+A llama-server alias is only another name for its model, with no params of its own, so it gets no such note.
 
 A candidate with `loadIfNone: true` is used like any other candidate when it is ready or starting, and is also the fallback in step 3.
 It can sit anywhere in the list: its position sets its priority in steps 1 and 2, while the fallback only happens after the entire list has been checked.
@@ -212,6 +214,7 @@ It can sit anywhere in the list: its position sets its priority in steps 1 and 2
 Each backend reports which models are loaded in its own way, and that decides how exact the three steps can be.
 
 - **llama-swap** reports `ready`, `starting` and `stopping` for each running model, so all three steps apply exactly.
+- **llama-server** in router mode reports `loaded` and `loading` for each model, but nothing for a model being unloaded, which reads as loaded until it is gone. In single-model mode its one model is loaded once the server has finished starting.
 - **Ollama** lists a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
 - **Open WebUI** passes on what its connections report, which varies by connection; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). A model whose state it can't report is **unknown**: it counts as not loaded, so only `loadIfNone` can pick it, and the log says `state unknown`.
 
@@ -295,7 +298,7 @@ If a facade's candidates span two or more backends with `passthroughAuth`, the g
 
 ### Responses and errors
 
-A response from llama-swap or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
+A response from llama-swap, llama-server or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
 Of the backend's other headers, only `Retry-After` is passed on, so a client refused with `429` or `503` knows when to try again; the rest describe the backend or the connection to it.
 Responses from Open WebUI are assembled by the gateway from the chat it ran; see [Open WebUI](#open-webui).
 Whenever a model was chosen, the response has an `X-Gateway-Target` header naming it.
@@ -317,7 +320,7 @@ If the backend fails mid-stream, the gateway sends a final `data: {"error": {...
 
 The config is YAML.
 `config.example.yaml` is a complete setup with two facades: `task-monkey` for Open WebUI background tasks, and `assistant` for a Home Assistant voice assistant that uses whichever `:Assistant` preset llama-swap has loaded.
-It also carries commented-out `ollama` and `openWebUi` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
+It also carries commented-out `llamaServer`, `ollama` and `openWebUi` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets; there is no other substitution.
@@ -353,7 +356,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `ollama` or `openWebUi`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `ollama` or `openWebUi`.
 All take these keys:
 
 | Key | Description |
@@ -381,6 +384,21 @@ llama-swap decides itself when a model is swapped, and two of its rules affect h
 - Each model accepts a limited number of requests in flight or waiting, set by `concurrencyLimit` in llama-swap's config (default 10). llama-swap refuses the rest with `429` and a `Retry-After` header, which the gateway passes on.
 
 Both are from llama-swap v263's source.
+
+#### llama-server
+
+A `llamaServer` backend is llama.cpp's own server, `llama-server`, in either of its modes.
+The gateway asks the server which mode it is in each time it reads its state, so no key says which, and a server restarted in the other mode needs no change here.
+It takes no keys beyond the shared ones.
+
+- **Router mode**, started without a model, loads and unloads models on demand, up to `--models-max` at once. A model counts as loaded when the server reports it `loaded`, and as starting when it reports `loading`; a sleeping model, unloaded by `--sleep-idle-seconds`, counts as not loaded, since the next request loads it again. To load a model when `--models-max` are loaded, the server unloads the least recently used one that has no request in flight, and if every loaded model is busy, the request waits until one finishes.
+- **Single-model mode** holds one model for as long as the server runs, and the model counts as loaded unless it is sleeping. While the server starts, it refuses every request, a chat included, so the model counts as not loaded until the server has finished starting.
+
+Model IDs are the IDs the server lists: in router mode each preset's name, in single-model mode the `--alias`.
+A preset's `alias` key gives its model more IDs; unlike a llama-swap preset, such an alias is only another name for the model, with no params of its own.
+Single-model mode answers whatever `model` a request names, so a candidate with the wrong ID would still be served; the startup check warns about it, and the candidate never counts as loaded.
+
+These are from llama-server b11580, checked against a running server.
 
 #### Ollama
 

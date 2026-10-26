@@ -3,6 +3,7 @@ package selector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,59 @@ func TestFirstLoaded_PrefersReadyThenStartingThenLoadIfNone(t *testing.T) {
 	sel, _ := s.Select(context.Background(), nil, &fakeBackend{starting: []string{"a"}})
 	if got := strings.Join(sel.Checked, "|"); got != "a: starting|b: not loaded|qwen3.6-35b:Slacker: not loaded|c: not loaded|a: waiting for it to finish starting" {
 		t.Errorf("checked %q", got)
+	}
+}
+
+// A backend whose read failed with ErrLoading is busy loading a model and
+// serves nothing until it has, so it is skipped whole: the fallback moves to
+// another backend, or there is none. A backend failing for another reason
+// keeps its fallback, and one starting a model is still waited on.
+func TestFirstLoaded_SkipsABackendBusyLoading(t *testing.T) {
+	loading := fmt.Errorf("%w: %w", backend.ErrLoading, errors.New("GET /props: 503 Service Unavailable"))
+	cases := []struct {
+		name      string
+		b         backend.Backend
+		otherLoad bool
+		target    string
+		checked   string
+	}{
+		{"read failed while loading", &fakeBackend{err: loading}, true, "b", "a: busy loading a model"},
+		{"busy, no other fallback", &fakeBackend{err: loading}, false, "", "a: busy loading a model"},
+		{"failing otherwise", &fakeBackend{err: errors.New("dial tcp: connection refused")}, false, "a", "a: state unavailable"},
+		{"starting, waited on", &fakeBackend{starting: []string{"a"}}, true, "a", "a: starting"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &FirstLoaded{Candidates: []Candidate{
+				{Model: "a", LoadIfNone: true},
+				{Model: "b", Backend: &fakeBackend{}, BackendName: "other", LoadIfNone: c.otherLoad},
+			}}
+			sel, err := s.Select(context.Background(), nil, c.b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sel.Target != c.target || sel.Checked[0] != c.checked {
+				t.Errorf("got %q, checked %q", sel.Target, sel.Checked)
+			}
+		})
+	}
+}
+
+// A busy backend's state was read, so when nothing else can be used the
+// request finds no candidate loaded, whichever way the backend is busy,
+// rather than failing as if its state were unavailable.
+func TestFirstLoaded_BusyMeansNoCandidateLoaded(t *testing.T) {
+	loading := fmt.Errorf("%w: %w", backend.ErrLoading, errors.New("GET /props: 503 Service Unavailable"))
+	for name, b := range map[string]backend.Backend{
+		"read failed while loading": &fakeBackend{err: loading},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &FirstLoaded{Candidates: []Candidate{{Model: "a", LoadIfNone: true}}}
+			sel, err := s.Select(context.Background(), nil, b)
+			if err != nil || sel.Index != -1 || sel.Reason != "no candidate loaded" {
+				t.Errorf("got %+v, %v; want no candidate loaded and no error", sel, err)
+			}
+		})
 	}
 }
 

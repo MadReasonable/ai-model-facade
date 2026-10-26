@@ -53,7 +53,7 @@ A new behaviour is a new type here, so existing config entries never change mean
 
 ### `internal/selector`
 
-`FirstLoaded` picks the first ready candidate, else the first starting one, else the first `loadIfNone` one.
+`FirstLoaded` picks the first ready candidate, else the first starting one, else the first `loadIfNone` one, sending a backend that is loading a model nothing it would refuse.
 It reads each backend's state concurrently and waits for a backend only when the walk reaches one of its candidates.
 A selector declares the backend capabilities it `Requires`, and config loading checks them.
 
@@ -75,16 +75,16 @@ What adapters share: `Client` (HTTP with timeouts, auth and passthrough, chat fo
 `StateCache` is where state reads are cached, shared between concurrent requests, and adjusted for loads the gateway started itself (`Pending`).
 Rules about backend state are implemented here once, not in each adapter.
 
-### `internal/backend/llamaswap`, `ollama`, `openwebui`
+### `internal/backend/llamaswap`, `llamaserver`, `ollama`, `openwebui`
 
 One adapter per kind of backend.
-`llamaswap` and `ollama` read their backend's state and forward requests unchanged.
+`llamaswap`, `llamaserver` and `ollama` read their backend's state and forward requests unchanged.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself, the one place a response is synthesized; it can also take llama-swap models' state from a `llamaSwap` backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
 
 ### `internal/testkit`
 
-Fake llama-swap, Ollama and Open WebUI servers that record what they receive and let a test hold a load or a poll.
+Fake llama-swap, llama-server, Ollama and Open WebUI servers that record what they receive and let a test hold a load or a poll.
 [CONTRIBUTING.md](CONTRIBUTING.md) says how tests use them.
 
 ## Where a change goes

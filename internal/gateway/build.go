@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaserver"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
@@ -234,6 +235,8 @@ func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 	switch e.Type {
 	case "llamaSwap":
 		return llamaswap.New(e)
+	case "llamaServer":
+		return llamaserver.New(e)
 	case "ollama":
 		return ollama.New(e)
 	case "openWebUi":

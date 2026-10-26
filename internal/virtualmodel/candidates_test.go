@@ -39,3 +39,24 @@ func TestCandidates_NotesThatAPresetMayOverrideParams(t *testing.T) {
 		}
 	}
 }
+
+// A plain alias, such as llama-server's, is only another name for its model,
+// so check still names its base but neither check nor the startup log notes
+// an override.
+func TestCandidates_NoOverrideNoteForAPlainAlias(t *testing.T) {
+	catalog := backend.NewCatalog([]backend.ModelInfo{{ID: "a", Aliases: []string{"a-alt"}, PlainAliases: true}})
+	cases := []struct{ candidate, want string }{
+		{"a-alt", "alias of a"},
+		{"*-alt", "base models: none|aliases: a-alt"},
+	}
+	for _, c := range cases {
+		if got := strings.Join(describeAliases(c.candidate, "llamaServer", catalog, true), "|"); got != c.want {
+			t.Errorf("check, %s: got %q, want %q", c.candidate, got, c.want)
+		}
+		var logged bytes.Buffer
+		noteAliases(slog.New(slog.NewTextHandler(&logged, nil)), "m", c.candidate, catalog, true)
+		if logged.Len() > 0 {
+			t.Errorf("startup log, %s: %q", c.candidate, logged.String())
+		}
+	}
+}
