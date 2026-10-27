@@ -1,0 +1,67 @@
+# A gateway config whose backends are this environment's, with facades that
+# show how the gateway chooses among them. From the repo's root:
+#   go run ./cmd/ai-model-facade check dev-env/gateway.yaml
+#   go run ./cmd/ai-model-facade serve dev-env/gateway.yaml
+# Every backend is listed whether or not it runs: one that doesn't is a
+# warning, which check reports as an error, and its models count as not
+# loaded. The ports are .env.example's defaults. README.md describes it.
+
+server:
+  listen: 127.0.0.1:8088
+
+logging:
+  level: info
+  logSelection: true
+
+# Each backend turns thinking off its own way, so each facade's params name
+# the way its backend takes.
+vars:
+  llamaCppNoThinking: &llamaCppNoThinking
+    chat_template_kwargs: { enable_thinking: false }
+  ollamaNoThinking: &ollamaNoThinking # Ollama's /v1 ignores chat_template_kwargs
+    reasoning_effort: none
+
+backends:
+  llamaSwap:
+    type: llamaSwap
+    baseUrl: http://127.0.0.1:18082
+    requestTimeoutSeconds: 60
+
+  ollama:
+    type: ollama
+    baseUrl: http://127.0.0.1:18083
+    requestTimeoutSeconds: 60
+
+models:
+  # Whichever of llama-swap's first two models is loaded, loading one only
+  # if neither is: a request for llamaSwap-llm-3 evicts one of them, and the
+  # next request here shows which.
+  swap:
+    backend: llamaSwap
+    params: *llamaCppNoThinking
+    candidates:
+      - model: llamaSwap-llm-1
+      - model: llamaSwap-llm-2
+        loadIfNone: true
+
+  # The same on Ollama.
+  ollama:
+    backend: ollama
+    params: *ollamaNoThinking
+    candidates:
+      - model: ollama-llm-1:latest
+      - model: ollama-llm-2:latest
+        loadIfNone: true
+
+  # Across backends: llama-swap's first model if it is loaded, else
+  # Ollama's, loading Ollama's if neither is. Each candidate carries its
+  # backend's way of turning thinking off.
+  either:
+    backend: llamaSwap
+    candidates:
+      - model: llamaSwap-llm-1
+        params: *llamaCppNoThinking
+      - model: ollama-llm-1:latest
+        backend: ollama
+        params: *ollamaNoThinking
+        loadIfNone: true

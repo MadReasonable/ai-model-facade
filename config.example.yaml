@@ -21,7 +21,10 @@
 #     the client; they are not defaults.
 
 server:
-  listen: 0.0.0.0:8088
+  # 127.0.0.1 accepts local connections only. To accept them from other
+  # machines or containers, listen on 0.0.0.0 or a specific IP, and set
+  # apiKeys below: anyone who can reach the port can use the gateway.
+  listen: 127.0.0.1:8088
   # Without apiKeys, every request is accepted. With them, a client needs one
   # of these keys, and its name appears in the log.
   # apiKeys:

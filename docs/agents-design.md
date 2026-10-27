@@ -232,6 +232,13 @@ Each model admits at most `concurrencyLimit` requests (default 10) and refuses m
 State comes from `GET /api/ps`, which lists a model only once it has loaded and has no load state of its own (verified on 0.40.8; a model unloaded to make room disappears as soon as the new load starts).
 Every listed model is ready, and loads under way are visible only through the pending count.
 
+Ollama runs one runner per stored blob, not per model name (0.40.8 source, `schedulerModelKey` in `server/sched.go`; verified).
+Two names created from the same bytes share a runner, and `/api/ps` lists only the name that loaded it, so the other reads as not loaded although a request to it is answered at once; a facade that lists both names picks them as it would two separate models.
+To make room, Ollama evicts an idle model with the shortest keep-alive, and among equals the one whose blob's sha256 sorts first, not the one used least recently (0.40.8 source, `findRunnerToUnload`), so which model a load evicts can't be told from the order of requests.
+
+On `/v1/chat/completions`, Ollama puts thinking in `reasoning`, not llama.cpp's `reasoning_content`, and turns it off only with `"reasoning_effort": "none"`; it ignores `chat_template_kwargs.enable_thinking` and the native API's `think` there (verified on 0.40.8).
+So a facade turning thinking off on Ollama needs params of its own, not the ones it gives llama-swap.
+
 Decided: model IDs are the exact `name:tag` that Ollama lists.
 A bare name is not mapped to `name:latest`, which would be implicit matching by ID; instead, startup suggests the listed IDs with a tag.
 

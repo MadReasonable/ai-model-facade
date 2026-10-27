@@ -74,6 +74,7 @@ A test checks them with `Count`, `Last` and `Keys`, and calls `Reset` after setu
 
 When a test needs backend behaviour a fake lacks, extend the fake to match what the real backend does, and check the new behaviour in `internal/testkit/testkit_test.go`.
 A fake that drifts from its backend lets tests pass against an API that doesn't exist.
+To see what a real backend does, [dev-env/](dev-env/README.md) runs one in Docker on demand.
 
 ### Waiting without sleeping
 

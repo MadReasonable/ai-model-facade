@@ -1,2 +1,4 @@
 .claude
 config.yaml
+**/*.local.md
+dev-env

@@ -1,2 +1,4 @@
 /ai-model-facade
-config.yaml
+/config.yaml
+/dev-env/.env
+**/*.local.md

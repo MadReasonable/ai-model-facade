@@ -1,0 +1,58 @@
+# Real backends for checking the gateway against, one profile per backend,
+# run by the control service. This file says what each container is; what
+# it runs, its models and settings, is in config.yaml, which control hands
+# to the containers through a Compose override of its own on every run, so
+# a backend gets its settings only when control starts it. See README.md in
+# this folder; .env.example lists the settings a .env file here can change.
+name: ai-model-facade-dev
+
+x-models: &models
+  # A named volume unless MODELS_DIR names a host folder.
+  ${MODELS_DIR:-models}:/models:ro
+
+services:
+  # Runs the environment: downloads the model files, starts and stops the
+  # backends below, and loads and unloads their models, through its API. It
+  # is the only service without a profile, so `docker compose up` starts it
+  # alone. It runs Compose itself, through the host's Docker socket, which
+  # amounts to root on most hosts, so its port stays on 127.0.0.1 whatever
+  # BIND_ADDRESS says. Stopping it stops the backends first, unless
+  # KEEP_BACKENDS is true; the grace period gives it time to.
+  control:
+    build: ./control
+    environment:
+      KEEP_BACKENDS: ${KEEP_BACKENDS:-}
+    stop_grace_period: 60s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/work:ro
+      - ${MODELS_DIR:-models}:/models
+    ports:
+      - 127.0.0.1:${CONTROL_PORT:-18090}:8080
+
+  # llama-swap, which starts a llama-server per model on demand; the image
+  # bundles llama.cpp b11552.
+  llama-swap:
+    profiles: [llama-swap]
+    image: ghcr.io/mostlygeek/llama-swap:v263-cpu-b11552-non-root
+    volumes:
+      - *models
+      - ./backend-config:/config:ro # the folder, so a reload sees an edit however it was saved
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LLAMA_SWAP_PORT:-18082}:8080
+
+  # Ollama, which loads models on demand from its own store: control imports
+  # the model file into it after Ollama starts, since Ollama doesn't load a
+  # GGUF by path.
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:0.40.8
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${OLLAMA_PORT:-18083}:11434
+
+
+volumes:
+  models:
+  ollama: # Ollama's own store, holding its imported copy of the model file

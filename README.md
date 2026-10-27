@@ -339,7 +339,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 | Key | Description |
 |-----|-------------|
-| `listen` | Address and port to listen on. Required. |
+| `listen` | Address and port to listen on. `127.0.0.1` accepts local connections only; to accept them from other machines or containers, use `0.0.0.0` or a specific IP, and set `apiKeys`. Required. |
 | `apiKeys` | A list of `name` / `key` pairs. When set, requests need `Authorization: Bearer <key>`, and the key's name appears in the log. The name `unknown` is reserved. Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Authentication](#authentication). |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |

@@ -6,6 +6,7 @@ A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side
 
 - `README.md` describes what the gateway does, for users.
 - `ARCHITECTURE.md` maps the packages for people new to the code, and says where a change goes.
+- `dev-env/ARCHITECTURE.md` maps the Docker environment of real backends in `dev-env/`, and says where a change to it goes.
 - `docs/agents-design.md` explains why it is built that way, the mechanisms behind each rule below, and the approaches already rejected. Read the section for the code you are changing before changing it.
 - `CONTRIBUTING.md` is the short guide for people; its Tests section says where tests go and how they are written, and applies to agents too.
 - `config.example.yaml` is a complete example config.
@@ -16,6 +17,7 @@ A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side
 - Ask a direct question when a requirement is unclear instead of guessing and burying the assumption.
 - Keep scope tight: don't add config keys, abstractions or features for hypothetical needs. Extensibility lives in the code's interfaces, not in speculative config.
 - Before a change is done, `gofmt -l .` lists nothing and `go vet ./...` and `go test -race ./...` pass; CI runs all three on every push and pull request. If `check`'s output changes, regenerate its golden files with `go test ./cmd/ai-model-facade -update` and review the diff.
+- `dev-env/control` is a Go module of its own, so `go vet ./...` and `go test -race ./...` from the root skip it; when changing it, run both in `dev-env/control` too. CI runs them there as well.
 
 ## Invariants
 
@@ -106,7 +108,7 @@ Program messages:
 The reader knows the code as of the parent commit.
 
 - Subject: what was done, stated plainly, under about 60 characters ("Pass a backend's Retry-After on to the client").
-- Body: the situation in which the change matters, then one paragraph per part of the change, each opening with what that part of the code is for. Minor extras go in a final "Also:" paragraph.
+- Body: the situation in which the change matters, then one paragraph per part of the change, each opening with what that part of the code is for. Minor extras go in a final "Also:" paragraph, or, when there are several, an "Also:" list with one bullet per change, continuation lines indented to its text.
 - Don't restate what the diff shows, and don't describe how the problem was found.
 - Wrap the body at 72 columns.
 
