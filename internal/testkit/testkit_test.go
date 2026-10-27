@@ -60,24 +60,20 @@ func TestLlamaSwap_ListsAliasesAndShowsLoads(t *testing.T) {
 
 // Ollama lists a model in /api/ps only once it has loaded.
 func TestOllama_ListsModelOnlyOnceLoaded(t *testing.T) {
-	f := NewOllama(t, "m:1")
-	load := f.HoldLoads()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"m:1"}`); resp != nil {
-			resp.Body.Close()
+	forEachOllama(t, func(t *testing.T, b Driver) {
+		b.Reset(t)
+		release := b.HoldLoads(t)
+		done := chatInBackground(t, b, "ollama-llm-1:latest")
+		listed := func() bool {
+			return gjson.Get(get(t, b.URL()+"/api/ps"), `models.#(name=="ollama-llm-1:latest")`).Exists()
 		}
-	}()
-	f.WaitFor(t, "POST /v1/chat/completions", 1)
-	if ps := get(t, f.URL+"/api/ps"); !strings.Contains(ps, `"models":[]`) {
-		t.Errorf("during the load: %s", ps)
-	}
-	load.Open()
-	<-done
-	if ps := get(t, f.URL+"/api/ps"); !strings.Contains(ps, `"name":"m:1"`) {
-		t.Errorf("after the load: %s", ps)
-	}
+		during(t, done, "ollama-llm-1 missing from /api/ps", func() bool { return !listed() })
+		release()
+		<-done
+		if !listed() {
+			t.Errorf("after the load: %s", get(t, b.URL()+"/api/ps"))
+		}
+	})
 }
 
 // llama-server in router mode names its role in /props, lists each model's

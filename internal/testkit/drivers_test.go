@@ -223,3 +223,22 @@ func (f *fakeLlamaSwap) Reset(t *testing.T) {
 func (f *fakeLlamaSwap) HoldLoads(t *testing.T) (release func()) {
 	return f.LlamaSwap.HoldLoads().Open
 }
+
+// Ollama, as dev-env/ runs it: four models (dev-env/config.yaml).
+
+var devOllama = []string{"ollama-llm-1:latest", "ollama-llm-2:latest", "ollama-llm-3:latest", "ollama-llm-4:latest"}
+
+func forEachOllama(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "ollama", "OLLAMA_PORT", "18083", func(t *testing.T) Driver {
+		return &fakeOllama{NewOllama(t, devOllama...)}
+	}, claim)
+}
+
+type fakeOllama struct{ *Ollama }
+
+func (f *fakeOllama) URL() string        { return f.Ollama.URL }
+func (f *fakeOllama) Reset(t *testing.T) { f.SetLoaded() }
+
+func (f *fakeOllama) HoldLoads(t *testing.T) (release func()) {
+	return f.Ollama.HoldLoads().Open
+}
