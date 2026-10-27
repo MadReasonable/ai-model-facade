@@ -76,49 +76,65 @@ func TestOllama_ListsModelOnlyOnceLoaded(t *testing.T) {
 	})
 }
 
-// llama-server in router mode names its role in /props, lists each model's
-// status, and shows a load as loading until it finishes; a model it doesn't
-// have is a 400.
+// llama-server in router mode says so in /props, lists each model with its
+// status, loading while a request loads it and loaded once it has, and
+// refuses a model it doesn't have with 400.
 func TestLlamaServer_RouterListsStatusAndShowsLoads(t *testing.T) {
-	f := NewLlamaServerRouter(t, ServerModel{ID: "a", Aliases: []string{"a-alt"}})
-	if props := get(t, f.URL+"/props"); gjson.Get(props, "role").String() != "router" {
-		t.Fatalf("props: %s", props)
-	}
-	load := f.HoldLoads()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"a-alt"}`); resp != nil {
+	forEachLlamaRouter(t, func(t *testing.T, b Driver) {
+		if props := get(t, b.URL()+"/props"); gjson.Get(props, "role").String() != "router" {
+			t.Fatalf("props: %s", props)
+		}
+		b.Reset(t)
+		release := b.HoldLoads(t)
+		done := chatInBackground(t, b, "llamaRouter-llm-1")
+		status := func() string {
+			return gjson.Get(get(t, b.URL()+"/v1/models"), `data.#(id=="llamaRouter-llm-1").status.value`).String()
+		}
+		during(t, done, "llamaRouter-llm-1 loading in /v1/models", func() bool { return status() == "loading" })
+		release()
+		<-done
+		if got := status(); got != "loaded" {
+			t.Errorf("after the load: %q", got)
+		}
+		if resp := post(t, b.URL()+"/v1/chat/completions", `{"model":"nope","messages":[{"role":"user","content":"hi"}]}`); resp == nil || resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("unknown model: %+v", resp)
+		} else {
 			resp.Body.Close()
 		}
-	}()
-	f.WaitFor(t, "POST /v1/chat/completions", 1)
-	if models := get(t, f.URL+"/v1/models"); gjson.Get(models, "data.0.status.value").String() != "loading" || gjson.Get(models, "data.0.aliases.0").String() != "a-alt" {
-		t.Errorf("during the load: %s", models)
-	}
-	load.Open()
-	<-done
-	if f.Status("a") != "loaded" {
-		t.Errorf("after the load: %q", f.Status("a"))
-	}
-	if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp == nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("unknown model: %+v", resp)
-	} else {
+	})
+}
+
+// A request through a router alias loads its base model, and the alias is
+// listed with it. Fake only: dev-env's presets define no alias.
+func TestLlamaServer_RouterResolvesAliases(t *testing.T) {
+	f := NewLlamaServerRouter(t, ServerModel{ID: "a", Aliases: []string{"a-alt"}})
+	if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"a-alt"}`); resp != nil {
 		resp.Body.Close()
+	}
+	if models := get(t, f.URL+"/v1/models"); gjson.Get(models, `data.#(id=="a").aliases.0`).String() != "a-alt" || f.Status("a") != "loaded" {
+		t.Errorf("models: %s", models)
 	}
 }
 
-// llama-server in single-model mode has no role in /props, lists its model
-// with its own ID among the aliases, and answers every request with 503
-// while the model loads.
+// llama-server in single-model mode has no role in /props and lists its
+// model with its own ID among the aliases.
+func TestLlamaServer_SingleListsItsModel(t *testing.T) {
+	forEachLlamaServer(t, func(t *testing.T, b Driver) {
+		if props := get(t, b.URL()+"/props"); gjson.Get(props, "role").Exists() || gjson.Get(props, "is_sleeping").Bool() {
+			t.Errorf("props: %s", props)
+		}
+		if models := get(t, b.URL()+"/v1/models"); !gjson.Get(models, `data.#(id=="llamaServer-llm-1").aliases.#(=="llamaServer-llm-1")`).Exists() {
+			t.Errorf("models: %s", models)
+		}
+	})
+}
+
+// llama-server in single-model mode answers every request with 503 while
+// its model loads (b11580 source, middleware_server_state; seen on /health
+// and /props). Fake only: dev-env's model loads faster than the server's
+// port starts answering, so a live run can't catch the 503s.
 func TestLlamaServer_SingleRefusesEverythingWhileLoading(t *testing.T) {
 	f := NewLlamaServerSingle(t, ServerModel{ID: "a"})
-	if props := get(t, f.URL+"/props"); gjson.Get(props, "role").Exists() || gjson.Get(props, "is_sleeping").Bool() {
-		t.Errorf("props: %s", props)
-	}
-	if models := get(t, f.URL+"/v1/models"); gjson.Get(models, "data.0.aliases.0").String() != "a" {
-		t.Errorf("models: %s", models)
-	}
 	f.SetStatus("a", "loading")
 	for _, path := range []string{"/props", "/v1/models"} {
 		resp, err := http.Get(f.URL + path)

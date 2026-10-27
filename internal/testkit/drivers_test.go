@@ -242,3 +242,37 @@ func (f *fakeOllama) Reset(t *testing.T) { f.SetLoaded() }
 func (f *fakeOllama) HoldLoads(t *testing.T) (release func()) {
 	return f.Ollama.HoldLoads().Open
 }
+
+// llama-server, as dev-env/ runs it: three models in router mode, with no
+// aliases (dev-env/backend-config/llama-server-models.ini), and one in
+// single-model mode (dev-env/config.yaml).
+
+var devLlamaRouter = []ServerModel{{ID: "llamaRouter-llm-1"}, {ID: "llamaRouter-llm-2"}, {ID: "llamaRouter-llm-3"}}
+
+func forEachLlamaRouter(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "llamaRouter", "LLAMA_SERVER_ROUTER_PORT", "18080", func(t *testing.T) Driver {
+		return &fakeLlamaServer{NewLlamaServerRouter(t, devLlamaRouter...)}
+	}, claim)
+}
+
+func forEachLlamaServer(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "llamaServer", "LLAMA_SERVER_SINGLE_PORT", "18081", func(t *testing.T) Driver {
+		return &fakeLlamaServer{NewLlamaServerSingle(t, ServerModel{ID: "llamaServer-llm-1"})}
+	}, claim)
+}
+
+type fakeLlamaServer struct{ *LlamaServer }
+
+func (f *fakeLlamaServer) URL() string { return f.LlamaServer.URL }
+
+// Reset unloads the router's models; a single-model server holds its model
+// for as long as it runs, so its claims don't reset it.
+func (f *fakeLlamaServer) Reset(t *testing.T) {
+	for _, m := range f.models {
+		f.SetStatus(m.ID, "unloaded")
+	}
+}
+
+func (f *fakeLlamaServer) HoldLoads(t *testing.T) (release func()) {
+	return f.LlamaServer.HoldLoads().Open
+}
