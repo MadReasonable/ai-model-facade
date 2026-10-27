@@ -1,0 +1,42 @@
+# What the environment runs: the model files control downloads, and each
+# backend's models and settings. control reads this on every request that
+# needs it, so an edit needs no restart of control: a backend's settings
+# apply when it next starts, a setup downloads missing files and makes
+# Ollama's models match, and a reload rereads what can be reread. A key it
+# doesn't know is an error. README.md describes each backend.
+#
+# What differs between machines, the address and ports and where model
+# files are stored, is in .env instead; what each container is, its image,
+# volumes and ports, is in compose.yaml.
+
+# Each file is downloaded once into the models store and checked against
+# its sha256; paths follow <publisher>/<repository>/<file>, as on Hugging
+# Face.
+files:
+  # Qwen3 0.6B, Q8_0, 639446688 bytes: thinking (chat_template_kwargs
+  # enable_thinking) and tool calls on demand, which is all the environment
+  # needs. Q8_0 rather than a smaller quant, because quants below 4 bits are
+  # reported to break tool calls.
+  - path: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+    sha256: 9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031
+    url: https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf
+
+backends:
+  # llama-swap, whose models are in its own file in backend-config/.
+  llamaSwap:
+    config: llama-swap.yaml
+
+  # Ollama, whose models control imports into its own store. Ollama runs one
+  # runner per stored file, so models that are to evict each other need
+  # separate blobs: copy 0 is the file as it is, any other number a copy
+  # with a changed general.name. The same file and copy share a blob, as
+  # ollama-llm-1 and -4 do, to show the sharing.
+  ollama:
+    maxLoadedModels: 2
+    keepAlive: "-1" # never on idle; Ollama has no per-model setting for it
+    ctxSize: 4096   # in place of Ollama's 2048, like the other backends
+    models:
+      - { id: ollama-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 0 }
+      - { id: ollama-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 2 }
+      - { id: ollama-llm-3, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 3 }
+      - { id: ollama-llm-4, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 0 }

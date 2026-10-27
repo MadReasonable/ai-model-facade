@@ -1,0 +1,45 @@
+# llama-swap's config for the llamaSwap backend, read from /config in its
+# container. The keys are llama-swap v263's; its docs/config.example.yaml
+# describes each.
+
+healthCheckTimeout: 60
+startPort: 10001
+# Lists each preset as its own entry too, which the gateway's llamaSwap
+# adapter folds into its base model.
+includeAliasesInList: true
+
+macros:
+  llama-server: >-
+    /app/llama-server --host 127.0.0.1 --port ${PORT}
+    --model /models/Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+    --ctx-size 4096 --jinja --reasoning-format deepseek
+
+# All three IDs start llama-server on the same file. The matrix below lets
+# any two run at once, so a request to the third evicts one. The third also
+# unloads itself after 30 idle seconds (ttl).
+models:
+  llamaSwap-llm-1:
+    cmd: ${llama-server}
+    # A preset: an alias with params of its own, which llama-swap applies
+    # after the gateway's.
+    filters:
+      setParamsByID:
+        "llamaSwap-llm-1:NoThink":
+          chat_template_kwargs: { enable_thinking: false }
+  llamaSwap-llm-2:
+    cmd: ${llama-server}
+  llamaSwap-llm-3:
+    cmd: ${llama-server}
+    ttl: 30
+
+routing:
+  router:
+    use: matrix
+    settings:
+      matrix:
+        vars:
+          one: llamaSwap-llm-1
+          two: llamaSwap-llm-2
+          three: llamaSwap-llm-3
+        sets:
+          pairs: "(one & two) | (one & three) | (two & three)"
