@@ -27,6 +27,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/work:ro
       - ${MODELS_DIR:-models}:/models
+      - control:/state
     ports:
       - 127.0.0.1:${CONTROL_PORT:-18090}:8080
 
@@ -52,7 +53,35 @@ services:
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:${OLLAMA_PORT:-18083}:11434
 
+  # Open WebUI, connected to the backends config.yaml names. Its settings
+  # come from its environment on every start, not from its database
+  # (ENABLE_PERSISTENT_CONFIG).
+  open-webui:
+    profiles: [open-webui]
+    image: ghcr.io/open-webui/open-webui:v0.12.3
+    # What control's setup relies on; the admin account and the connections
+    # come from config.yaml.
+    environment:
+      ENABLE_PERSISTENT_CONFIG: "False"
+      ENABLE_SIGNUP: "False"
+      ENABLE_API_KEYS: "True"
+      # Fewer built-in tools, whose definitions every request through its
+      # chat flow carries, so a prompt fits the small models' 4096-token
+      # context; memories stay, for a tool to call.
+      ENABLE_CODE_INTERPRETER: "False"
+      ENABLE_NOTES: "False"
+      ENABLE_AUTOMATIONS: "False"
+      ENABLE_CALENDAR: "False"
+      # The key that signs its sessions, generated on the first start; in
+      # the volume, so a new container doesn't sign everyone out.
+      WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${OPEN_WEBUI_PORT:-18084}:8080
 
 volumes:
   models:
+  control: # control's own state: the API key it made on Open WebUI
   ollama: # Ollama's own store, holding its imported copy of the model file
+  open-webui: # Open WebUI's database: the admin account, its API key, chats

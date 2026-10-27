@@ -40,3 +40,14 @@ backends:
       - { id: ollama-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 2 }
       - { id: ollama-llm-3, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 3 }
       - { id: ollama-llm-4, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 0 }
+
+  # Open WebUI, which passes requests on to the backends it connects to. Its
+  # admin account is created on its first start; a throwaway account for
+  # this environment, which control signs in as to create the API key.
+  openWebUi:
+    admin: { email: admin@example.com, password: ai-model-facade-dev, name: dev }
+    connections: [llamaSwap, ollama]
+    # Workspace models: aliases of a connection's model, with params Open
+    # WebUI applies after the gateway's.
+    models:
+      - { id: openWebUi-llm-1:NoThink, base: ollama-llm-1:latest, params: { think: false } }

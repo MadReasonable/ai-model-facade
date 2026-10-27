@@ -20,6 +20,8 @@ vars:
     chat_template_kwargs: { enable_thinking: false }
   ollamaNoThinking: &ollamaNoThinking # Ollama's /v1 ignores chat_template_kwargs
     reasoning_effort: none
+  openWebUiNoThinking: &openWebUiNoThinking # passed on to Ollama's native API
+    params: { think: false }
 
 backends:
   llamaSwap:
@@ -31,6 +33,15 @@ backends:
     type: ollama
     baseUrl: http://127.0.0.1:18083
     requestTimeoutSeconds: 60
+
+  openWebUi:
+    type: openWebUi
+    baseUrl: http://127.0.0.1:18084
+    apiKey: ${OPEN_WEBUI_API_KEY} # from control; see README.md
+    requestTimeoutSeconds: 60
+    # Open WebUI's connection to llama-swap reports every model as loaded,
+    # so the gateway reads their state from llama-swap itself.
+    llamaSwap: { backend: llamaSwap }
 
 models:
   # Whichever of llama-swap's first two models is loaded, loading one only
@@ -51,6 +62,39 @@ models:
     candidates:
       - model: ollama-llm-1:latest
       - model: ollama-llm-2:latest
+        loadIfNone: true
+
+  # The same through Open WebUI, on its connection to Ollama.
+  webui:
+    backend: openWebUi
+    params: *openWebUiNoThinking
+    candidates:
+      - model: ollama-llm-1:latest
+      - model: ollama-llm-2:latest
+        loadIfNone: true
+
+  # The same, with Open WebUI's memory tools, which it adds only to a
+  # request that asks for them. "Save to memory that my favourite colour is
+  # blue" makes the model call add_memory, which Open WebUI runs; a request
+  # less direct than that, such as "Remember that ...", it answers in words.
+  webui-memory:
+    backend: openWebUi
+    params: [*openWebUiNoThinking, { features: { memory: true } }]
+    candidates:
+      - model: ollama-llm-1:latest
+      - model: ollama-llm-2:latest
+        loadIfNone: true
+
+  # Open WebUI's workspace model openWebUi-llm-1:NoThink, an alias of
+  # ollama-llm-1 whose own params turn thinking off, so this facade doesn't:
+  # the alias counts as loaded while its base is, and a request for it
+  # loads its base. The facade's one param makes the gateway log, at
+  # startup, that the alias's own params are applied after it.
+  webui-alias:
+    backend: openWebUi
+    params: { max_tokens: 400 }
+    candidates:
+      - model: openWebUi-llm-1:NoThink
         loadIfNone: true
 
   # Across backends: llama-swap's first model if it is loaded, else

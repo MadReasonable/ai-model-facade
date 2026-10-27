@@ -88,11 +88,18 @@ type step struct {
 	// a client decides by State, never by Detail.
 	Detail   string    `json:"detail"`
 	Progress *byteDone `json:"progress,omitempty"`
+	// Key is a credential the step made, which the setup state reports
+	// rather than the step: Open WebUI's API key.
+	Key string `json:"-"`
 }
 
 type setupStatus struct {
 	Ready bool   `json:"ready"`
 	Steps []step `json:"steps"`
+	// Key is the credential a backend's setup made, such as Open WebUI's
+	// API key for the gateway's openWebUi backend. control is only on
+	// 127.0.0.1, behind the same port that already controls Docker.
+	Key string `json:"key,omitempty"`
 }
 
 // filesStep sums the files' states into one step: failed or running if any
@@ -139,7 +146,9 @@ func (a *api) setupSteps(ctx context.Context, t *target) (setupStatus, error) {
 	}
 	if t != nil && t.c != nil {
 		if su := t.c.setup(); su != nil {
-			add(a.ownStep(ctx, *t, su))
+			s := a.ownStep(ctx, *t, su)
+			add(s)
+			status.Key = s.Key
 		}
 	}
 	return status, nil

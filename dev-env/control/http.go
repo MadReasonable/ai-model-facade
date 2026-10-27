@@ -41,12 +41,12 @@ func postJSON(ctx context.Context, target string, body any) error {
 
 // postJSONOut is postJSON that decodes the answer into out, if out isn't nil.
 func postJSONOut(ctx context.Context, target string, body, out any) error {
-	return sendJSON(ctx, http.MethodPost, target, body, out)
+	return sendJSON(ctx, http.MethodPost, target, "", body, out)
 }
 
-// sendJSON sends body as JSON with method, and decodes the answer into out,
-// if out isn't nil.
-func sendJSON(ctx context.Context, method, target string, body, out any) error {
+// sendJSON sends body as JSON with method, with token as a bearer token if
+// it isn't empty, and decodes the answer into out, if out isn't nil.
+func sendJSON(ctx context.Context, method, target, token string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -62,18 +62,16 @@ func sendJSON(ctx context.Context, method, target string, body, out any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	return do(req, out)
 }
 
-// authJSON sends a request with a bearer token and decodes the answer into
-// out.
+// authJSON sends a request with no body and a bearer token, and decodes the
+// answer into out.
 func authJSON(ctx context.Context, method, target, token string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, target, strings.NewReader(""))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	return do(req, out)
+	return sendJSON(ctx, method, target, token, nil, out)
 }
 
 // do sends req and decodes a 2xx JSON answer into out, if out isn't nil. A

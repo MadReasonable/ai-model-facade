@@ -31,7 +31,10 @@ type backend struct {
 	// Health is the path that answers 200 once the backend can serve
 	// requests, which configured.ready checks by default.
 	Health string
-	kind   kind
+	// API is what Open WebUI can connect to it as: "openai", "ollama", or
+	// "" for nothing.
+	API  string
+	kind kind
 }
 
 // kind reads a backend's section of config.yaml into the backend it

@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	listen  = ":8080"
-	workDir = "/work"   // dev-env/, mounted read-only
-	store   = "/models" // the models store, read-write
+	listen   = ":8080"
+	workDir  = "/work"   // dev-env/, mounted read-only
+	store    = "/models" // the models store, read-write
+	stateDir = "/state"  // control's own state, such as Open WebUI's API key
 )
 
 func main() {
