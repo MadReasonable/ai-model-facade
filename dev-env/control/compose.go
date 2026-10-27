@@ -113,6 +113,20 @@ func (c *compose) start(ctx context.Context, profile, service string) error {
 	return err
 }
 
+// build builds the image of a service that compose.yaml builds, from
+// folder under dev-env/. Compose run here would read the build context at
+// its host path, which this container doesn't have, so control builds from
+// its own mount and tags the image with the name compose.yaml gives it;
+// `up` then uses it. Docker's build cache makes a rebuild with no changes
+// quick.
+func (c *compose) build(ctx context.Context, folder, image string) error {
+	cmd := exec.CommandContext(ctx, "docker", "build", "--quiet", "--tag", image, filepath.Join(c.workDir, folder))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker build '%s': %w: %s", folder, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // stop stops the backends and removes their containers, in one Compose run,
 // which stops them in parallel. A stopped container would keep naming the
 // project network, which `docker compose down` removes once control's
@@ -128,6 +142,17 @@ func (c *compose) stop(ctx context.Context, bs ...backend) error {
 	}
 	_, err := c.run(ctx, append(append(profiles, "down"), services...)...)
 	return err
+}
+
+// containerID returns the ID of the service's container, "" if it has none.
+func (c *compose) containerID(ctx context.Context, service string) (string, error) {
+	out, err := c.run(ctx, "ps", "--quiet", service)
+	return strings.TrimSpace(string(out)), err
+}
+
+// logs returns everything the service's container has logged.
+func (c *compose) logs(ctx context.Context, profile, service string) ([]byte, error) {
+	return c.run(ctx, "--profile", profile, "logs", "--no-log-prefix", service)
 }
 
 // signal sends a Unix signal, such as SIGHUP, to the service's container.

@@ -100,6 +100,22 @@ services:
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:${OPEN_WEBUI_PORT:-18084}:8080
 
+  # LM Studio's headless daemon, llmster, built from lm-studio/Dockerfile,
+  # since LM Studio publishes no image. It reads the shared model files in
+  # place, through symlinks its start script makes for the models
+  # config.yaml lists; see lm-studio/start.sh.
+  lm-studio:
+    profiles: [lm-studio]
+    build: ./lm-studio
+    # control builds this image itself before starting the service, from
+    # its own mount of this folder, since Compose run inside control can't
+    # read the build context at its host path.
+    image: ai-model-facade-dev-lm-studio
+    volumes:
+      - *models
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LM_STUDIO_PORT:-18085}:1234
+
 volumes:
   models:
   control: # control's own state: the API key it made on Open WebUI

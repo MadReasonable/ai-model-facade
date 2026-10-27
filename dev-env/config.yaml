@@ -11,7 +11,7 @@
 
 # Each file is downloaded once into the models store and checked against
 # its sha256; paths follow <publisher>/<repository>/<file>, as on Hugging
-# Face.
+# Face, the layout LM Studio expects.
 files:
   # Qwen3 0.6B, Q8_0, 639446688 bytes: thinking (chat_template_kwargs
   # enable_thinking) and tool calls on demand, which is all the environment
@@ -62,3 +62,11 @@ backends:
     # WebUI applies after the gateway's.
     models:
       - { id: openWebUi-llm-1:NoThink, base: ollama-llm-1:latest, params: { think: false } }
+
+  # LM Studio, which names a model after the folder its file is in,
+  # lowercased; its start script links a folder per ID to the file.
+  lmStudio:
+    models:
+      - { id: lmstudio-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+      - { id: lmstudio-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+      - { id: lmstudio-llm-3, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
