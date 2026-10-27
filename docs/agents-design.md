@@ -190,8 +190,8 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired per adapter: `openaihttp.Client` counts its chat requests only after the adapter's `New` calls `client.TrackPending(state)`, as `llamaswap` and `ollama` do.
-An adapter without it still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
+Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap` and `ollama` are built on it.
+An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
 A request is released when its response headers arrive, since llama-swap and Ollama both send headers only once the model is loaded (Ollama verified on 0.40.8: headers arrive with the first token).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
 On release, if the cached state didn't list the model as ready, a load just finished or failed and may have evicted other models, so the cache is dropped (`StateCache.Invalidate`); a refresh already in flight is then neither cached nor joined, since it may predate the change.

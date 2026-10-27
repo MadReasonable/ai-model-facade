@@ -16,7 +16,7 @@ import (
 
 func newClient(t *testing.T, c Config) *Client {
 	t.Helper()
-	client, err := New(c)
+	client, err := NewClient(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestClient_ChatRelaysAStream(t *testing.T) {
 	}
 }
 
-// With TrackPending, a chat counts as pending, under its alias's base model,
+// With trackPending, a chat counts as pending, under its alias's base model,
 // until the response headers arrive; then the cache is dropped, since the
 // state it holds predates the load.
 func TestClient_ChatCountsAsPendingUntilHeaders(t *testing.T) {
@@ -88,7 +88,7 @@ func TestClient_ChatCountsAsPendingUntilHeaders(t *testing.T) {
 	c := newClient(t, Config{BaseURL: f.URL})
 	state := newFetcher()
 	s := NewStateCache(Config{StateCacheSeconds: 60}, state.fetch)
-	c.TrackPending(s)
+	c.trackPending(s)
 	s.LoadedModels(context.Background())
 	done := make(chan error)
 	go func() {

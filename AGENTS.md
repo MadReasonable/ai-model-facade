@@ -43,7 +43,7 @@ Each has its reasoning in `docs/agents-design.md`, in the section named after it
 Mistakes that compile, pass the nearby tests, and break a rule elsewhere:
 
 - **Decoding config with `node.Decode`.** Every config struct goes through `config.DecodeStrict`, or misspelled keys are silently ignored (Config loading).
-- **A new adapter without `client.TrackPending(state)`.** Its loads never show as starting, and concurrent requests fall through to `loadIfNone` and cause a swap (Loads the gateway started).
+- **A new forwarding adapter built on `openaihttp.NewClient` instead of `openaihttp.NewBackend`.** Its chats aren't counted as pending, so its loads never show as starting, and concurrent requests fall through to `loadIfNone` and cause a swap (Loads the gateway started).
 - **Starting goroutines in `Build` or an adapter's `New`.** A failed reload throws that gateway away, and the goroutine leaks; background work starts in `Gateway.start` (Reload).
 - **Running a state fetch or Open WebUI cleanup on the request's context.** Concurrent requests share one fetch, so one client leaving would fail them all (Fetching); cleanup runs after the response has ended, when the request's context may already be cancelled (Open WebUI). Both run detached with their own timeout.
 - **Putting data into an sjson path unescaped.** Model names such as `qwen3.6` contain path syntax; escape every key segment, including a leading `:` (The walker).

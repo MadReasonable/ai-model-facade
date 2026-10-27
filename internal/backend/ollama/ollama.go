@@ -21,31 +21,20 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
-type Config struct {
-	Type              string `yaml:"type"`
-	openaihttp.Config `yaml:",inline"`
-}
-
 // Backend serves both completion endpoints through the embedded client, since
 // Ollama serves them at their OpenAI paths.
 type Backend struct {
-	*openaihttp.Client
-	state *openaihttp.StateCache
+	*openaihttp.Backend
 }
 
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
-	var c Config
-	if err := config.DecodeStrict(entry.Node, &c); err != nil {
-		return nil, err
-	}
-	client, err := openaihttp.New(c.Config)
+	b := &Backend{}
+	base, err := openaihttp.NewBackend(entry, b.fetchState)
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{Client: client}
-	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
-	client.TrackPending(b.state)
+	b.Backend = base
 	return b, nil
 }
 
@@ -64,12 +53,6 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 		models = append(models, backend.ModelInfo{ID: m.ID})
 	}
 	return models, nil
-}
-
-// LoadedModels returns the models /api/ps lists, as ready, followed by the
-// pending models it doesn't list yet, as starting.
-func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
-	return b.state.LoadedModels(ctx)
 }
 
 // fetchState reads /api/ps. Ollama reports no load state, so every listed
