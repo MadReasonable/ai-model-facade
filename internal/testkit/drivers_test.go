@@ -1,0 +1,225 @@
+package testkit
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A claim is what a fake says about its backend, written once and run
+// twice: against the fake, and, when AMF_LIVE names dev-env/'s control
+// service, against the real backend that dev-env runs. The claim sends its
+// requests straight to the driver's URL; the driver only says where the
+// backend is and puts it into the state the claim needs. So the fakes can't
+// drift from the backends they stand for without a live run saying so.
+//
+// Run the live half with dev-env/ up:
+//
+//	AMF_LIVE=http://127.0.0.1:18090 go test ./internal/testkit/ -run /live
+//
+// A backend's host port defaults to .env.example's and is overridden by the
+// same variable, such as LLAMA_SWAP_PORT, as in dev-env/.env.
+
+// Driver is one backend under a claim, fake or live.
+type Driver interface {
+	// URL is the backend's base URL.
+	URL() string
+	// Reset unloads every model.
+	Reset(t *testing.T)
+	// HoldLoads makes the loads started from now wait until release is
+	// called, so a claim can look at a load under way. A real backend can't
+	// be held: its loads take as long as they take, and release does
+	// nothing.
+	HoldLoads(t *testing.T) (release func())
+}
+
+// liveControl is the AMF_LIVE variable: control's URL, or "" for no live
+// runs.
+func liveControl() string { return os.Getenv("AMF_LIVE") }
+
+// forEach runs claim against the fake that fake builds, then against the
+// live backend, which control knows by name and the host reaches on port
+// (portVar, else its default).
+func forEach(t *testing.T, name, portVar, port string, fake func(t *testing.T) Driver, claim func(t *testing.T, b Driver)) {
+	t.Run("fake", func(t *testing.T) { claim(t, fake(t)) })
+	t.Run("live", func(t *testing.T) {
+		control := liveControl()
+		if control == "" {
+			t.Skip("set AMF_LIVE to dev-env's control URL, such as http://127.0.0.1:18090, to check the real backend")
+		}
+		if p := os.Getenv(portVar); p != "" {
+			port = p
+		}
+		b := &liveDriver{control: control, name: name, url: "http://127.0.0.1:" + port}
+		b.start(t)
+		claim(t, b)
+	})
+}
+
+// waitLimit bounds a claim's waits: Timeout for the fakes, longer when a
+// live run may wait for real loads.
+func waitLimit() time.Duration {
+	if liveControl() != "" {
+		return 3 * time.Minute
+	}
+	return Timeout
+}
+
+// during checks cond while a load runs, until it holds or done closes. A
+// held fake load makes cond hold at once; a real load must show it before it
+// ends, so a claim about a load under way fails if the load was over first.
+func during(t *testing.T, done <-chan struct{}, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.After(waitLimit())
+	for !cond() {
+		select {
+		case <-done:
+			if !cond() {
+				t.Errorf("%s: never seen before the load ended", what)
+			}
+			return
+		case <-deadline:
+			t.Errorf("%s: not seen within %v", what, waitLimit())
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// chatInBackground posts a chat for model to the backend and returns a
+// channel closed once it is answered.
+func chatInBackground(t *testing.T, b Driver, model string) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp := post(t, b.URL()+"/v1/chat/completions", `{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`); resp != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	return done
+}
+
+// liveDriver drives a real backend through control's API.
+type liveDriver struct {
+	control, name, url string
+}
+
+func (b *liveDriver) URL() string                             { return b.url }
+func (b *liveDriver) HoldLoads(t *testing.T) (release func()) { return func() {} }
+
+// start starts the backend through control, unless it runs, and waits until
+// its setup is done and its models can be listed.
+func (b *liveDriver) start(t *testing.T) {
+	t.Helper()
+	b.call(t, http.MethodPost, "/start", nil)
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		var status struct {
+			Container string `json:"container"`
+			Setup     struct {
+				Ready bool `json:"ready"`
+			} `json:"setup"`
+		}
+		b.call(t, http.MethodGet, "", &status)
+		if status.Container == "running" && status.Setup.Ready && b.models(t) != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backend '%s' didn't come up through control within 5 minutes: %+v", b.name, status)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// liveModel is a model as control's GET .../models reports it.
+type liveModel struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// models returns the backend's models through control, or nil while control
+// can't list them.
+func (b *liveDriver) models(t *testing.T) []liveModel {
+	t.Helper()
+	resp, err := http.Get(b.control + "/api/backends/" + b.name + "/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var models []liveModel
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&models) != nil {
+		return nil
+	}
+	return models
+}
+
+// Reset unloads, through control, every model the backend reports in any
+// state but unloaded; control answers once the backend no longer reports it
+// loaded.
+func (b *liveDriver) Reset(t *testing.T) {
+	t.Helper()
+	for _, m := range b.models(t) {
+		if m.State != "unloaded" {
+			b.call(t, http.MethodPost, "/models/"+m.ID+"/unload", nil)
+		}
+	}
+}
+
+// call sends a request to the backend's resource in control's API and
+// decodes the answer into out, if out isn't nil.
+func (b *liveDriver) call(t *testing.T, method, path string, out any) {
+	t.Helper()
+	req, err := http.NewRequest(method, b.control+"/api/backends/"+b.name+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("control at %s: %v", b.control, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("control: %s %s: %s %s", method, path, resp.Status, strings.TrimSpace(string(body)))
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			t.Fatal(fmt.Errorf("control: %s %s: %w", method, path, err))
+		}
+	}
+}
+
+// llama-swap, as dev-env/ runs it: three models, the first with the
+// NoThink preset (dev-env/backend-config/llama-swap.yaml).
+
+var devLlamaSwap = []SwapModel{
+	{ID: "llamaSwap-llm-1", Aliases: []string{"llamaSwap-llm-1:NoThink"}},
+	{ID: "llamaSwap-llm-2"},
+	{ID: "llamaSwap-llm-3"},
+}
+
+func forEachLlamaSwap(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "llamaSwap", "LLAMA_SWAP_PORT", "18082", func(t *testing.T) Driver {
+		return &fakeLlamaSwap{NewLlamaSwap(t, devLlamaSwap...)}
+	}, claim)
+}
+
+type fakeLlamaSwap struct{ *LlamaSwap }
+
+func (f *fakeLlamaSwap) URL() string { return f.LlamaSwap.URL }
+
+func (f *fakeLlamaSwap) Reset(t *testing.T) {
+	for _, m := range devLlamaSwap {
+		f.SetState(m.ID, "")
+	}
+}
+
+func (f *fakeLlamaSwap) HoldLoads(t *testing.T) (release func()) {
+	return f.LlamaSwap.HoldLoads().Open
+}
