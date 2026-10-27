@@ -53,7 +53,7 @@ A setup downloads the model files that are missing, and makes Ollama's models ma
 `llamaSwap` keeps its own config file, in llama-swap's format, in `backend-config/`, and `config.yaml` names the file it uses.
 It mounts the `backend-config/` folder rather than its one file, so a running backend sees an edit however the editor saved it: a file mounted on its own stays the file the container started with when an editor saves by writing a new file and renaming it over the old one.
 After editing it, `POST /api/backends/<backend>/reload` makes the backend read it again without restarting; stopping and starting it works too.
-A reload of `ollama`, which has no config file of its own, makes its models match `config.yaml` in the same way.
+A reload of `ollama` or `openWebUi`, which have no config files of their own, makes them match `config.yaml` in the same way: Ollama's models, and Open WebUI's admin account, workspace models and connections.
 
 ## The control API
 
@@ -75,7 +75,7 @@ Errors are RFC 9457 problem details (`application/problem+json`) whose `detail` 
 | `GET /api/backends/<backend>` | One backend. |
 | `POST /api/backends/<backend>/start` | Downloads the files it needs if they are missing, starts it, waits until it can serve requests, then runs its setup; `200` if it is `ready` with its setup done already. |
 | `POST /api/backends/<backend>/stop` | Stops it and removes its container, and answers once it has. |
-| `POST /api/backends/<backend>/reload` | Makes it read its config file again without restarting, or for Ollama makes its models match `config.yaml`: `200` with its models once it has, `202` for a backend that reloads in the background. |
+| `POST /api/backends/<backend>/reload` | Makes it read its config file again without restarting, or for Ollama and Open WebUI makes them match `config.yaml`: `200` with its models once it has, `202` for a backend that reloads in the background. |
 | `GET`, `POST /api/backends/<backend>/setup` | The backend's setup: the files it needs, and for a backend whose section says so, a step of its own once it is up. |
 | `GET /api/backends/<backend>/models` | Its model IDs, each with its state in the backend's own words (`loaded`, `ready`, `loading`, `sleeping` and so on), and `aliasOf` for a llama-swap preset. |
 | `POST /api/backends/<backend>/models/<model>/load` | Loads the model. |
@@ -102,6 +102,7 @@ A setting given on the command line instead, such as `BIND_ADDRESS=0.0.0.0 docke
 | `CONTROL_PORT` | `18090` | The host port of `control`, always on 127.0.0.1. |
 | `LLAMA_SWAP_PORT` | `18082` | The host port of `llama-swap`. |
 | `OLLAMA_PORT` | `18083` | The host port of `ollama`. |
+| `OPEN_WEBUI_PORT` | `18084` | The host port of `open-webui`. |
 
 A changed setting takes effect when a backend is next started, since a start recreates the container if its settings differ.
 A port published on another address than 127.0.0.1 is reachable from the network even if a host firewall such as ufw denies it, because Docker adds its own iptables rules for published ports, and the backends have no API key.
@@ -138,6 +139,9 @@ From the repo's root, check it or serve it:
 
 Every backend in it is listed whether or not it runs: one that doesn't is a warning, which `check` reports as an error, and its models count as not loaded.
 The gateway listens on 127.0.0.1:8088, and the backends' ports in it are `.env.example`'s defaults, so a port changed in `.env` needs changing there too.
+Its `openWebUi` backend needs `OPEN_WEBUI_API_KEY` set to the key `control` reports, as described under Open WebUI; without it the config doesn't load.
+`webui-memory` is `webui` with Open WebUI's memory tools, for a tool call that Open WebUI runs on its server.
+`webui-alias` asks for the workspace model `openWebUi-llm-1:NoThink`, an alias that turns thinking off with its own params, so the facade's param makes the gateway log at startup that the alias's are applied after it.
 
 ## Backends
 
@@ -186,3 +190,42 @@ A request with `"keep_alive": "30s"` unloads that model 30 s after it, unless an
 Ollama takes its server settings, `maxLoadedModels` and `keepAlive`, from environment variables, so a change to them applies only after a stop and start; a reload changes only its models.
 
 Through its OpenAI endpoint, `/v1/chat/completions`, Ollama puts thinking in a field named `reasoning`, where llama.cpp's server uses `reasoning_content`, and turns it off only with `"reasoning_effort": "none"`; it ignores `chat_template_kwargs.enable_thinking` and its own native API's `think` field there (verified on 0.40.8).
+
+### Open WebUI
+
+The `openWebUi` backend runs Open WebUI v0.12.3, `ghcr.io/open-webui/open-webui:v0.12.3`, which serves no models of its own: it passes requests on to its connections, here `llamaSwap` and `ollama`, so start those for it to have models to offer.
+
+| Service | Port | Models |
+|---|---|---|
+| `open-webui` | 18084 | those of `llamaSwap` and `ollama`, under their own IDs, and the workspace model `openWebUi-llm-1:NoThink` |
+
+Its settings come from its environment on every start rather than from its database (`ENABLE_PERSISTENT_CONFIG=False`), and its connections and admin account from `config.yaml`, where `connections` names the backends it uses.
+On its first start Open WebUI creates that admin account, `admin@example.com` with the password `ai-model-facade-dev` as the config has it, a throwaway account for this environment.
+Its setup step, run once it is up, signs in as that admin and creates an API key, which Open WebUI keeps in its database and `control` reports in the setup state's `key`.
+`control` also keeps the key, the account's ID and a session token in its own volume, `ai-model-facade-dev_control`, because they act as the admin and still work once `config.yaml`'s admin has changed.
+So the setup step, and a reload, can make the account match `admin`: `control` reads the account and updates its email, name or password where they differ.
+A password can't be read back, so it counts as matching when signing in with it works, and only a setup run or a reload tries: Open WebUI allows 15 sign-ins in 3 minutes per email, a limit the account's own logins share, so a read of the setup state never signs in, and a changed password shows only once the step runs (verified on v0.12.3).
+A password change ends every session made before it, so a browser signed in to Open WebUI has to sign in again; `control` saves a new session token each time it signs in.
+
+Its workspace models come from `models` in its section: each is an alias of a connection's model, named by that model's ID, with params Open WebUI applies to a request for it after the gateway's.
+`openWebUi-llm-1:NoThink` is `ollama-llm-1:latest` with `think: false`, so it doesn't think, and it counts as loaded while its base is.
+The setup step and a reload make Open WebUI's workspace models match the list, creating, updating and deleting them, since every workspace model in this environment is `control`'s.
+
+To get in, `control` tries the saved key, then the saved session token, then `admin` from `config.yaml`, so the account can follow `config.yaml` even after someone regenerates the key in Open WebUI.
+If none of them works, for example because the key and the password were both changed in Open WebUI, the step fails saying so; restoring the credentials in `config.yaml`, or removing the `ai-model-facade-dev_open-webui` volume while Open WebUI is stopped, which also removes its chats, gets it going again.
+
+Open WebUI signs its sessions with a key it generates on its first start, kept in its volume (`WEBUI_SECRET_KEY_FILE`), so a browser signed in to it stays signed in when the container is replaced.
+
+The gateway's `openWebUi` backend needs that key as its `apiKey`.
+A gateway config can take it from the environment, as `apiKey: ${OPEN_WEBUI_API_KEY}`:
+
+    export OPEN_WEBUI_API_KEY=$(curl -s localhost:18090/api/backends/openWebUi/setup | jq -r .key)
+
+`POST /api/backends/openWebUi/reload` makes a running Open WebUI's admin account match, as the setup step does, and gives it the connections `config.yaml` lists, through the admin routes its settings page uses, then answers with its models.
+With `ENABLE_PERSISTENT_CONFIG=False` that change is kept in memory, not in its database, so the next start takes the environment again, which says the same (verified on v0.12.3).
+Loading and unloading are done on the backend behind Open WebUI, so `control` answers `409` to them here.
+
+Open WebUI adds the definitions of its built-in tools to every request through its chat flow, which took a three-word prompt to 5,148 tokens, more than the models' 4096-token context.
+So `compose.yaml` turns off its code interpreter, notes, automations and calendar, and the same prompt takes 2,597.
+Memories stay on: their tools are added only to a request that asks for them, as the gateway's `webui-memory` facade does, which takes about 3,800 tokens a call (verified on v0.12.3).
+

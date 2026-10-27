@@ -47,7 +47,7 @@ import (
 func init() {
 	register(backend{
 		Name: "ollama", Service: "ollama", Profile: "ollama", URL: "http://ollama:11434",
-		NeedsFiles: true, Health: "/api/version", kind: ollamaKind{},
+		NeedsFiles: true, API: "ollama", Health: "/api/version", kind: ollamaKind{},
 	})
 }
 
@@ -272,7 +272,7 @@ func (o *ollama) run(ctx context.Context, b backend, e *env, p *progress) error 
 		e.log.Info("created", "backend", b.Name, "model", m.ID, "blob", bl.digest)
 	}
 	for _, name := range plan.remove {
-		if err := sendJSON(ctx, http.MethodDelete, b.URL+"/api/delete", map[string]string{"model": name}, nil); err != nil {
+		if err := sendJSON(ctx, http.MethodDelete, b.URL+"/api/delete", "", map[string]string{"model": name}, nil); err != nil {
 			return fmt.Errorf("deleting '%s': %w", name, err)
 		}
 		e.log.Info("deleted", "backend", b.Name, "model", name)

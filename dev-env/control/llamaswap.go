@@ -16,7 +16,7 @@ import (
 func init() {
 	register(backend{
 		Name: "llamaSwap", Service: "llama-swap", Profile: "llama-swap", URL: "http://llama-swap:8080",
-		NeedsFiles: true, Health: "/health", kind: llamaSwapKind{},
+		NeedsFiles: true, API: "openai", Health: "/health", kind: llamaSwapKind{},
 	})
 }
 

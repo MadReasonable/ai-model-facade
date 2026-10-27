@@ -23,7 +23,7 @@ Work that takes more than a moment runs as a background job, so the `POST` answe
 
 All in `control/`, in the order a request reaches them:
 
-- `main.go`: wiring, and the container's mount points (`/work` for `dev-env/`, `/models` for the models store).
+- `main.go`: wiring, and the container's mount points (`/work` for `dev-env/`, `/models` for the models store, `/state` for what `control` keeps, such as Open WebUI's API key).
 - `api.go`: the routes and the rules every endpoint keeps, such as a `POST` that finds its work done answering `200`, and errors as problem details. It knows nothing about any one backend.
 - `backend.go`: the registry, and the interfaces a kind implements: `kind`, `configured`, `loader` and `setup`, with `basic` giving each method a default that refuses.
 - `config.go`: reading `config.yaml` strictly, giving each section to its kind, and writing the Compose override.
@@ -33,7 +33,7 @@ All in `control/`, in the order a request reaches them:
 - `manifest.go`: the record, in the models store, of the files `control` downloaded, so a prune removes only those.
 - `http.go`: JSON calls to the backends, and their errors.
 - `gguf.go`: reading and editing GGUF metadata in place, for Ollama's copies.
-- `llamaswap.go`, `ollama.go`: one file per kind of backend.
+- `llamaswap.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
 
 ## Adding a backend
 
@@ -41,7 +41,7 @@ A backend is a Compose service plus a kind, so adding one touches each file that
 
 1. `compose.yaml`: a service with a profile of its own, publishing its port as `${BIND_ADDRESS:-127.0.0.1}:${<NAME>_PORT:-<port>}`.
 2. `.env.example`: that port setting, with its default.
-3. `control/<backend>.go`: an `init` that calls `register` with the backend's name, service, profile, address inside the project network, `Health`, the path that answers once it can serve requests, and `NeedsFiles` if it reads the model files; a kind whose `configure` decodes its section; and a configured type that embeds `basic` and overrides only what the backend supports, so everything else answers `409` with a reason.
+3. `control/<backend>.go`: an `init` that calls `register` with the backend's name, service, profile, address inside the project network, `Health`, the path that answers once it can serve requests, `NeedsFiles` if it reads the model files, and `API` if Open WebUI can connect to it; a kind whose `configure` decodes its section; and a configured type that embeds `basic` and overrides only what the backend supports, so everything else answers `409` with a reason.
 4. `config.yaml`: the backend's section under `backends`, named as the backend is registered.
 5. `README.md`: a section under Backends, and the port in Settings.
 
