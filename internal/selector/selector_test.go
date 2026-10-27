@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,8 @@ type fakeBackend struct {
 	unknown  []string            // state can't be read
 	aliases  map[string][]string // base model ID -> aliases
 	err      error
-	calls    int // LoadedModels calls
+	pending  []string // models with a request of the gateway's pending
+	calls    int      // LoadedModels calls
 }
 
 func (f *fakeBackend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
@@ -39,6 +41,9 @@ func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, er
 	}
 	for _, id := range f.unknown {
 		models = append(models, backend.ModelInfo{ID: id, Aliases: f.aliases[id], Unknown: true})
+	}
+	for i := range models {
+		models[i].Pending = slices.Contains(f.pending, models[i].ID)
 	}
 	return models, f.err
 }
@@ -79,12 +84,21 @@ func TestFirstLoaded_PrefersReadyThenStartingThenLoadIfNone(t *testing.T) {
 	}
 }
 
-// A backend whose read failed with ErrLoading is busy loading a model and
-// serves nothing until it has, so it is skipped whole: the fallback moves to
-// another backend, or there is none. A backend failing for another reason
-// keeps its fallback, and one starting a model is still waited on.
+// oneAtATime is a fake backend whose load of one model a request for another
+// aborts.
+type oneAtATime struct{ *fakeBackend }
+
+func (oneAtATime) LoadsOneAtATime() {}
+
+// A backend busy loading a model, its read failed with ErrLoading, is
+// skipped whole. One whose load a request for another model would abort
+// serves only the models with a request pending there, ready, starting or
+// as the fallback, even if a stale read still lists another as loaded. The
+// fallback moves to another backend, or there is none. Failing for another
+// reason, a backend keeps its fallback, and one without the capability is
+// still waited on for a model starting there.
 func TestFirstLoaded_SkipsABackendBusyLoading(t *testing.T) {
-	loading := fmt.Errorf("%w: %w", backend.ErrLoading, errors.New("GET /props: 503 Service Unavailable"))
+	loading := fmt.Errorf("%w: %w", backend.ErrLoading, errors.New("GET /api/v1/models: 500 Internal Server Error"))
 	cases := []struct {
 		name      string
 		b         backend.Backend
@@ -92,10 +106,17 @@ func TestFirstLoaded_SkipsABackendBusyLoading(t *testing.T) {
 		target    string
 		checked   string
 	}{
-		{"read failed while loading", &fakeBackend{err: loading}, true, "b", "a: busy loading a model"},
-		{"busy, no other fallback", &fakeBackend{err: loading}, false, "", "a: busy loading a model"},
-		{"failing otherwise", &fakeBackend{err: errors.New("dial tcp: connection refused")}, false, "a", "a: state unavailable"},
-		{"starting, waited on", &fakeBackend{starting: []string{"a"}}, true, "a", "a: starting"},
+		{"read failed while loading", oneAtATime{&fakeBackend{err: loading}}, true, "b", "a: busy loading a model"},
+		{"busy, no other fallback", oneAtATime{&fakeBackend{err: loading}}, false, "", "a: busy loading a model"},
+		{"its own model starting, its request pending", oneAtATime{&fakeBackend{starting: []string{"a"}, pending: []string{"a"}}}, true, "a", "a: starting"},
+		{"its own model listed, its request pending", oneAtATime{&fakeBackend{loaded: []string{"a"}, pending: []string{"a"}}}, true, "a", "a: loaded"},
+		{"another model starting, its request pending", oneAtATime{&fakeBackend{starting: []string{"x"}, pending: []string{"x"}}}, true, "b", "a: not used while another model there has a request pending"},
+		{"another model listed, its request pending", oneAtATime{&fakeBackend{loaded: []string{"x"}, pending: []string{"x"}}}, true, "b", "a: not used while another model there has a request pending"},
+		{"listed from a stale read, another model's request pending", oneAtATime{&fakeBackend{loaded: []string{"a"}, starting: []string{"x"}, pending: []string{"x"}}}, true, "b", "a: not used while another model there has a request pending"},
+		{"pending elsewhere, no other fallback", oneAtATime{&fakeBackend{starting: []string{"x"}, pending: []string{"x"}}}, false, "", "a: not used while another model there has a request pending"},
+		{"failing otherwise", oneAtATime{&fakeBackend{err: errors.New("dial tcp: connection refused")}}, false, "a", "a: state unavailable"},
+		{"loading, without the capability", &fakeBackend{err: loading}, true, "b", "a: busy loading a model"},
+		{"waited on without the capability", &fakeBackend{starting: []string{"a"}}, true, "a", "a: starting"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -114,13 +135,15 @@ func TestFirstLoaded_SkipsABackendBusyLoading(t *testing.T) {
 	}
 }
 
-// A busy backend's state was read, so when nothing else can be used the
-// request finds no candidate loaded, whichever way the backend is busy,
-// rather than failing as if its state were unavailable.
-func TestFirstLoaded_BusyMeansNoCandidateLoaded(t *testing.T) {
+// A backend skipped for a load, busy or with another model's request
+// pending, had its state read, so when nothing else can be used the request
+// finds no candidate loaded, rather than failing as if its state were
+// unavailable.
+func TestFirstLoaded_SkippedForALoadMeansNoCandidateLoaded(t *testing.T) {
 	loading := fmt.Errorf("%w: %w", backend.ErrLoading, errors.New("GET /props: 503 Service Unavailable"))
 	for name, b := range map[string]backend.Backend{
-		"read failed while loading": &fakeBackend{err: loading},
+		"read failed while loading":       &fakeBackend{err: loading},
+		"another model's request pending": oneAtATime{&fakeBackend{starting: []string{"x"}, pending: []string{"x"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := &FirstLoaded{Candidates: []Candidate{{Model: "a", LoadIfNone: true}}}

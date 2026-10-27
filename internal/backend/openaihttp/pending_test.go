@@ -10,7 +10,7 @@ import (
 
 // A pending model shows as starting unless the backend reports it ready or
 // starting; one the backend can't report becomes starting, and a pending
-// alias counts as its base.
+// alias counts as its base. Every pending model is marked Pending.
 func TestPending_ShowsAsStartingWhereTheBackendIsSilent(t *testing.T) {
 	f := newFetcher(
 		backend.ModelInfo{ID: "ready", Aliases: []string{"ready:alias"}},
@@ -22,12 +22,12 @@ func TestPending_ShowsAsStartingWhereTheBackendIsSilent(t *testing.T) {
 		defer s.Pending(id)()
 	}
 	got, _ := s.LoadedModels(context.Background())
-	want := []backend.ModelInfo{{ID: "ready"}, {ID: "starting", Starting: true}, {ID: "unknown", Starting: true}, {ID: "unlisted", Starting: true}}
+	want := []backend.ModelInfo{{ID: "ready", Pending: true}, {ID: "starting", Starting: true, Pending: true}, {ID: "unknown", Starting: true, Pending: true}, {ID: "unlisted", Starting: true, Pending: true}}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i].ID != want[i].ID || got[i].Starting != want[i].Starting || got[i].Unknown != want[i].Unknown {
+		if got[i].ID != want[i].ID || got[i].Starting != want[i].Starting || got[i].Unknown != want[i].Unknown || got[i].Pending != want[i].Pending {
 			t.Errorf("model %d: got %+v, want %+v", i, got[i], want[i])
 		}
 	}

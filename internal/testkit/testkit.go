@@ -1,15 +1,15 @@
 // Package testkit holds what the tests of several packages share: fake
-// llama-swap, llama-server, Ollama and Open WebUI servers, and the tools to
-// wait for what they receive.
+// llama-swap, llama-server, LM Studio, Ollama and Open WebUI servers, and the
+// tools to wait for what they receive.
 //
 // The fakes speak the parts of each backend's API the gateway uses, as the
 // versions it was verified against do (llama-swap v263, llama-server b11580,
-// Open WebUI 0.12.3), so a test sets up a backend's state and behaviour
-// rather than its wire format. Every fake records the requests it receives
-// in a Recorder, and a test waits for a request with WaitFor instead of
-// sleeping; a load can be held at a Gate until the test opens it. Every wait
-// is bounded by Timeout, so a test that waits for something that never
-// happens fails instead of hanging.
+// LM Studio's llmster 0.0.25-1, Open WebUI 0.12.3), so a test sets up a
+// backend's state and behaviour rather than its wire format. Every fake
+// records the requests it receives in a Recorder, and a test waits for a
+// request with WaitFor instead of sleeping; a load can be held at a Gate
+// until the test opens it. Every wait is bounded by Timeout, so a test that
+// waits for something that never happens fails instead of hanging.
 package testkit
 
 import (
