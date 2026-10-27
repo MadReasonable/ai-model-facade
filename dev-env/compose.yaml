@@ -31,6 +31,26 @@ services:
     ports:
       - 127.0.0.1:${CONTROL_PORT:-18090}:8080
 
+  # Router mode: no model on the command line, models from the presets file
+  # config.yaml names.
+  llama-server-router:
+    profiles: [llama-server]
+    image: ghcr.io/ggml-org/llama.cpp:server-b11580
+    volumes:
+      - *models
+      - ./backend-config:/config:ro # the folder, so a reload sees an edit however it was saved
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LLAMA_SERVER_ROUTER_PORT:-18080}:8080
+
+  # Single-model mode: one model, and its ID, from config.yaml.
+  llama-server-single:
+    profiles: [llama-server]
+    image: ghcr.io/ggml-org/llama.cpp:server-b11580
+    volumes:
+      - *models
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LLAMA_SERVER_SINGLE_PORT:-18081}:8080
+
   # llama-swap, which starts a llama-server per model on demand; the image
   # bundles llama.cpp b11552.
   llama-swap:

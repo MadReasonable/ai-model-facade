@@ -33,7 +33,7 @@ All in `control/`, in the order a request reaches them:
 - `manifest.go`: the record, in the models store, of the files `control` downloaded, so a prune removes only those.
 - `http.go`: JSON calls to the backends, and their errors.
 - `gguf.go`: reading and editing GGUF metadata in place, for Ollama's copies.
-- `llamaswap.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
+- `llamaserver.go`, `llamaswap.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
 
 ## Adding a backend
 

@@ -136,6 +136,10 @@ func unsupported(format string, args ...any) error {
 	return &unsupportedError{reason: fmt.Sprintf(format, args...)}
 }
 
+// backendModels is where compose.yaml mounts the models store in the
+// backends' containers, for the model paths an override hands them.
+const backendModels = "/models"
+
 // errNoModel is a model the backend doesn't have.
 var errNoModel = errors.New("no such model")
 

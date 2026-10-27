@@ -12,6 +12,7 @@ Every backend that loads models on demand is set to hold at most two at once and
 The IDs can all load the same file, because nothing here tests the models themselves; Ollama is the exception, described in its section.
 
 A model ID names its backend, its kind of model and its number, `<backend>-llm-<n>`, so the gateway's log and `X-Gateway-Target` show which backend answered, and a pattern such as `*-llm-*` can pick out LLMs once other kinds of model are served.
+llama-server runs here in both of its modes, and each mode counts as a backend of its own: `llamaRouter` in router mode and `llamaServer` with a single model.
 The IDs say nothing about the model, so each backend's section below says which file each ID loads and what is special about it.
 
 To change the environment, such as to add a backend, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -50,9 +51,9 @@ It hands the settings a container takes at start, command-line flags or environm
 So a backend gets its settings only when `control` starts it, and an edit to a running backend's applies once it is stopped and started again; one started by hand with `docker compose` runs without them.
 A setup downloads the model files that are missing, and makes Ollama's models match its section, as described under Ollama.
 
-`llamaSwap` keeps its own config file, in llama-swap's format, in `backend-config/`, and `config.yaml` names the file it uses.
-It mounts the `backend-config/` folder rather than its one file, so a running backend sees an edit however the editor saved it: a file mounted on its own stays the file the container started with when an editor saves by writing a new file and renaming it over the old one.
-After editing it, `POST /api/backends/<backend>/reload` makes the backend read it again without restarting; stopping and starting it works too.
+`llamaRouter` and `llamaSwap` keep their own config files, in llama-server's and llama-swap's formats, in `backend-config/`, and `config.yaml` names the file each uses.
+They mount the `backend-config/` folder rather than their one file, so a running backend sees an edit however the editor saved it: a file mounted on its own stays the file the container started with when an editor saves by writing a new file and renaming it over the old one.
+After editing one, `POST /api/backends/<backend>/reload` makes the backend read it again without restarting; stopping and starting it works too.
 A reload of `ollama` or `openWebUi`, which have no config files of their own, makes them match `config.yaml` in the same way: Ollama's models, and Open WebUI's admin account, workspace models and connections.
 
 ## The control API
@@ -100,6 +101,8 @@ A setting given on the command line instead, such as `BIND_ADDRESS=0.0.0.0 docke
 | `MODELS_DIR` | empty | A host folder for the model files, in place of the `ai-model-facade-dev_models` volume. |
 | `KEEP_BACKENDS` | empty | `true` keeps the backends running when `control`'s container stops. The container that stops has the setting that counts, so a change reaches the next stop after the container is recreated with it. |
 | `CONTROL_PORT` | `18090` | The host port of `control`, always on 127.0.0.1. |
+| `LLAMA_SERVER_ROUTER_PORT` | `18080` | The host port of `llama-server-router`. |
+| `LLAMA_SERVER_SINGLE_PORT` | `18081` | The host port of `llama-server-single`. |
 | `LLAMA_SWAP_PORT` | `18082` | The host port of `llama-swap`. |
 | `OLLAMA_PORT` | `18083` | The host port of `ollama`. |
 | `OPEN_WEBUI_PORT` | `18084` | The host port of `open-webui`. |
@@ -144,6 +147,26 @@ Its `openWebUi` backend needs `OPEN_WEBUI_API_KEY` set to the key `control` repo
 `webui-alias` asks for the workspace model `openWebUi-llm-1:NoThink`, an alias that turns thinking off with its own params, so the facade's param makes the gateway log at startup that the alias's are applied after it.
 
 ## Backends
+
+### llama-server
+
+The `llamaRouter` and `llamaServer` backends run llama.cpp's server, `ghcr.io/ggml-org/llama.cpp:server-b11580`, in both of its modes.
+Every ID in both modes loads the Qwen3 0.6B file.
+
+| Service | Port | Mode | Model IDs |
+|---|---|---|---|
+| `llama-server-router` | 18080 | router | `llamaRouter-llm-1`, `llamaRouter-llm-2`, `llamaRouter-llm-3` |
+| `llama-server-single` | 18081 | single model | `llamaServer-llm-1` |
+
+In router mode the server loads and unloads models on demand, and its models come from `backend-config/llama-server-models.ini`; llama.cpp calls its entries presets.
+A reload makes it read that file again before `control` answers, unloading running models whose entry changed or went.
+It holds two models at once (`--models-max 2`), and to load a third it unloads the least recently used one that has no request in flight.
+`llamaRouter-llm-3` also unloads itself after 30 idle seconds and reports `sleeping`.
+`POST /models/load` and `POST /models/unload`, each with a body of `{"model": "<ID>"}`, load or unload a model without a chat request.
+Single-model mode holds its one model for as long as it runs and has no unload.
+Both modes start with `--jinja`, for tool calls, and `--reasoning-format deepseek`, which puts thinking in `reasoning_content` rather than in `content`.
+
+Instances on the same file share its pages, so each one beyond the first adds only its own buffers.
 
 ### llama-swap
 
