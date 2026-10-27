@@ -32,31 +32,30 @@ func post(t *testing.T, url, body string) *http.Response {
 }
 
 // llama-swap lists aliases as their own entries pointing at their base, and
-// a load shows as starting in /running until it finishes; /running never
-// lists aliases.
+// a load shows as starting in /running until it finishes, then as ready;
+// /running lists base models only, never aliases.
 func TestLlamaSwap_ListsAliasesAndShowsLoads(t *testing.T) {
-	f := NewLlamaSwap(t, SwapModel{ID: "a", Aliases: []string{"a:Fast"}})
-	models := get(t, f.URL+"/v1/models")
-	if gjson.Get(models, `data.#(id=="a").meta.llamaswap.aliases.0`).String() != "a:Fast" || gjson.Get(models, `data.#(id=="a:Fast").meta.llamaswap.modelID`).String() != "a" {
-		t.Fatalf("models: %s", models)
-	}
-	load := f.HoldLoads()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"a:Fast"}`); resp != nil {
-			resp.Body.Close()
+	forEachLlamaSwap(t, func(t *testing.T, b Driver) {
+		models := get(t, b.URL()+"/v1/models")
+		if gjson.Get(models, `data.#(id=="llamaSwap-llm-1").meta.llamaswap.aliases.0`).String() != "llamaSwap-llm-1:NoThink" || gjson.Get(models, `data.#(id=="llamaSwap-llm-1:NoThink").meta.llamaswap.modelID`).String() != "llamaSwap-llm-1" {
+			t.Fatalf("models: %s", models)
 		}
-	}()
-	f.WaitFor(t, "POST /v1/chat/completions", 1)
-	if running := get(t, f.URL+"/running"); running != `{"running":[{"model":"a","state":"starting"}]}`+"\n" {
-		t.Errorf("during the load: %s", running)
-	}
-	load.Open()
-	<-done
-	if f.State("a") != "ready" {
-		t.Errorf("after the load: %q", f.State("a"))
-	}
+		b.Reset(t)
+		release := b.HoldLoads(t)
+		done := chatInBackground(t, b, "llamaSwap-llm-1:NoThink")
+		state := func(model string) string {
+			return gjson.Get(get(t, b.URL()+"/running"), `running.#(model=="`+model+`").state`).String()
+		}
+		during(t, done, "llamaSwap-llm-1 starting in /running", func() bool { return state("llamaSwap-llm-1") == "starting" })
+		if state("llamaSwap-llm-1:NoThink") != "" {
+			t.Error("/running lists the alias")
+		}
+		release()
+		<-done
+		if got := state("llamaSwap-llm-1"); got != "ready" {
+			t.Errorf("after the load: %q", got)
+		}
+	})
 }
 
 // Ollama lists a model in /api/ps only once it has loaded.

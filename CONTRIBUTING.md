@@ -72,9 +72,17 @@ A test sets a backend's state and behaviour, such as `SetState("m", "starting")`
 Every fake records the requests it receives.
 A test checks them with `Count`, `Last` and `Keys`, and calls `Reset` after setup to forget the requests the gateway made while starting.
 
-When a test needs backend behaviour a fake lacks, extend the fake to match what the real backend does, and check the new behaviour in `internal/testkit/testkit_test.go`.
+When a test needs backend behaviour a fake lacks, extend the fake to match what the real backend does, and state the new behaviour as a claim in `internal/testkit/testkit_test.go`.
 A fake that drifts from its backend lets tests pass against an API that doesn't exist.
-To see what a real backend does, [dev-env/](dev-env/README.md) runs one in Docker on demand.
+
+A claim is written once and runs twice: against the fake, and against the real backend that [dev-env/](dev-env/README.md) runs in Docker.
+The claim sends its requests to whichever backend its driver points at, and the driver sets the backend's state, through the fake's setters or through dev-env's `control` service.
+The live half skips unless `AMF_LIVE` names `control`; with dev-env up, run it with:
+
+    AMF_LIVE=http://127.0.0.1:18090 go test ./internal/testkit/ -run /live
+
+Run it when a backend's pinned version changes in dev-env, and before a release, and update the fake and its "verified on" notes with what it finds.
+CI runs only the fake half, since the live one needs Docker, model files and minutes of loading.
 
 ### Waiting without sleeping
 
