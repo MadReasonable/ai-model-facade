@@ -148,9 +148,12 @@ A model that is stopping or stopped never counts, since a request to it would lo
 A model whose state can't be read counts as not loaded, so only `loadIfNone` can pick it.
 
 A backend that serves nothing until a load ends is skipped whole while it loads: a request sent then would fail, so none of its candidates is waited on or picked as the fallback.
-An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503.
+An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503 and LM Studio's for a 500.
 The log calls such a backend's candidates busy, and since its state was read, a request that finds nothing else gets `503` as with no candidate loaded, not the `502` of a backend whose state can't be read.
-Every other backend serves a second request once its load ends, so a candidate starting there is still waited on.
+LM Studio needs more (`backend.LoadsOneAtATime`): loading one model aborts a load of another under way and fails the request that started it, and it lists the model it is loading as loaded from the moment the load begins.
+So while one of its models has a request of the gateway's pending (`ModelInfo.Pending`), only candidates for that model are used there, ready, starting or as the fallback, since a request for it waits for the load; a candidate for another model is skipped, even one a state read from before the load still lists as loaded.
+On every other backend, and on LM Studio for the model it is loading, a second request is served once the load ends, so a candidate starting there is still waited on.
+Limit: the gateway knows of a load on LM Studio only through its own pending requests, so a load another client starts there reads as its model loaded, and a request for another model the gateway sends then aborts it; nothing stops another client aborting a load the gateway started either.
 
 Aliases (llama-swap presets, Open WebUI workspace models, llama-server aliases) are candidates with their base model's state, since loading an alias loads its base.
 A pattern matches base models before aliases, each in sorted order, so a pattern matching both resolves to one well-defined model; it says nothing about which is better.
@@ -196,9 +199,9 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver` and `ollama` are built on it.
+Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio` and `ollama` are built on it.
 An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
-A request is released when its response headers arrive, since llama-swap, llama-server's router and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, and on llama-server b11580).
+A request is released when its response headers arrive, since llama-swap, llama-server's router, LM Studio and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, on llama-server b11580 and on LM Studio's llmster 0.0.25-1).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
 On release, if the cached state didn't list the model as ready, a load just finished or failed and may have evicted other models, so the cache is dropped (`StateCache.Invalidate`); a refresh already in flight is then neither cached nor joined, since it may predate the change.
 
@@ -220,7 +223,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer`, `lmStudio` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
@@ -267,6 +270,30 @@ Decided: llama-server aliases are plain names.
 A preset's `alias` key gives its model more IDs, which the router resolves to the same instance with the same arguments (source, alias lookup in `server_models`), so an alias has no params of its own.
 The adapter marks each model `PlainAliases`, and `Catalog.OwnParams`, and through it the startup note and `check`, treat its aliases as the model itself.
 In single-model mode the list repeats the model's own ID among its aliases, and the adapter drops it.
+
+### LM Studio
+
+LM Studio's server loads models on demand, and by default holds one model loaded by a request at a time: loading another unloads it (`developer.unloadPreviousJITModelOnLoad`).
+Everything here was verified on its headless daemon, llmster 0.0.25-1, using the environment in `dev-env/`, unless marked as docs.
+
+State comes from LM Studio's own model list, `GET /api/v1/models`, which lists each model by key with its `loaded_instances`; a model with one is ready.
+The OpenAI-style `/v1/models` lists the models without their state.
+The list has LM Studio's embedding models too, which the adapter leaves out, since the gateway relays only completions.
+LM Studio reports no loading state, so a load shows as starting only through the pending count, as with Ollama, and headers arrive only once the model has loaded.
+
+Limit: LM Studio lists the model it is loading as loaded from the moment the load begins, for the whole load (0.85 s for the dev model from the page cache, 6.4 s cold from a network share), so the model reads as ready rather than starting.
+A request for it picked then waits in LM Studio for the load, so it causes no second load; the cost is only that the log says `loaded` where `starting` would be exact.
+A request for another model during a load aborts it, failing the request that started it with "Engine protocol startup was aborted", so selection uses the gateway's pending count to rule that out (Selection); a load another client started isn't counted, and stays exposed.
+For about 25 s after its container starts, LM Studio unpacks its inference engines, and meanwhile its list answers 500 ("Model does not exist"), a load asked for waits until it is done, and every other request answers 500 (each verified on llmster 0.0.25-1, with one load and one concurrent request).
+So the adapter reports a list read that fails with 500 as `backend.ErrLoading`, and selection skips LM Studio meanwhile (Selection); dev-env's `control` waits for the unpacking before it reports LM Studio started.
+Only a 500 means that, because that is how the list fails then; any other failure, such as a 401 for a wrong `apiKey` or a 404 for a wrong `baseUrl`, is reported as the error it is.
+Decided against: retrying the read, which would hide a backend that keeps failing behind a delay on every request.
+Decided against: waiting out the unpacking, which LM Studio answers with a 500, and a queue in the gateway holding requests until it ends, which this project doesn't add.
+
+LM Studio answers a request for a model it doesn't have with whichever model is loaded, and refuses it (400, "No models loaded") only when none is.
+So only the startup check catches a candidate with the wrong ID, as with single-model llama-server; selection treats that candidate as unlisted, never loaded.
+
+A model loaded through LM Studio's own load endpoint (`POST /api/v1/models/load`) counts as loaded by hand and is exempt from the auto-unload (docs, Idle TTL and Auto-Evict; community reports), which the gateway never does: it loads only by sending the request.
 
 ### Ollama
 

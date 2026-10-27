@@ -114,6 +114,12 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": "+backend.ErrLoading.Error())
 			continue
 		}
+		if st.pending != nil {
+			if _, _, ok := st.pending.match(c.Model); !ok {
+				sel.Checked = append(sel.Checked, c.On(c.Model)+": not used while another model there has a request pending")
+				continue
+			}
+		}
 		if st.err != nil {
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": state unavailable")
 		} else if id, base, ok := st.ready.match(c.Model); ok {
@@ -176,6 +182,11 @@ type backendState struct {
 	// can be used, but its state was read, so it doesn't count as
 	// unavailable.
 	busy bool
+	// pending is set for a backend.LoadsOneAtATime backend with requests of
+	// the gateway's pending, to the models they are for: a request for
+	// another model there would abort their load, so only candidates for
+	// these can be used, waited on or picked as the fallback.
+	pending *modelSet
 }
 
 // states starts reading the state of every backend the candidates use, once
@@ -211,9 +222,28 @@ func (s *FirstLoaded) states(ctx context.Context, b backend.Backend) map[backend
 				}
 			}
 			st.ready, st.starting, st.unknown = newModelSet(readyModels), newModelSet(startingModels), newModelSet(unknownModels)
+			if _, oneAtATime := cb.(backend.LoadsOneAtATime); oneAtATime {
+				st.pending = pendingSet(loadedModels)
+			}
 		}()
 	}
 	return states
+}
+
+// pendingSet returns the models with a request of the gateway's pending, or
+// nil if there are none.
+func pendingSet(models []backend.ModelInfo) *modelSet {
+	var pending []backend.ModelInfo
+	for _, m := range models {
+		if m.Pending {
+			pending = append(pending, m)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	set := newModelSet(pending)
+	return &set
 }
 
 // modelSet is a group of backend models in the order a candidate tries them:

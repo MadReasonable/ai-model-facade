@@ -5,8 +5,8 @@ import (
 	"net/http"
 )
 
-// Reply is how a fake llama-swap, llama-server or Ollama answers a
-// completion request.
+// Reply is how a fake llama-swap, llama-server, LM Studio or Ollama answers
+// a completion request.
 // The zero Reply answers 200 with DefaultBody.
 type Reply struct {
 	Status int               // default 200

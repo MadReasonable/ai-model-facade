@@ -78,6 +78,14 @@ backends:
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
 
+  # An LM Studio server, the desktop app's or its headless daemon's, takes
+  # them as well. Its candidates are the model keys LM Studio lists.
+  # lmStudio:
+  #   type: lmStudio
+  #   baseUrl: http://lm-studio:1234
+  #   stateCacheSeconds: 2
+  #   requestTimeoutSeconds: 180
+
   # An Open WebUI backend runs each request through Open WebUI's own chat
   # flow, so Open WebUI's tools run on its server and any client gets them.
   # openWebUi:

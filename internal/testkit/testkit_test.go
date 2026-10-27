@@ -137,6 +137,90 @@ func TestLlamaServer_SingleRefusesEverythingWhileLoading(t *testing.T) {
 	}
 }
 
+// LM Studio lists a model as loaded from the moment its load begins, and a
+// second request for it waits for the load; the loaded model it replaces
+// is listed no longer.
+func TestLMStudio_ListsALoadAtOnce(t *testing.T) {
+	f := NewLMStudio(t, "a", "b")
+	f.SetLoaded("a")
+	load := f.HoldLoads()
+	chat := func(done chan<- int) {
+		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp != nil {
+			resp.Body.Close()
+			done <- resp.StatusCode
+		}
+	}
+	first, second := make(chan int, 1), make(chan int, 1)
+	go chat(first)
+	f.WaitFor(t, "POST /v1/chat/completions", 1)
+	go chat(second)
+	f.WaitFor(t, "POST /v1/chat/completions", 2)
+	models := get(t, f.URL+"/api/v1/models")
+	if gjson.Get(models, `models.#(key=="b").loaded_instances.#`).Int() != 1 || gjson.Get(models, `models.#(key=="a").loaded_instances.#`).Int() != 0 {
+		t.Errorf("during the load: %s", models)
+	}
+	select {
+	case code := <-second:
+		t.Fatalf("the second request was answered during the load: %d", code)
+	default:
+	}
+	load.Open()
+	if a, b := <-first, <-second; a != http.StatusOK || b != http.StatusOK {
+		t.Errorf("after the load: %d and %d", a, b)
+	}
+}
+
+// A request for another model during a load aborts it: the request that
+// started it fails with LM Studio's 400, and the new model loads instead.
+func TestLMStudio_AbortsALoadForAnotherModel(t *testing.T) {
+	f := NewLMStudio(t, "a", "b")
+	load := f.HoldLoads()
+	first := make(chan *http.Response, 1)
+	go func() { first <- post(t, f.URL+"/v1/chat/completions", `{"model":"a"}`) }()
+	f.WaitFor(t, "POST /v1/chat/completions", 1)
+	second := make(chan int, 1)
+	go func() {
+		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp != nil {
+			resp.Body.Close()
+			second <- resp.StatusCode
+		}
+	}()
+	resp := <-first
+	if resp == nil {
+		t.Fatal("no answer to the first request")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "aborted") {
+		t.Errorf("the aborted request: %d %s", resp.StatusCode, body)
+	}
+	load.Open()
+	if code := <-second; code != http.StatusOK || f.Loaded() != "b" {
+		t.Errorf("the request that aborted it: %d, loaded %q", code, f.Loaded())
+	}
+}
+
+// While LM Studio unpacks its engines after starting, its list and every
+// completion request answer 500.
+func TestLMStudio_RefusesEverythingWhileUnpacking(t *testing.T) {
+	f := NewLMStudio(t, "a")
+	f.SetUnpacking(true)
+	resp, err := http.Get(f.URL + "/api/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("list while unpacking: %d", resp.StatusCode)
+	}
+	if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"a"}`); resp != nil {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("a request while unpacking: %d", resp.StatusCode)
+		}
+	}
+}
+
 // Open WebUI answers the model list only with refresh=true, and runs
 // OnModels while answering it.
 func TestOpenWebUI_ModelListNeedsRefresh(t *testing.T) {

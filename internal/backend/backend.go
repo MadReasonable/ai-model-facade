@@ -21,6 +21,9 @@ type ModelInfo struct {
 	// Unknown is set by ModelStateProvider for a model whose state the
 	// backend can't read. It selects like a model that isn't loaded.
 	Unknown bool
+	// Pending is set by ModelStateProvider on a model the gateway has a
+	// request to that hasn't been answered yet, whatever its state.
+	Pending bool
 	// Preset is set in ListModels for a model that is listed on its own but
 	// that the backend treats like an alias, applying params of its own after
 	// the gateway's: a llama-swap preset that Open WebUI lists without its
@@ -154,6 +157,16 @@ var ErrStateBusy = errors.New("backend state refresh already in flight and nothi
 // loadIfNone fallback included, since a request sent then would fail, and a
 // request that finds nothing else gets 503.
 var ErrLoading = errors.New("busy loading a model")
+
+// LoadsOneAtATime is implemented by a backend whose load of one model
+// aborts a load of another under way, failing the request that started it,
+// and which lists a model as loaded from the moment its load begins (LM
+// Studio). So while a model there has a request of the gateway's pending,
+// selection uses none of its candidates for another model, whatever their
+// state.
+type LoadsOneAtATime interface {
+	LoadsOneAtATime()
+}
 
 type requestStartKey struct{}
 

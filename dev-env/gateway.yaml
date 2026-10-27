@@ -34,6 +34,11 @@ backends:
     baseUrl: http://127.0.0.1:18081
     requestTimeoutSeconds: 60
 
+  lmStudio:
+    type: lmStudio
+    baseUrl: http://127.0.0.1:18085
+    requestTimeoutSeconds: 60
+
   llamaSwap:
     type: llamaSwap
     baseUrl: http://127.0.0.1:18082
@@ -82,6 +87,16 @@ models:
     candidates:
       - model: llamaSwap-llm-1
       - model: llamaSwap-llm-2
+        loadIfNone: true
+
+  # The same on LM Studio, which holds one model at a time, so a request
+  # for lmstudio-llm-3 unloads whichever of these is loaded. It has no
+  # request parameter known here that turns thinking off, so it thinks.
+  lmstudio:
+    backend: lmStudio
+    candidates:
+      - model: lmstudio-llm-1
+      - model: lmstudio-llm-2
         loadIfNone: true
 
   # The same on Ollama.

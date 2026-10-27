@@ -51,7 +51,7 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | Package | What its tests cover |
 |---|---|
 | `internal/backend/openaihttp` | The shared HTTP client and state cache: auth, timeouts, caching, single-flight fetches, pending counts. Adapters build on these and don't test them again. |
-| `internal/backend/llamaswap`, `llamaserver`, `ollama`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and the llamaSwap block. |
+| `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `ollama`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and the llamaSwap block. |
 | `internal/selector` | The selection order and how patterns and aliases match. |
 | `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |
@@ -66,7 +66,7 @@ Variants of one rule are a table of cases run with `t.Run`, each named for its c
 
 ### Fakes
 
-The fake llama-swap, llama-server, Ollama and Open WebUI servers in `internal/testkit` speak the parts of each API the gateway uses, as the versions it was verified against do (llama-swap v263, llama-server b11580, Open WebUI 0.12.3).
+The fake llama-swap, llama-server, LM Studio, Ollama and Open WebUI servers in `internal/testkit` speak the parts of each API the gateway uses, as the versions it was verified against do (llama-swap v263, llama-server b11580, LM Studio's llmster 0.0.25-1, Open WebUI 0.12.3).
 A test sets a backend's state and behaviour, such as `SetState("m", "starting")` or a `Reply` with a status and headers, and never writes wire format itself.
 
 Every fake records the requests it receives.

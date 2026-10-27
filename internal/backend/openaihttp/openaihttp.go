@@ -92,9 +92,9 @@ func seconds(s float64) time.Duration {
 
 // trackPending makes Chat count each request as pending in s until its
 // response headers arrive, so s reports the model as starting meanwhile.
-// Ollama, llama-swap and llama-server send headers once the model is
-// loaded; a backend that sends them earlier ends the count early, and its
-// own state takes over.
+// Ollama, llama-swap, llama-server and LM Studio send headers once the
+// model is loaded; a backend that sends them earlier ends the count early,
+// and its own state takes over.
 func (c *Client) trackPending(s *StateCache) {
 	c.state = s
 }
@@ -357,17 +357,20 @@ func (s *StateCache) pendingModels() []string {
 }
 
 // addPending reports each pending model that models doesn't list, or lists as
-// unknown, as starting. A model the backend reports ready or starting keeps
-// that state. A pending alias counts as its base model.
+// unknown, as starting, and marks every pending model Pending. A model the
+// backend reports ready or starting keeps that state. A pending alias counts
+// as its base model.
 func addPending(models []backend.ModelInfo, pending []string) []backend.ModelInfo {
 	slices.Sort(pending)
 	for _, id := range slices.Compact(pending) {
 		i := slices.IndexFunc(models, func(m backend.ModelInfo) bool { return m.ID == id || slices.Contains(m.Aliases, id) })
 		switch {
 		case i < 0:
-			models = append(models, backend.ModelInfo{ID: id, Starting: true})
+			models = append(models, backend.ModelInfo{ID: id, Starting: true, Pending: true})
 		case models[i].Unknown:
-			models[i].Unknown, models[i].Starting = false, true
+			models[i].Unknown, models[i].Starting, models[i].Pending = false, true, true
+		default:
+			models[i].Pending = true
 		}
 	}
 	return models
