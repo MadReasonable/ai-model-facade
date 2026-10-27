@@ -9,7 +9,7 @@ One service, `control`, runs the environment.
 `docker compose up` starts only `control`, and `control` downloads the model files, starts and stops each backend, and loads and unloads its models, through one HTTP API on 127.0.0.1:18090, so no backend's own commands need remembering.
 
 Every backend that loads models on demand is set to hold at most two at once and offers three model IDs, so a request to the third always evicts one, and the order in which the backend evicts can be watched.
-The IDs can all load the same file, because nothing here tests the models themselves; Ollama is the exception, described in its section.
+The IDs can all load the same file, because nothing here tests the models themselves; Ollama is the exception, and LM Studio holds one model at a time, each described in its section.
 
 A model ID names its backend, its kind of model and its number, `<backend>-llm-<n>`, so the gateway's log and `X-Gateway-Target` show which backend answered, and a pattern such as `*-llm-*` can pick out LLMs once other kinds of model are served.
 llama-server runs here in both of its modes, and each mode counts as a backend of its own: `llamaRouter` in router mode and `llamaServer` with a single model.
@@ -106,6 +106,7 @@ A setting given on the command line instead, such as `BIND_ADDRESS=0.0.0.0 docke
 | `LLAMA_SWAP_PORT` | `18082` | The host port of `llama-swap`. |
 | `OLLAMA_PORT` | `18083` | The host port of `ollama`. |
 | `OPEN_WEBUI_PORT` | `18084` | The host port of `open-webui`. |
+| `LM_STUDIO_PORT` | `18085` | The host port of `lm-studio`. |
 
 A changed setting takes effect when a backend is next started, since a start recreates the container if its settings differ.
 A port published on another address than 127.0.0.1 is reachable from the network even if a host firewall such as ufw denies it, because Docker adds its own iptables rules for published ports, and the backends have no API key.
@@ -123,7 +124,7 @@ A file removed from `files` stays in the store until it is pruned, since downloa
 It refuses while a download runs, since the file being written may be one of them, and while a backend that uses the files runs, since it may have started with a config that still listed one.
 Files downloaded before the record existed aren't in it, so a prune leaves them; remove those by hand.
 
-Each file is listed with its path, sha256 and URL, with paths laid out as `<publisher>/<repository>/<file>`, as on Hugging Face.
+Each file is listed with its path, sha256 and URL, with paths laid out as `<publisher>/<repository>/<file>`, as on Hugging Face, the layout LM Studio expects.
 
 | File | Size | Why |
 |---|---|---|
@@ -252,3 +253,22 @@ Open WebUI adds the definitions of its built-in tools to every request through i
 So `compose.yaml` turns off its code interpreter, notes, automations and calendar, and the same prompt takes 2,597.
 Memories stay on: their tools are added only to a request that asks for them, as the gateway's `webui-memory` facade does, which takes about 3,800 tokens a call (verified on v0.12.3).
 
+### LM Studio
+
+The `lmStudio` backend runs LM Studio's headless daemon, llmster 0.0.25-1, with its OpenAI-compatible server.
+LM Studio publishes no image, so `lm-studio/Dockerfile` installs the archive LM Studio's install script would download, pinned to that version and checked against its SHA-512; LM Studio is proprietary, so the image is only built locally.
+`control` builds it before the first start, which takes a few minutes and makes an image of about 3 GB.
+Every start of its container then takes about 25 s more, while LM Studio unpacks its inference engines, during which a load waits and every other request answers 500; `control` reports it `starting` until its log says the engines are unpacked.
+
+| Service | Port | Model IDs |
+|---|---|---|
+| `lm-studio` | 18085 | `lmstudio-llm-1`, `lmstudio-llm-2`, `lmstudio-llm-3` |
+
+LM Studio names a model after the folder that holds its file, lowercased, so its IDs are lowercase.
+Its start script, `lm-studio/start.sh`, makes a folder for each model `config.yaml` lists, linking to its shared file, so each gets its ID without a copy; LM Studio also lists an embedding model of its own.
+
+LM Studio holds one model at a time, unlike the other backends: a model loaded by a request unloads the one loaded before it, and it has no setting for two.
+`control` loads a model the same way, with a one-token request, because a model loaded through LM Studio's load endpoint counts as loaded by hand and is never unloaded to make room.
+While a load is under way, however long it takes, LM Studio's model list answers 500, "Model does not exist.", and no endpoint reports a loading state, so `GET .../models` answers `502` saying so until the load ends (verified on 0.0.25-1).
+No model unloads itself on idle; `start.sh` turns LM Studio's one-hour idle limit off, and a request can still set its own `ttl`.
+LM Studio's settings are set when it starts, so there is nothing to reload.

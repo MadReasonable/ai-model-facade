@@ -420,9 +420,9 @@ func (a *api) postStart(w http.ResponseWriter, r *http.Request, t target) {
 }
 
 // startBackend starts, or joins, the job that brings a backend up with its
-// setup done: the files it reads downloaded, its container started, then,
-// once its ready check passes, its own setup run. The job's detail says
-// which of these it is doing.
+// setup done: the files it reads downloaded, its image built if it builds
+// one, its container started, then, once its ready check passes, its own
+// setup run. The job's detail says which of these it is doing.
 // Starting a running container changes nothing, so the job also serves a
 // running backend whose own setup isn't done.
 func (a *api) startBackend(t target) *job {
@@ -430,6 +430,14 @@ func (a *api) startBackend(t target) *job {
 		if t.NeedsFiles {
 			p.setDetail("downloading the model files")
 			if err := a.files.download().wait(ctx); err != nil {
+				return err
+			}
+		}
+		if t.Build != "" {
+			p.setDetail("building its image")
+			err := a.env.compose.build(ctx, t.Build, t.Image)
+			a.logResult("build", err, "backend", t.Name)
+			if err != nil {
 				return err
 			}
 		}

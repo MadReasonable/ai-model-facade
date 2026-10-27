@@ -27,13 +27,13 @@ All in `control/`, in the order a request reaches them:
 - `api.go`: the routes and the rules every endpoint keeps, such as a `POST` that finds its work done answering `200`, and errors as problem details. It knows nothing about any one backend.
 - `backend.go`: the registry, and the interfaces a kind implements: `kind`, `configured`, `loader` and `setup`, with `basic` giving each method a default that refuses.
 - `config.go`: reading `config.yaml` strictly, giving each section to its kind, and writing the Compose override.
-- `compose.go`: running Compose through the host's Docker socket, with `dev-env/`'s host path as the project directory, so the bind mounts resolve on the host.
+- `compose.go`: running Compose through the host's Docker socket, with `dev-env/`'s host path as the project directory, so the bind mounts resolve on the host, and building the image of a backend that publishes none.
 - `jobs.go`: background work, keyed so that a second request for the same work joins the first.
 - `files.go`: downloading the model files and checking each against its sha256, and pruning the ones `config.yaml` no longer lists.
 - `manifest.go`: the record, in the models store, of the files `control` downloaded, so a prune removes only those.
 - `http.go`: JSON calls to the backends, and their errors.
 - `gguf.go`: reading and editing GGUF metadata in place, for Ollama's copies.
-- `llamaserver.go`, `llamaswap.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
+- `llamaserver.go`, `llamaswap.go`, `lmstudio.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
 
 ## Adding a backend
 
@@ -41,9 +41,12 @@ A backend is a Compose service plus a kind, so adding one touches each file that
 
 1. `compose.yaml`: a service with a profile of its own, publishing its port as `${BIND_ADDRESS:-127.0.0.1}:${<NAME>_PORT:-<port>}`.
 2. `.env.example`: that port setting, with its default.
-3. `control/<backend>.go`: an `init` that calls `register` with the backend's name, service, profile, address inside the project network, `Health`, the path that answers once it can serve requests, `NeedsFiles` if it reads the model files, and `API` if Open WebUI can connect to it; a kind whose `configure` decodes its section; and a configured type that embeds `basic` and overrides only what the backend supports, so everything else answers `409` with a reason.
+3. `control/<backend>.go`: an `init` that calls `register` with the backend's name, service, profile, address inside the project network, `Health`, the path that answers once it can serve requests, `NeedsFiles` if it reads the model files, and `API` if Open WebUI can connect to it; a kind whose `configure` decodes its section; and a configured type that embeds `basic` and overrides only what the backend supports, so everything else answers `409` with a reason. A backend that answers its health path before it can serve overrides `ready` as well, as LM Studio's does.
 4. `config.yaml`: the backend's section under `backends`, named as the backend is registered.
 5. `README.md`: a section under Backends, and the port in Settings.
+
+A backend that publishes no image, such as LM Studio, also gets a folder of its own with its Dockerfile.
+Its service in `compose.yaml` names both the folder as `build` and an `image`, and its registration sets `Build` and `Image` to the same two, because Compose run inside `control` can't read a build context at its host path; `control` builds the image itself, from its own mount, before each start.
 
 ## Pitfalls
 

@@ -33,8 +33,12 @@ type backend struct {
 	Health string
 	// API is what Open WebUI can connect to it as: "openai", "ollama", or
 	// "" for nothing.
-	API  string
-	kind kind
+	API string
+	// Build is the folder under dev-env/ holding the Dockerfile of a backend
+	// whose image is built here, and Image the name compose.yaml gives it;
+	// see compose.build.
+	Build, Image string
+	kind         kind
 }
 
 // kind reads a backend's section of config.yaml into the backend it
