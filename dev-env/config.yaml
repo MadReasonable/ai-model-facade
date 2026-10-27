@@ -22,6 +22,17 @@ files:
     url: https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf
 
 backends:
+  # llama-server in router mode, whose models are presets in its own file
+  # in backend-config/.
+  llamaRouter:
+    config: llama-server-models.ini
+    modelsMax: 2 # two loaded at once, so a third evicts one
+
+  # llama-server with one model, for as long as it runs.
+  llamaServer:
+    model: { id: llamaServer-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+    ctxSize: 4096
+
   # llama-swap, whose models are in its own file in backend-config/.
   llamaSwap:
     config: llama-swap.yaml
