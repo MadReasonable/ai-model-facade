@@ -90,7 +90,7 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 	if c.LlamaSwap != nil && c.LlamaSwap.Backend == "" {
 		return nil, fmt.Errorf("llamaSwap.backend is required")
 	}
-	client, err := openaihttp.New(c.Config)
+	client, err := openaihttp.NewClient(c.Config)
 	if err != nil {
 		return nil, err
 	}

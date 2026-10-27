@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // maxResponseBytes caps how much of a backend response body is read into
@@ -47,10 +48,10 @@ type Client struct {
 	stateTimeout time.Duration
 	listRetry    time.Duration
 	client       *http.Client
-	state        *StateCache // set by TrackPending
+	state        *StateCache // set by trackPending
 }
 
-func New(c Config) (*Client, error) {
+func NewClient(c Config) (*Client, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("baseUrl is required")
 	}
@@ -89,12 +90,49 @@ func seconds(s float64) time.Duration {
 	return time.Duration(s * float64(time.Second))
 }
 
-// TrackPending makes Chat count each request as pending in s until its
+// trackPending makes Chat count each request as pending in s until its
 // response headers arrive, so s reports the model as starting meanwhile.
 // Ollama and llama-swap send headers once the model is loaded; a backend
 // that sends them earlier ends the count early, and its own state takes over.
-func (c *Client) TrackPending(s *StateCache) {
+func (c *Client) trackPending(s *StateCache) {
 	c.state = s
+}
+
+// Backend is the base of an adapter that forwards chats unchanged through
+// Client and reads loaded-model state through a StateCache. Every chat
+// counts as pending in the cache until its response headers arrive, so a
+// load the gateway started shows as starting even where the backend doesn't
+// report it (see trackPending).
+type Backend struct {
+	*Client
+	State *StateCache
+}
+
+// NewBackend builds a Backend from a config entry that takes Config's keys
+// and its type, with fetch reading the backend's state for the cache. fetch
+// isn't called before NewBackend returns, so it may be a method of the
+// adapter that embeds the result.
+func NewBackend(entry config.Entry, fetch func(ctx context.Context) ([]backend.ModelInfo, error)) (*Backend, error) {
+	var c struct {
+		Type   string `yaml:"type"`
+		Config `yaml:",inline"`
+	}
+	if err := config.DecodeStrict(entry.Node, &c); err != nil {
+		return nil, err
+	}
+	client, err := NewClient(c.Config)
+	if err != nil {
+		return nil, err
+	}
+	state := NewStateCache(c.Config, fetch)
+	client.trackPending(state)
+	return &Backend{Client: client, State: state}, nil
+}
+
+// LoadedModels returns the models the backend reports, followed by the
+// pending models it doesn't report, as starting.
+func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	return b.State.LoadedModels(ctx)
 }
 
 // Chat posts the request to its OpenAI endpoint path on the backend.
