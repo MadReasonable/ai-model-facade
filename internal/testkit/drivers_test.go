@@ -114,24 +114,27 @@ func (b *liveDriver) URL() string                             { return b.url }
 func (b *liveDriver) HoldLoads(t *testing.T) (release func()) { return func() {} }
 
 // start starts the backend through control, unless it runs, and waits until
-// its setup is done and its models can be listed.
+// control reports it ready with its setup done.
 func (b *liveDriver) start(t *testing.T) {
 	t.Helper()
 	b.call(t, http.MethodPost, "/start", nil)
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
 		var status struct {
-			Container string `json:"container"`
-			Setup     struct {
+			State  string `json:"state"`
+			Detail string `json:"detail"`
+			Setup  struct {
 				Ready bool `json:"ready"`
 			} `json:"setup"`
 		}
 		b.call(t, http.MethodGet, "", &status)
-		if status.Container == "running" && status.Setup.Ready && b.models(t) != nil {
+		switch {
+		case status.State == "ready" && status.Setup.Ready:
 			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("backend '%s' didn't come up through control within 5 minutes: %+v", b.name, status)
+		case status.State == "failed":
+			t.Fatalf("backend '%s' failed to start through control: %s", b.name, status.Detail)
+		case time.Now().After(deadline):
+			t.Fatalf("backend '%s' wasn't ready through control within 5 minutes: %s, %s", b.name, status.State, status.Detail)
 		}
 		time.Sleep(time.Second)
 	}
