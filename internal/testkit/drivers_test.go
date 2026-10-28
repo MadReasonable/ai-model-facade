@@ -31,6 +31,8 @@ type Driver interface {
 	URL() string
 	// Reset unloads every model.
 	Reset(t *testing.T)
+	// Load loads model, and returns once the backend reports it loaded.
+	Load(t *testing.T, model string)
 	// HoldLoads makes the loads started from now wait until release is
 	// called, so a claim can look at a load under way. A real backend can't
 	// be held: its loads take as long as they take, and release does
@@ -91,18 +93,26 @@ func during(t *testing.T, done <-chan struct{}, what string, cond func() bool) {
 	}
 }
 
-// chatInBackground posts a chat for model to the backend and returns a
-// channel closed once it is answered.
-func chatInBackground(t *testing.T, b Driver, model string) <-chan struct{} {
-	done := make(chan struct{})
+// backgroundChat is a chat sent in the background. Once done is closed,
+// status and body are its answer, status 0 if it got none.
+type backgroundChat struct {
+	done   chan struct{}
+	status int
+	body   string
+}
+
+// chatInBackground posts a chat for model to the backend.
+func chatInBackground(t *testing.T, b Driver, model string) *backgroundChat {
+	chat := &backgroundChat{done: make(chan struct{})}
 	go func() {
-		defer close(done)
+		defer close(chat.done)
 		if resp := post(t, b.URL()+"/v1/chat/completions", `{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`); resp != nil {
-			io.Copy(io.Discard, resp.Body)
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			chat.status, chat.body = resp.StatusCode, string(body)
 		}
 	}()
-	return done
+	return chat
 }
 
 // liveDriver drives a real backend through control's API.
@@ -174,6 +184,23 @@ func (b *liveDriver) Reset(t *testing.T) {
 	}
 }
 
+// Load loads model through control and waits until control reports it
+// loaded.
+func (b *liveDriver) Load(t *testing.T, model string) {
+	t.Helper()
+	b.call(t, http.MethodPost, "/models/"+model+"/load", nil)
+	deadline := time.Now().Add(waitLimit())
+	for time.Now().Before(deadline) {
+		for _, m := range b.models(t) {
+			if m.ID == model && (m.State == "loaded" || m.State == "ready") {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("model '%s' of '%s' wasn't loaded within %v", model, b.name, waitLimit())
+}
+
 // call sends a request to the backend's resource in control's API and
 // decodes the answer into out, if out isn't nil.
 func (b *liveDriver) call(t *testing.T, method, path string, out any) {
@@ -223,6 +250,8 @@ func (f *fakeLlamaSwap) Reset(t *testing.T) {
 	}
 }
 
+func (f *fakeLlamaSwap) Load(t *testing.T, model string) { f.SetState(model, "ready") }
+
 func (f *fakeLlamaSwap) HoldLoads(t *testing.T) (release func()) {
 	return f.LlamaSwap.HoldLoads().Open
 }
@@ -241,6 +270,8 @@ type fakeOllama struct{ *Ollama }
 
 func (f *fakeOllama) URL() string        { return f.Ollama.URL }
 func (f *fakeOllama) Reset(t *testing.T) { f.SetLoaded() }
+
+func (f *fakeOllama) Load(t *testing.T, model string) { f.SetLoaded(append(f.Loaded(), model)...) }
 
 func (f *fakeOllama) HoldLoads(t *testing.T) (release func()) {
 	return f.Ollama.HoldLoads().Open
@@ -276,6 +307,28 @@ func (f *fakeLlamaServer) Reset(t *testing.T) {
 	}
 }
 
+func (f *fakeLlamaServer) Load(t *testing.T, model string) { f.SetStatus(model, "loaded") }
+
 func (f *fakeLlamaServer) HoldLoads(t *testing.T) (release func()) {
 	return f.LlamaServer.HoldLoads().Open
+}
+
+// LM Studio, as dev-env/ runs it: three models (dev-env/config.yaml).
+
+var devLMStudio = []string{"lmstudio-llm-1", "lmstudio-llm-2", "lmstudio-llm-3"}
+
+func forEachLMStudio(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "lmStudio", "LM_STUDIO_PORT", "18085", func(t *testing.T) Driver {
+		return &fakeLMStudio{NewLMStudio(t, devLMStudio...)}
+	}, claim)
+}
+
+type fakeLMStudio struct{ *LMStudio }
+
+func (f *fakeLMStudio) URL() string                     { return f.LMStudio.URL }
+func (f *fakeLMStudio) Reset(t *testing.T)              { f.SetLoaded("") }
+func (f *fakeLMStudio) Load(t *testing.T, model string) { f.SetLoaded(model) }
+
+func (f *fakeLMStudio) HoldLoads(t *testing.T) (release func()) {
+	return f.LMStudio.HoldLoads().Open
 }
