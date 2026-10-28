@@ -81,8 +81,14 @@ The live half skips unless `AMF_LIVE` names `control`; with dev-env up, run it w
 
     AMF_LIVE=http://127.0.0.1:18090 go test ./internal/testkit/ -run /live
 
-Run it when a backend's pinned version changes in dev-env, and before a release, and update the fake and its "verified on" notes with what it finds.
-CI runs only the fake half, since the live one needs Docker, model files and minutes of loading.
+The gateway has live checks of its own, in `internal/gateway/live_test.go`, which check what a client sees from the real backends rather than what a fake claims.
+Each starts the backends it needs through `control` (`testkit.LiveBackend`), sets their state, and serves dev-env's `gateway.yaml` in-process, so it sends requests to the same facades a person would.
+They skip without `AMF_LIVE` too; run them with:
+
+    AMF_LIVE=http://127.0.0.1:18090 go test ./internal/gateway/ -run Live
+
+Run both when a backend's pinned version changes in dev-env, and before a release, and update the fake and its "verified on" notes with what they find.
+CI runs neither live set, since they need Docker, model files and minutes of loading.
 
 ### Waiting without sleeping
 

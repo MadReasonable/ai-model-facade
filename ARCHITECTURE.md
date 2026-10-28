@@ -84,7 +84,7 @@ A new kind of backend is a new package here, built on `openaihttp`, plus one cas
 
 ### `internal/testkit`
 
-Fake llama-swap, llama-server, LM Studio, Ollama and Open WebUI servers that record what they receive and let a test hold a load or a poll.
+Fake llama-swap, llama-server, LM Studio, Ollama and Open WebUI servers that record what they receive and let a test hold a load or a poll, and `LiveBackend`, which drives a real backend in dev-env through its `control` service for the live checks.
 [CONTRIBUTING.md](CONTRIBUTING.md) says how tests use them.
 
 ## Where a change goes
