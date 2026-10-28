@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,18 +50,23 @@ func liveControl() string { return os.Getenv("AMF_LIVE") }
 // (portVar, else its default).
 func forEach(t *testing.T, name, portVar, port string, fake func(t *testing.T) Driver, claim func(t *testing.T, b Driver)) {
 	t.Run("fake", func(t *testing.T) { claim(t, fake(t)) })
-	t.Run("live", func(t *testing.T) {
-		control := liveControl()
-		if control == "" {
-			t.Skip("set AMF_LIVE to dev-env's control URL, such as http://127.0.0.1:18090, to check the real backend")
-		}
-		if p := os.Getenv(portVar); p != "" {
-			port = p
-		}
-		b := &liveDriver{control: control, name: name, url: "http://127.0.0.1:" + port}
-		b.start(t)
-		claim(t, b)
-	})
+	t.Run("live", func(t *testing.T) { claim(t, startLive(t, name, portVar, port)) })
+}
+
+// startLive starts the live backend that control knows by name and the host
+// reaches on port (portVar, else its default), or skips t without AMF_LIVE.
+func startLive(t *testing.T, name, portVar, port string) *liveDriver {
+	t.Helper()
+	control := liveControl()
+	if control == "" {
+		t.Skip("set AMF_LIVE to dev-env's control URL, such as http://127.0.0.1:18090, to check the real backend")
+	}
+	if p := os.Getenv(portVar); p != "" {
+		port = p
+	}
+	b := &liveDriver{control: control, name: name, url: "http://127.0.0.1:" + port}
+	b.start(t)
+	return b
 }
 
 // waitLimit bounds a claim's waits: Timeout for the fakes, longer when a
@@ -118,6 +124,7 @@ func chatInBackground(t *testing.T, b Driver, model string) *backgroundChat {
 // liveDriver drives a real backend through control's API.
 type liveDriver struct {
 	control, name, url string
+	key                string // the API key its setup made: Open WebUI's
 }
 
 func (b *liveDriver) URL() string                             { return b.url }
@@ -134,12 +141,14 @@ func (b *liveDriver) start(t *testing.T) {
 			State  string `json:"state"`
 			Detail string `json:"detail"`
 			Setup  struct {
-				Ready bool `json:"ready"`
+				Ready bool   `json:"ready"`
+				Key   string `json:"key"`
 			} `json:"setup"`
 		}
 		b.call(t, http.MethodGet, "", &status)
 		switch {
 		case status.State == "ready" && status.Setup.Ready:
+			b.key = status.Setup.Key
 			return
 		case status.State == "failed":
 			t.Fatalf("backend '%s' failed to start through control: %s", b.name, status.Detail)
@@ -331,4 +340,94 @@ func (f *fakeLMStudio) Load(t *testing.T, model string) { f.SetLoaded(model) }
 
 func (f *fakeLMStudio) HoldLoads(t *testing.T) (release func()) {
 	return f.LMStudio.HoldLoads().Open
+}
+
+// Open WebUI, as dev-env/ runs it: connected to llama-swap and Ollama, with
+// one workspace model on Ollama's first (dev-env/config.yaml).
+
+// OpenWebUIDriver is Open WebUI under a claim, fake or live, with the
+// backends it connects to.
+type OpenWebUIDriver interface {
+	// Models returns Open WebUI's model list, refreshed from its
+	// connections.
+	Models(t *testing.T) string
+	LlamaSwap() Driver
+	Ollama() Driver
+}
+
+func forEachOpenWebUI(t *testing.T, claim func(t *testing.T, b OpenWebUIDriver)) {
+	t.Run("fake", func(t *testing.T) {
+		claim(t, &fakeOpenWebUI{
+			OpenWebUI: NewOpenWebUI(t),
+			swap:      &fakeLlamaSwap{NewLlamaSwap(t, devLlamaSwap...)},
+			ollama:    &fakeOllama{NewOllama(t, devOllama...)},
+		})
+	})
+	t.Run("live", func(t *testing.T) {
+		claim(t, &liveOpenWebUI{
+			liveDriver: startLive(t, "openWebUi", "OPEN_WEBUI_PORT", "18084"),
+			swap:       startLive(t, "llamaSwap", "LLAMA_SWAP_PORT", "18082"),
+			ollama:     startLive(t, "ollama", "OLLAMA_PORT", "18083"),
+		})
+	})
+}
+
+type liveOpenWebUI struct {
+	*liveDriver
+	swap, ollama *liveDriver
+}
+
+func (b *liveOpenWebUI) LlamaSwap() Driver { return b.swap }
+func (b *liveOpenWebUI) Ollama() Driver    { return b.ollama }
+
+func (b *liveOpenWebUI) Models(t *testing.T) string {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, b.url+"/api/models?refresh=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+b.key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Open WebUI's model list: %s %s", resp.Status, body)
+	}
+	return string(body)
+}
+
+// fakeOpenWebUI lists its connections' models as the entry builders build
+// them, from the fake connections' states at each read.
+type fakeOpenWebUI struct {
+	*OpenWebUI
+	swap   *fakeLlamaSwap
+	ollama *fakeOllama
+}
+
+func (f *fakeOpenWebUI) LlamaSwap() Driver { return f.swap }
+func (f *fakeOpenWebUI) Ollama() Driver    { return f.ollama }
+
+func (f *fakeOpenWebUI) Models(t *testing.T) string {
+	var entries []string
+	for _, m := range devLlamaSwap {
+		status := "unloaded"
+		if f.swap.State(m.ID) == "ready" {
+			status = "loaded"
+		}
+		entries = append(entries, SwapEntry(m.ID, status))
+		for _, alias := range m.Aliases {
+			entries = append(entries, SwapPresetEntry(alias, m.ID, status))
+		}
+	}
+	ollama := map[string]string{}
+	for _, m := range devOllama {
+		ollama[m] = OllamaEntry(m, slices.Contains(f.ollama.Loaded(), m))
+		entries = append(entries, ollama[m])
+	}
+	entries = append(entries, WorkspaceEntry("openWebUi-llm-1:NoThink", "ollama-llm-1:latest", ollama["ollama-llm-1:latest"]))
+	f.SetModels(entries...)
+	return get(t, f.URL+"/api/models?refresh=true")
 }
