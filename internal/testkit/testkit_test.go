@@ -3,6 +3,7 @@ package testkit
 import (
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -216,6 +217,47 @@ func TestLMStudio_RefusesEverythingWhileUnpacking(t *testing.T) {
 			t.Errorf("a request while unpacking: %d", resp.StatusCode)
 		}
 	}
+}
+
+// Open WebUI lists each model of its connections as the entry builders
+// build it, with its connection's state: Ollama's with Ollama's loaded flag,
+// and llama-swap's base models and presets with llama-swap's status; and a
+// workspace model with its base.
+func TestOpenWebUI_ListsModelsAsTheEntryBuildersDo(t *testing.T) {
+	forEachOpenWebUI(t, func(t *testing.T, b OpenWebUIDriver) {
+		b.LlamaSwap().Reset(t)
+		b.Ollama().Reset(t)
+		b.LlamaSwap().Load(t, "llamaSwap-llm-1")
+		b.Ollama().Load(t, "ollama-llm-1:latest")
+		models := gjson.Get(b.Models(t), "data")
+		for _, entry := range []string{
+			SwapEntry("llamaSwap-llm-1", "loaded"),
+			SwapPresetEntry("llamaSwap-llm-1:NoThink", "llamaSwap-llm-1", "loaded"),
+			SwapEntry("llamaSwap-llm-2", "unloaded"),
+			OllamaEntry("ollama-llm-1:latest", true),
+			OllamaEntry("ollama-llm-2:latest", false),
+			WorkspaceEntry("openWebUi-llm-1:NoThink", "ollama-llm-1:latest", OllamaEntry("ollama-llm-1:latest", true)),
+		} {
+			want := gjson.Parse(entry)
+			got := models.Get(`#(id==` + strconv.Quote(want.Get("id").String()) + `)`)
+			if !holds(got, want) {
+				t.Errorf("entry %s: listed as %s", entry, got.Raw)
+			}
+		}
+	})
+}
+
+// holds reports whether got has every field of want, with want's value.
+func holds(got, want gjson.Result) bool {
+	if !want.IsObject() {
+		return got.Exists() && got.Value() == want.Value()
+	}
+	ok := true
+	want.ForEach(func(key, value gjson.Result) bool {
+		ok = holds(got.Get(gjson.Escape(key.String())), value)
+		return ok
+	})
+	return ok
 }
 
 // Open WebUI answers the model list only with refresh=true, and runs

@@ -224,9 +224,21 @@ func FacadeEntry(id, model, reason string) string {
 	return mustJSON(map[string]any{"id": id, "owned_by": "openai", "current": current})
 }
 
-// WorkspaceEntry is a workspace model built on base.
-func WorkspaceEntry(id, base string) string {
-	return mustJSON(map[string]any{"id": id, "owned_by": "openai", "info": map[string]any{"base_model_id": base}})
+// WorkspaceEntry is a workspace model built on base. Open WebUI gives it the
+// owned_by and loaded of baseEntry, the base's entry if the base is one of
+// its connections' models, else "" and owned_by openai, as for a base it
+// doesn't list or one that is a workspace model itself (0.12.3 source,
+// utils/models.py, get_all_models; verified for an Ollama base).
+func WorkspaceEntry(id, base, baseEntry string) string {
+	entry := map[string]any{"id": id, "owned_by": "openai", "info": map[string]any{"base_model_id": base}}
+	listed := gjson.Parse(baseEntry)
+	if owner := listed.Get("owned_by"); owner.Exists() {
+		entry["owned_by"] = owner.String()
+	}
+	if loaded := listed.Get("loaded"); loaded.Exists() {
+		entry["loaded"] = loaded.Bool()
+	}
+	return mustJSON(entry)
 }
 
 // PlainEntry is a model of an OpenAI connection that reports no state, such

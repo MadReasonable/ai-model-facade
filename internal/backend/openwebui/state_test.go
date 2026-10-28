@@ -31,17 +31,18 @@ func stateOf(models []backend.ModelInfo) map[string]string {
 // current selection; a workspace model has its base's; anything else is
 // unknown.
 func TestOpenWebUI_ReadsEachKindOfModelsState(t *testing.T) {
+	facadeLoaded := testkit.FacadeEntry("facade-loaded", "m", "loaded")
 	f := testkit.NewOpenWebUI(t,
 		testkit.OllamaEntry("ollama-up", true),
 		testkit.OllamaEntry("ollama-down", false),
 		testkit.SwapEntry("swap-up", "loaded"),
 		testkit.SwapEntry("swap-down", "unloaded"),
-		testkit.FacadeEntry("facade-loaded", "m", "loaded"),
+		facadeLoaded,
 		testkit.FacadeEntry("facade-starting", "m", "starting"),
 		testkit.FacadeEntry("facade-fallback", "m", "loadIfNone"),
 		testkit.FacadeEntry("facade-none", "", "no candidate loaded"),
-		testkit.WorkspaceEntry("workspace", "facade-loaded"),
-		testkit.WorkspaceEntry("orphan", "gone"),
+		testkit.WorkspaceEntry("workspace", "facade-loaded", facadeLoaded),
+		testkit.WorkspaceEntry("orphan", "gone", ""),
 		testkit.PlainEntry("hosted"),
 	)
 	got, err := newBackend(t, f, "").LoadedModels(context.Background())
@@ -63,11 +64,12 @@ func TestOpenWebUI_ReadsEachKindOfModelsState(t *testing.T) {
 // Workspace models fold into the model they're built on, through a chain of
 // workspace models; one whose base isn't listed stands alone.
 func TestOpenWebUI_FoldsWorkspaceModelsIntoTheirBase(t *testing.T) {
+	base := testkit.OllamaEntry("base", true)
 	f := testkit.NewOpenWebUI(t,
-		testkit.OllamaEntry("base", true),
-		testkit.WorkspaceEntry("workspace", "base"),
-		testkit.WorkspaceEntry("workspace-of-workspace", "workspace"),
-		testkit.WorkspaceEntry("orphan", "gone"),
+		base,
+		testkit.WorkspaceEntry("workspace", "base", base),
+		testkit.WorkspaceEntry("workspace-of-workspace", "workspace", ""),
+		testkit.WorkspaceEntry("orphan", "gone", ""),
 	)
 	b := newBackend(t, f, "")
 	listed, err := b.ListModels(context.Background())
@@ -89,12 +91,13 @@ func TestOpenWebUI_FoldsWorkspaceModelsIntoTheirBase(t *testing.T) {
 // when it doesn't or when the prefix leaves more than one candidate. A
 // workspace model built on a preset folds through it into the base.
 func TestOpenWebUI_FoldsLlamaSwapPresetsIntoTheirBase(t *testing.T) {
+	fast := testkit.SwapPresetEntry("a:Fast", "a", "unloaded")
 	f := testkit.NewOpenWebUI(t,
 		testkit.SwapEntry("a", "unloaded"),
-		testkit.SwapPresetEntry("a:Fast", "a", "unloaded"),
+		fast,
 		testkit.SwapPresetEntry("a:Slow", "a", "unloaded"),
 		testkit.SwapPresetEntry("b:Fast", "b", "unloaded"), // base not listed
-		testkit.WorkspaceEntry("w", "a:Fast"),
+		testkit.WorkspaceEntry("w", "a:Fast", fast),
 		testkit.SwapEntry("p.c", "unloaded"),
 		testkit.SwapPresetEntry("p.c:X", "c", "unloaded"),
 		testkit.SwapEntry("q.d", "unloaded"),
