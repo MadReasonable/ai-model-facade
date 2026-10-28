@@ -2,7 +2,7 @@
 
 **Real backends in Docker, run through one control service, for checking the gateway's adapters against what each backend actually reports.**
 
-`go test` never uses these: the tests run against fakes in `internal/testkit` and need no network.
+`go test` uses these only when `AMF_LIVE` names `control`: otherwise the tests run against fakes in `internal/testkit` and need no network.
 The fakes are only as accurate as what was checked against a real server, so this folder runs those servers on demand, with small models that share one set of files.
 
 One service, `control`, runs the environment.
@@ -146,6 +146,7 @@ The gateway listens on 127.0.0.1:8088, and the backends' ports in it are `.env.e
 Its `openWebUi` backend needs `OPEN_WEBUI_API_KEY` set to the key `control` reports, as described under Open WebUI; without it the config doesn't load.
 `webui-memory` is `webui` with Open WebUI's memory tools, for a tool call that Open WebUI runs on its server.
 `webui-alias` asks for the workspace model `openWebUi-llm-1:NoThink`, an alias that turns thinking off with its own params, so the facade's param makes the gateway log at startup that the alias's are applied after it.
+The gateway's live checks serve this config in-process against the running backends; the Tests section of [CONTRIBUTING.md](../CONTRIBUTING.md) says how to run them.
 
 ## Backends
 
