@@ -42,16 +42,16 @@ func TestLlamaSwap_ListsAliasesAndShowsLoads(t *testing.T) {
 		}
 		b.Reset(t)
 		release := b.HoldLoads(t)
-		done := chatInBackground(t, b, "llamaSwap-llm-1:NoThink")
+		chat := chatInBackground(t, b, "llamaSwap-llm-1:NoThink")
 		state := func(model string) string {
 			return gjson.Get(get(t, b.URL()+"/running"), `running.#(model=="`+model+`").state`).String()
 		}
-		during(t, done, "llamaSwap-llm-1 starting in /running", func() bool { return state("llamaSwap-llm-1") == "starting" })
+		during(t, chat.done, "llamaSwap-llm-1 starting in /running", func() bool { return state("llamaSwap-llm-1") == "starting" })
 		if state("llamaSwap-llm-1:NoThink") != "" {
 			t.Error("/running lists the alias")
 		}
 		release()
-		<-done
+		<-chat.done
 		if got := state("llamaSwap-llm-1"); got != "ready" {
 			t.Errorf("after the load: %q", got)
 		}
@@ -63,13 +63,13 @@ func TestOllama_ListsModelOnlyOnceLoaded(t *testing.T) {
 	forEachOllama(t, func(t *testing.T, b Driver) {
 		b.Reset(t)
 		release := b.HoldLoads(t)
-		done := chatInBackground(t, b, "ollama-llm-1:latest")
+		chat := chatInBackground(t, b, "ollama-llm-1:latest")
 		listed := func() bool {
 			return gjson.Get(get(t, b.URL()+"/api/ps"), `models.#(name=="ollama-llm-1:latest")`).Exists()
 		}
-		during(t, done, "ollama-llm-1 missing from /api/ps", func() bool { return !listed() })
+		during(t, chat.done, "ollama-llm-1 missing from /api/ps", func() bool { return !listed() })
 		release()
-		<-done
+		<-chat.done
 		if !listed() {
 			t.Errorf("after the load: %s", get(t, b.URL()+"/api/ps"))
 		}
@@ -86,13 +86,13 @@ func TestLlamaServer_RouterListsStatusAndShowsLoads(t *testing.T) {
 		}
 		b.Reset(t)
 		release := b.HoldLoads(t)
-		done := chatInBackground(t, b, "llamaRouter-llm-1")
+		chat := chatInBackground(t, b, "llamaRouter-llm-1")
 		status := func() string {
 			return gjson.Get(get(t, b.URL()+"/v1/models"), `data.#(id=="llamaRouter-llm-1").status.value`).String()
 		}
-		during(t, done, "llamaRouter-llm-1 loading in /v1/models", func() bool { return status() == "loading" })
+		during(t, chat.done, "llamaRouter-llm-1 loading in /v1/models", func() bool { return status() == "loading" })
 		release()
-		<-done
+		<-chat.done
 		if got := status(); got != "loaded" {
 			t.Errorf("after the load: %q", got)
 		}
@@ -148,71 +148,57 @@ func TestLlamaServer_SingleRefusesEverythingWhileLoading(t *testing.T) {
 	}
 }
 
-// LM Studio lists a model as loaded from the moment its load begins, and a
-// second request for it waits for the load; the loaded model it replaces
-// is listed no longer.
+// LM Studio lists a model as loaded from the moment its load begins, no
+// longer listing the model it replaces, and a second request for it during
+// the load is answered once the load ends, as the first is.
 func TestLMStudio_ListsALoadAtOnce(t *testing.T) {
-	f := NewLMStudio(t, "a", "b")
-	f.SetLoaded("a")
-	load := f.HoldLoads()
-	chat := func(done chan<- int) {
-		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp != nil {
-			resp.Body.Close()
-			done <- resp.StatusCode
+	forEachLMStudio(t, func(t *testing.T, b Driver) {
+		b.Load(t, "lmstudio-llm-1")
+		release := b.HoldLoads(t)
+		first := chatInBackground(t, b, "lmstudio-llm-2")
+		during(t, first.done, "lmstudio-llm-2 listed in place of lmstudio-llm-1", func() bool {
+			return lmStudioLoaded(t, b) == "lmstudio-llm-2"
+		})
+		second := chatInBackground(t, b, "lmstudio-llm-2")
+		release()
+		<-first.done
+		<-second.done
+		if first.status != http.StatusOK || second.status != http.StatusOK {
+			t.Errorf("the two requests: %d %s; %d %s", first.status, first.body, second.status, second.body)
 		}
-	}
-	first, second := make(chan int, 1), make(chan int, 1)
-	go chat(first)
-	f.WaitFor(t, "POST /v1/chat/completions", 1)
-	go chat(second)
-	f.WaitFor(t, "POST /v1/chat/completions", 2)
-	models := get(t, f.URL+"/api/v1/models")
-	if gjson.Get(models, `models.#(key=="b").loaded_instances.#`).Int() != 1 || gjson.Get(models, `models.#(key=="a").loaded_instances.#`).Int() != 0 {
-		t.Errorf("during the load: %s", models)
-	}
-	select {
-	case code := <-second:
-		t.Fatalf("the second request was answered during the load: %d", code)
-	default:
-	}
-	load.Open()
-	if a, b := <-first, <-second; a != http.StatusOK || b != http.StatusOK {
-		t.Errorf("after the load: %d and %d", a, b)
-	}
+	})
 }
 
 // A request for another model during a load aborts it: the request that
 // started it fails with LM Studio's 400, and the new model loads instead.
 func TestLMStudio_AbortsALoadForAnotherModel(t *testing.T) {
-	f := NewLMStudio(t, "a", "b")
-	load := f.HoldLoads()
-	first := make(chan *http.Response, 1)
-	go func() { first <- post(t, f.URL+"/v1/chat/completions", `{"model":"a"}`) }()
-	f.WaitFor(t, "POST /v1/chat/completions", 1)
-	second := make(chan int, 1)
-	go func() {
-		if resp := post(t, f.URL+"/v1/chat/completions", `{"model":"b"}`); resp != nil {
-			resp.Body.Close()
-			second <- resp.StatusCode
+	forEachLMStudio(t, func(t *testing.T, b Driver) {
+		b.Reset(t)
+		release := b.HoldLoads(t)
+		first := chatInBackground(t, b, "lmstudio-llm-1")
+		during(t, first.done, "lmstudio-llm-1 listed", func() bool { return lmStudioLoaded(t, b) == "lmstudio-llm-1" })
+		second := chatInBackground(t, b, "lmstudio-llm-2")
+		<-first.done
+		if first.status != http.StatusBadRequest || !strings.Contains(first.body, "aborted") {
+			t.Errorf("the aborted request: %d %s", first.status, first.body)
 		}
-	}()
-	resp := <-first
-	if resp == nil {
-		t.Fatal("no answer to the first request")
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "aborted") {
-		t.Errorf("the aborted request: %d %s", resp.StatusCode, body)
-	}
-	load.Open()
-	if code := <-second; code != http.StatusOK || f.Loaded() != "b" {
-		t.Errorf("the request that aborted it: %d, loaded %q", code, f.Loaded())
-	}
+		release()
+		<-second.done
+		if loaded := lmStudioLoaded(t, b); second.status != http.StatusOK || loaded != "lmstudio-llm-2" {
+			t.Errorf("the request that aborted it: %d %s, loaded %q", second.status, second.body, loaded)
+		}
+	})
+}
+
+// lmStudioLoaded returns the model LM Studio lists as loaded, "" if none.
+func lmStudioLoaded(t *testing.T, b Driver) string {
+	return gjson.Get(get(t, b.URL()+"/api/v1/models"), `models.#(loaded_instances.#>0).key`).String()
 }
 
 // While LM Studio unpacks its engines after starting, its list and every
-// completion request answer 500.
+// completion request answer 500 (llmster 0.0.25-1, verified). Fake only:
+// control reports LM Studio ready only once its engines are unpacked, so a
+// live run never sees it unpacking.
 func TestLMStudio_RefusesEverythingWhileUnpacking(t *testing.T) {
 	f := NewLMStudio(t, "a")
 	f.SetUnpacking(true)
