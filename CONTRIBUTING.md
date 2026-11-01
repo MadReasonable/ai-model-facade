@@ -90,6 +90,10 @@ They skip without `AMF_LIVE` too; run them with:
 
     AMF_LIVE=http://127.0.0.1:18090 go test ./internal/gateway/ -run Live
 
+Both sets change the same backends, so a test process holds dev-env, through a lock file in the temp directory, from its first live check until it exits.
+They can therefore run in one `go test ./...`, where packages run at the same time: the second package to reach a live check waits for the first to finish.
+Windows has no flock, so there they don't wait; run them one at a time.
+
 Run both when a backend's pinned version changes in dev-env, and before a release, and update the fake and its "verified on" notes with what they find.
 CI runs neither live set, since they need Docker, model files and minutes of loading.
 

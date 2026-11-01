@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,6 +18,11 @@ import (
 // URL; without it, they skip. A backend's host port defaults to
 // .env.example's and is overridden by the same variable, such as
 // LLAMA_SWAP_PORT, as in dev-env/.env.
+
+// Packages run their tests at the same time under go test ./..., and the
+// live checks of two packages would change the same backends under each
+// other, so each test process holds dev-env, through a lock file, from its
+// first live check until it exits (holdLive); one that finds it held waits.
 
 // LiveTimeout bounds a live check's waits for real loads.
 const LiveTimeout = 3 * time.Minute
@@ -34,13 +41,14 @@ type LiveBackend struct {
 // StartLive starts the backend that control knows by name and the host
 // reaches on port (portVar, else its default), unless it runs, and returns
 // once control reports it ready with its setup done; without AMF_LIVE, it
-// skips t.
+// skips t. It first waits for any other test process using dev-env to exit.
 func StartLive(t testing.TB, name, portVar, port string) *LiveBackend {
 	t.Helper()
 	control := LiveControl()
 	if control == "" {
 		t.Skip("set AMF_LIVE to dev-env's control URL, such as http://127.0.0.1:18090, to check the real backend")
 	}
+	holdLive(t)
 	if p := os.Getenv(portVar); p != "" {
 		port = p
 	}
@@ -67,6 +75,25 @@ func StartLive(t testing.TB, name, portVar, port string) *LiveBackend {
 			t.Fatalf("backend '%s' wasn't ready through control within 5 minutes: %s, %s", name, status.State, status.Detail)
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// liveHold is this process's hold on dev-env, taken once and kept until the
+// process exits.
+var liveHold struct {
+	once sync.Once
+	err  error
+}
+
+// holdLive returns once this process holds dev-env, and fails t if the lock
+// file can't be taken.
+func holdLive(t testing.TB) {
+	t.Helper()
+	liveHold.once.Do(func() {
+		liveHold.err = lockLive(filepath.Join(os.TempDir(), "ai-model-facade-live.lock"), t.Logf)
+	})
+	if liveHold.err != nil {
+		t.Fatalf("holding dev-env for this test process: %v", liveHold.err)
 	}
 }
 
