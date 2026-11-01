@@ -401,3 +401,12 @@ func forEachOpenAI(t *testing.T, claim func(t *testing.T, b HostedDriver)) {
 		return hosted{url: NewOpenAI(t, "gpt-5-mini").URL, key: "test-key", model: "gpt-5-mini"}
 	}, claim)
 }
+
+// Anthropic's Claude API, live at api.anthropic.com with ANTHROPIC_API_KEY;
+// its live model defaults to claude-haiku-5-5, or ANTHROPIC_LIVE_MODEL.
+
+func forEachAnthropic(t *testing.T, claim func(t *testing.T, b HostedDriver)) {
+	forEachHosted(t, "ANTHROPIC_API_KEY", "https://api.anthropic.com", "ANTHROPIC_LIVE_MODEL", "claude-haiku-5-5", func(t *testing.T) HostedDriver {
+		return hosted{url: NewAnthropic(t, "claude-haiku-5-5", "claude-other").URL, key: "test-key", model: "claude-haiku-5-5"}
+	}, claim)
+}

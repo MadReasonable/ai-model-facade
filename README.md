@@ -8,7 +8,7 @@ Models, quants and even backends can be swapped without any change on the client
 
 It is one static binary and one YAML file, with no runtime dependencies.
 The smallest useful config is a backend address and one facade mapped to one model.
-Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [LocalAI](https://localai.io), [Ollama](https://ollama.com), [Open WebUI](https://openwebui.com) and OpenAI's API at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
+Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [LocalAI](https://localai.io), [Ollama](https://ollama.com), [Open WebUI](https://openwebui.com), OpenAI's API and Anthropic's Claude API at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
 
 > [!NOTE]
 > **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
@@ -30,7 +30,7 @@ A facade moves that decision out of every client and into one place, where it is
 ## Quick Start
 
 This walkthrough uses llama-swap as the backend, so you need a running instance.
-llama-server, LM Studio, LocalAI, Ollama, Open WebUI and OpenAI's API differ only in their `backends` entry; see [Configuration](#configuration).
+llama-server, LM Studio, LocalAI, Ollama, Open WebUI and the hosted APIs differ only in their `backends` entry; see [Configuration](#configuration).
 You need a binary from the [releases page](https://github.com/MadReasonable/ai-model-facade/releases), Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
 
 ```bash
@@ -219,7 +219,7 @@ Each backend reports which models are loaded in its own way, and that decides ho
 - **llama-server** in router mode reports `loaded` and `loading` for each model, but nothing for a model being unloaded, which reads as loaded until it is gone. In single-model mode its one model is loaded once the server has finished starting.
 - **LM Studio** lists the models it has loaded, and none as loading, so a load is visible only through the gateway's own requests, described after this list; it does list the model it is loading as loaded from the moment the load begins.
 - **LocalAI** and **Ollama** list a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
-- **OpenAI's API**, like any hosted API, loads nothing: every model it lists counts as loaded while it answers.
+- **OpenAI's API** and **Anthropic's Claude API**, like any hosted API, load nothing: every model they list counts as loaded while they answer.
 - **Open WebUI** passes on what its connections report, which varies by connection; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). A model whose state it can't report is **unknown**: it counts as not loaded, so only `loadIfNone` can pick it, and the log says `state unknown`.
 
 On top of what a backend reports, a model counts as starting while a request the gateway forwarded to it is waiting for the model: until the response headers arrive, or for Open WebUI, until the reply's first output appears.
@@ -302,7 +302,7 @@ If a facade's candidates span two or more backends with `passthroughAuth`, the g
 
 ### Responses and errors
 
-A response from llama-swap, llama-server, LM Studio, LocalAI, Ollama or OpenAI's API is passed on with its status, content type and body, and a stream is relayed event by event.
+A response from llama-swap, llama-server, LM Studio, LocalAI, Ollama or a hosted API is passed on with its status, content type and body, and a stream is relayed event by event.
 Of the backend's other headers, only `Retry-After` is passed on, so a client refused with `429` or `503` knows when to try again; the rest describe the backend or the connection to it.
 Responses from Open WebUI are assembled by the gateway from the chat it ran; see [Open WebUI](#open-webui).
 Whenever a model was chosen, the response has an `X-Gateway-Target` header naming it.
@@ -324,7 +324,7 @@ If the backend fails mid-stream, the gateway sends a final `data: {"error": {...
 
 The config is YAML.
 `config.example.yaml` is a complete setup with two facades: `task-monkey` for Open WebUI background tasks, and `assistant` for a Home Assistant voice assistant that uses whichever `:Assistant` preset llama-swap has loaded.
-It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi` and `openAI` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
+It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAI` and `anthropic` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets; there is no other substitution.
@@ -360,7 +360,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi` or `openAI`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAI` or `anthropic`.
 All take these keys:
 
 | Key | Description |
@@ -468,6 +468,32 @@ A candidate on it is ready whenever the API answers, so the first such candidate
 The model list includes the API's embedding, image and audio models, since `/v1/models` doesn't say what each one does.
 
 These are from OpenAI's API documentation; the model list and a chat were checked against the API.
+
+#### Anthropic
+
+An `anthropic` backend is Anthropic's Claude API, `https://api.anthropic.com`, reached through its Messages API: the gateway translates each Chat Completions request into a Messages request, and the response, whole or streamed, back into a chat completion.
+Its models come from `/v1/models`, and it counts them as loaded exactly as an `openAI` backend does: every listed model while the API answers, with the list read again after a failed request or once older than `stateCacheSeconds`, so a candidate placed after the local candidates is used when none of them is loaded.
+It takes no keys beyond the shared ones; `apiKey` is a Claude API key.
+A key that isn't scoped to one workspace needs Anthropic's `anthropic-workspace-id` header, which the gateway doesn't send, so use a workspace key.
+
+The translation keeps what a Chat Completions client relies on:
+
+- System and developer messages become the Messages system prompt, wherever they stand in the conversation.
+- Tools, tool calls and tool results, images by URL or base64 data URL, and inline PDF files translate both ways.
+- `max_completion_tokens` or `max_tokens` becomes `max_tokens`; a request without either gets the model's output cap, since the Claude API requires one.
+- `stop`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort` (as `output_config.effort`), a `json_schema` `response_format` and `user` translate to their Messages counterparts; `temperature`, `top_p` and `top_k` pass on as they are.
+- Thinking comes back as `reasoning_content`, as llama-server reports it; cache reads count into `prompt_tokens` and again as `cached_tokens`.
+- An API error keeps its status and `Retry-After`, with its message in OpenAI's error shape.
+
+Fields that only tune sampling or configure OpenAI's own services, such as `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `store` and `service_tier`, are dropped, since the Claude API refuses fields it doesn't know.
+A request that asks for what the Claude API can't give is refused with `400` before it is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, or a tool that isn't a function.
+
+Any other key passes on unchanged, so a facade's params can set Messages fields the translation doesn't cover, such as `thinking: {display: summarized}` to see a summary of Claude's thinking, `cache_control` to turn on prompt caching, or `output_config`, whose keys win over a translated `reasoning_effort`.
+Claude 5 models think by default, which counts towards `max_tokens`.
+A client can't send thinking back, since Chat Completions has no place for the signature it needs, so in a tool loop Claude continues without its earlier reasoning.
+The Claude API has no legacy `/v1/completions`; such a request fails with `502`.
+
+These are from Anthropic's API documentation (read 2026-11-01); the model list, chats, streams and tool loops were checked against the API.
 
 #### Open WebUI
 

@@ -177,17 +177,7 @@ func (b *Backend) Pending(model string) (release func()) {
 
 // Chat posts the request to its OpenAI endpoint path on the backend.
 func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	accept := ""
-	if req.Stream {
-		accept = "text/event-stream"
-	}
-	release := c.state.Pending(req.StateModel())
-	resp, err := c.Do(ctx, http.MethodPost, string(req.Endpoint), req.Body, accept, req.Client)
-	release()
-	// A client that left isn't the backend failing.
-	if c.failed != nil && (err != nil && !errors.Is(err, context.Canceled) || err == nil && resp.StatusCode >= 500) {
-		c.failed()
-	}
+	resp, err := c.Send(ctx, req, string(req.Endpoint), nil)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -203,10 +193,34 @@ func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.Cha
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body, RetryAfter: resp.Header.Get("Retry-After")}}, nil
 }
 
+// Send posts the request's body to path with these extra headers, as Chat
+// does for its own endpoint: counted as pending until the response headers
+// arrive, and reported to NewListedBackend's hook if the backend fails it. An
+// adapter whose backend has its own chat endpoint, such as the Claude API's
+// Messages, sends its translated body through it.
+func (c *Client) Send(ctx context.Context, req backend.ChatRequest, path string, header http.Header) (*http.Response, error) {
+	accept := ""
+	if req.Stream {
+		accept = "text/event-stream"
+	}
+	release := c.state.Pending(req.StateModel())
+	resp, err := c.do(ctx, http.MethodPost, path, req.Body, accept, header, req.Client)
+	release()
+	// A client that left isn't the backend failing.
+	if c.failed != nil && (err != nil && !errors.Is(err, context.Canceled) || err == nil && resp.StatusCode >= 500) {
+		c.failed()
+	}
+	return resp, err
+}
+
 // Do sends one request made on a client's behalf, with JSON body if body
 // isn't nil. With passthroughAuth it carries the client's own credential, or
 // none: a keyless client never borrows the backend's apiKey.
 func (c *Client) Do(ctx context.Context, method, path string, body []byte, accept string, client backend.Client) (*http.Response, error) {
+	return c.do(ctx, method, path, body, accept, nil, client)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body []byte, accept string, header http.Header, client backend.Client) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -226,6 +240,9 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, accep
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	for k, v := range header {
+		req.Header[k] = v
 	}
 	resp, err := c.client.Do(req)
 	return resp, plainURLError(err)
@@ -278,11 +295,20 @@ func (c *Client) CloseIdleConnections() {
 // GetJSON serves the state and model-list calls, which must fail fast rather
 // than wait out a chat-length timeout, so it applies stateTimeout itself.
 func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
+	return c.GetJSONWith(ctx, path, nil, out)
+}
+
+// GetJSONWith is GetJSON with extra request headers, for a backend whose own
+// endpoints need them, such as the Claude API's anthropic-version.
+func (c *Client) GetJSONWith(ctx context.Context, path string, header http.Header, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, c.stateTimeout)
 	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
+	}
+	for k, v := range header {
+		req.Header[k] = v
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

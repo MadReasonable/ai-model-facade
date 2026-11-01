@@ -304,6 +304,85 @@ func TestOpenAI_ListsModelsAndRefusesAnUnknownOne(t *testing.T) {
 	})
 }
 
+// The Claude API takes a bearer token on both endpoints the gateway uses. It
+// lists its models only with an anthropic-version header, a page at a time,
+// each page saying whether another follows and which model the next one
+// starts after, and each model its output cap as max_tokens.
+func TestAnthropic_PagesItsModelsWithTheirOutputCaps(t *testing.T) {
+	forEachAnthropic(t, func(t *testing.T, b HostedDriver) {
+		auth := map[string]string{"Authorization": "Bearer " + b.Key()}
+		if status, body := hostedCall(t, b, http.MethodGet, "/v1/models", "", auth); status != http.StatusBadRequest || !strings.Contains(body, "anthropic-version") {
+			t.Errorf("models without anthropic-version: %d %.500s", status, body)
+		}
+		auth["Anthropic-Version"] = "2023-06-01"
+		_, first := hostedCall(t, b, http.MethodGet, "/v1/models?limit=1", "", auth)
+		last := gjson.Get(first, "last_id").String()
+		if gjson.Get(first, "data.#").Int() != 1 || gjson.Get(first, "data.0.type").String() != "model" || gjson.Get(first, "data.0.max_tokens").Int() <= 0 || !gjson.Get(first, "has_more").Bool() || last != gjson.Get(first, "data.0.id").String() {
+			t.Errorf("first page: %.500s", first)
+		}
+		_, second := hostedCall(t, b, http.MethodGet, "/v1/models?limit=1&after_id="+last, "", auth)
+		if id := gjson.Get(second, "data.0.id").String(); id == "" || id == last {
+			t.Errorf("second page: %.500s", second)
+		}
+	})
+}
+
+// The Messages API needs anthropic-version too, refuses a field it doesn't
+// know and a missing max_tokens with 400 and a model it doesn't list with
+// 404, in its error shape. It answers a chat with a message of content
+// blocks, a stop reason and usage, or, streamed, with message_start first,
+// a text delta, message_delta with the stop reason, and message_stop last.
+func TestAnthropic_AnswersMessagesWholeOrStreamed(t *testing.T) {
+	forEachAnthropic(t, func(t *testing.T, b HostedDriver) {
+		auth := map[string]string{"Authorization": "Bearer " + b.Key()}
+		model := strconv.Quote(b.Model())
+		chat := `{"model":` + model + `,"messages":[{"role":"user","content":"Say ok."}],"max_tokens":256}`
+		refusals := []struct {
+			what, body, header string
+			status             int
+			want               string
+		}{
+			{"no anthropic-version", chat, "", http.StatusBadRequest, "anthropic-version"},
+			{"an unknown field", `{"model":` + model + `,"max_tokens":5,"seed":1,"messages":[{"role":"user","content":"hi"}]}`, "2023-06-01", http.StatusBadRequest, "seed: Extra inputs are not permitted"},
+			{"no max_tokens", `{"model":` + model + `,"messages":[{"role":"user","content":"hi"}]}`, "2023-06-01", http.StatusBadRequest, "max_tokens: Field required"},
+			{"an unknown model", `{"model":"claude-nope","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, "2023-06-01", http.StatusNotFound, "not_found_error"},
+		}
+		for _, r := range refusals {
+			delete(auth, "Anthropic-Version")
+			if r.header != "" {
+				auth["Anthropic-Version"] = r.header
+			}
+			status, body := hostedCall(t, b, http.MethodPost, "/v1/messages", r.body, auth)
+			if status != r.status || gjson.Get(body, "type").String() != "error" || !strings.Contains(body, r.want) {
+				t.Errorf("%s: %d %.500s", r.what, status, body)
+			}
+		}
+		auth["Anthropic-Version"] = "2023-06-01"
+		status, body := hostedCall(t, b, http.MethodPost, "/v1/messages", chat, auth)
+		if status != http.StatusOK || gjson.Get(body, "type").String() != "message" || gjson.Get(body, `content.#(type=="text").text`).String() == "" || gjson.Get(body, "stop_reason").String() == "" || !gjson.Get(body, "usage.output_tokens").Exists() {
+			t.Errorf("a chat: %d %.500s", status, body)
+		}
+		streamed := strings.Replace(chat, `"max_tokens"`, `"stream":true,"max_tokens"`, 1)
+		status, body = hostedCall(t, b, http.MethodPost, "/v1/messages", streamed, auth)
+		var events []string
+		var stopReason string
+		text := false
+		for _, line := range strings.Split(body, "\n") {
+			if data, ok := strings.CutPrefix(line, "data: "); ok {
+				event := gjson.Parse(data)
+				events = append(events, event.Get("type").String())
+				text = text || event.Get("delta.type").String() == "text_delta"
+				if event.Get("type").String() == "message_delta" {
+					stopReason = event.Get("delta.stop_reason").String()
+				}
+			}
+		}
+		if status != http.StatusOK || len(events) < 2 || events[0] != "message_start" || events[len(events)-1] != "message_stop" || !text || stopReason == "" {
+			t.Errorf("a streamed chat: %d, events %v, stop reason %q", status, events, stopReason)
+		}
+	})
+}
+
 // Open WebUI lists each model of its connections as the entry builders
 // build it, with its connection's state: Ollama's with Ollama's loaded flag,
 // and llama-swap's base models and presets with llama-swap's status; and a

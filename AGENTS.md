@@ -1,7 +1,7 @@
 # ai-model-facade
 
 An OpenAI-compatible gateway that serves facades: model names that exist only in its config.
-A client asks for a facade such as `task`; the gateway picks a real model from that facade's candidate list, based on which models its backends have loaded, patches the request with the configured params, and forwards it through a backend adapter (llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI or OpenAI's API).
+A client asks for a facade such as `task`; the gateway picks a real model from that facade's candidate list, based on which models its backends have loaded, patches the request with the configured params, and forwards it through a backend adapter (llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI's API or Anthropic's Claude API).
 A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side tools: the `openwebui` adapter runs Open WebUI's multi-request chat flow and returns one ordinary response or stream, so its polling, synthesized responses and route field are the point of that adapter, not inconsistencies to remove.
 
 - `README.md` describes what the gateway does, for users.
@@ -24,7 +24,7 @@ A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side
 These hold everywhere, and the code relies on them.
 Each has its reasoning in `docs/agents-design.md`, in the section named after it.
 
-1. **Bodies pass through as raw bytes** (Request bodies). Request and response bodies are never decoded into Go structs or maps: read with `gjson`, edit with `sjson`, forward the bytes. Unknown fields, key order, formatting and number precision survive; only patched keys change. The Open WebUI adapter's synthesized response is the one exception.
+1. **Bodies pass through as raw bytes** (Request bodies). Request and response bodies are never decoded into Go structs or maps: read with `gjson`, edit with `sjson`, forward the bytes. Unknown fields, key order, formatting and number precision survive; only patched keys change. Two adapters are the exceptions: Open WebUI's synthesized response, and the Anthropic adapter's translation to and from the Messages API.
 2. **Params are merge patches** (Params as merge patches). Every `params` value is applied as JSON Merge Patch (RFC 7386): objects merge recursively, scalars and arrays replace, `null` deletes. `params` may be a map or a list of maps applied in order. Never completely replace a top-level key; that is the llama-swap behaviour this project exists to avoid.
 3. **Fixed order of application:** client body, then the facade's `params`, then the winning candidate's `params`, then `model` rewritten to the chosen ID. Gateway params override the client.
 4. **Key order is kept** (The walker). Existing body keys stay in place; keys a patch adds are appended to their object in config order. Patches are built from the `yaml.Node` tree, never from a Go map.
@@ -63,7 +63,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/mergepatch`: params compiled from YAML and applied to raw bodies.
 - `internal/backend`: the interfaces adapters implement, optional capabilities (`backend.Has`), and the context helpers for sharing state reads.
 - `internal/backend/openaihttp`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
-- `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.
+- `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.
 - `internal/testkit`: fake backends. Tests live in the package they test; see `CONTRIBUTING.md`.
 
 ## Program commands
