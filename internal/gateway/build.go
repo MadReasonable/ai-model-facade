@@ -16,6 +16,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend/lmstudio"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/localai"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/openai"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
@@ -245,6 +246,8 @@ func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 		return localai.New(e)
 	case "ollama":
 		return ollama.New(e)
+	case "openAI":
+		return openai.New(e)
 	case "openWebUi":
 		return openwebui.New(e, log.With("backend", e.Name))
 	case "":

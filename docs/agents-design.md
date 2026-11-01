@@ -199,7 +199,7 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio`, `localai` and `ollama` are built on it.
+Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` are built on it.
 An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
 A request is released when its response headers arrive, since llama-swap, llama-server's router, LM Studio, LocalAI and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, on llama-server b11580, on LM Studio's llmster 0.0.25-1 and on LocalAI v4.11.0).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
@@ -223,7 +223,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer`, `lmStudio`, `localAI` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama` and `openAI` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
@@ -334,6 +334,23 @@ So a facade turning thinking off on Ollama needs params of its own, not the ones
 
 Decided: model IDs are the exact `name:tag` that Ollama lists.
 A bare name is not mapped to `name:latest`, which would be implicit matching by ID; instead, startup suggests the listed IDs with a tag.
+
+### OpenAI
+
+OpenAI's API serves Chat Completions and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl`.
+Everything here is from OpenAI's API documentation; the testkit's live claim, run with `OPENAI_API_KEY` set, checked the model list, a chat and the refusal of an unknown model against the API.
+
+A hosted model needs no load, so every model `/v1/models` lists is ready while the API answers.
+The state is the latest list (`openaihttp.ListedState`), read at startup and on a reload, and read again in two cases: when a request to the API gets no answer or a 5xx, which drops the list and the cached state, and when the list is older than `stateCacheSeconds`, if that is set.
+A listing that fails leaves no list, so the backend reads as unavailable and selection passes over its candidates, and every state read lists again until one succeeds.
+So a healthy API costs no call per request, an outage costs one listing per request until it ends, and a backend that goes away stops ending the walk through a facade's list.
+A client that leaves mid-request isn't the API failing, so it drops nothing; a 429 doesn't either, since it means not now rather than down, and it is passed on with its `Retry-After`.
+Decided against: reading `/v1/models` on every state read, which with the default `stateCacheSeconds: 0` is a call to the API on every request, adding its latency to each and counting against its rate limits, to report a list that rarely changes.
+Decided against: the latest list standing until a reload, which kept an API that had gone down reading as ready, so every request picked for it failed.
+Limit: the request that finds the outage still fails with 502; there is no failover.
+
+A candidate that is ready ends the walk through a facade's list wherever it sits, so a hosted candidate placed after the local ones acts as the fallback without `loadIfNone`.
+The list holds embedding, image and audio models too, since `/v1/models` doesn't say what each does.
 
 ### Open WebUI
 

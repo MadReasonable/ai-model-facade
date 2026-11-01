@@ -95,6 +95,17 @@ backends:
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
 
+  # OpenAI's API takes them too, and so does another hosted API that serves
+  # Chat Completions, such as OpenRouter's, at its own baseUrl. Every model
+  # it lists counts as loaded while it answers, so put its candidates after
+  # the local ones.
+  # openAI:
+  #   type: openAI
+  #   baseUrl: https://api.openai.com
+  #   apiKey: ${OPENAI_API_KEY}
+  #   stateCacheSeconds: 60         # how often to check the API still answers; 0: only after a failed request
+  #   requestTimeoutSeconds: 180
+
   # An Open WebUI backend runs each request through Open WebUI's own chat
   # flow, so Open WebUI's tools run on its server and any client gets them.
   # openWebUi:

@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
@@ -49,6 +50,7 @@ type Client struct {
 	listRetry    time.Duration
 	client       *http.Client
 	state        *StateCache // set by trackPending
+	failed       func()      // set by NewListedBackend: a request got no answer or a 5xx
 }
 
 func NewClient(c Config) (*Client, error) {
@@ -114,20 +116,50 @@ type Backend struct {
 // isn't called before NewBackend returns, so it may be a method of the
 // adapter that embeds the result.
 func NewBackend(entry config.Entry, fetch func(ctx context.Context) ([]backend.ModelInfo, error)) (*Backend, error) {
+	c, err := decodeEntry(entry)
+	if err != nil {
+		return nil, err
+	}
+	client, err := NewClient(c)
+	if err != nil {
+		return nil, err
+	}
+	state := NewStateCache(c, fetch)
+	client.trackPending(state)
+	return &Backend{Client: client, State: state}, nil
+}
+
+// NewListedBackend builds a Backend for an API that loads nothing, such as a
+// hosted one, whose state is a ListedState on list. A request to it that
+// gets no answer or a 5xx drops the list and the cached state, so the next
+// state read finds out whether the API still answers.
+func NewListedBackend(entry config.Entry, list func(ctx context.Context) ([]backend.ModelInfo, error)) (*Backend, *ListedState, error) {
+	c, err := decodeEntry(entry)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := NewClient(c)
+	if err != nil {
+		return nil, nil, err
+	}
+	listed := &ListedState{maxAge: seconds(c.StateCacheSeconds), list: list}
+	state := NewStateCache(c, listed.State)
+	client.trackPending(state)
+	client.failed = func() {
+		listed.Drop()
+		state.Invalidate()
+	}
+	return &Backend{Client: client, State: state}, listed, nil
+}
+
+// decodeEntry decodes a config entry that takes Config's keys and its type.
+func decodeEntry(entry config.Entry) (Config, error) {
 	var c struct {
 		Type   string `yaml:"type"`
 		Config `yaml:",inline"`
 	}
-	if err := config.DecodeStrict(entry.Node, &c); err != nil {
-		return nil, err
-	}
-	client, err := NewClient(c.Config)
-	if err != nil {
-		return nil, err
-	}
-	state := NewStateCache(c.Config, fetch)
-	client.trackPending(state)
-	return &Backend{Client: client, State: state}, nil
+	err := config.DecodeStrict(entry.Node, &c)
+	return c.Config, err
 }
 
 // LoadedModels returns the models the backend reports, followed by the
@@ -152,6 +184,10 @@ func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.Cha
 	release := c.state.Pending(req.StateModel())
 	resp, err := c.Do(ctx, http.MethodPost, string(req.Endpoint), req.Body, accept, req.Client)
 	release()
+	// A client that left isn't the backend failing.
+	if c.failed != nil && (err != nil && !errors.Is(err, context.Canceled) || err == nil && resp.StatusCode >= 500) {
+		c.failed()
+	}
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -282,6 +318,53 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	return req, nil
+}
+
+// ListedState is the state of a backend that loads nothing, such as a hosted
+// API: every model it lists is ready while it answers. A state read answers
+// from the latest list, so a request costs a healthy API no call of its own.
+// The list is read again when a request to the backend fails (Drop, wired by
+// NewListedBackend), and when it is older than stateCacheSeconds, if that is
+// set, so a backend that has gone away stops reading as ready. A listing
+// that fails leaves no list, so the backend reads as unavailable, and
+// selection passes over its candidates, until a listing succeeds; meanwhile
+// each state read lists again.
+type ListedState struct {
+	maxAge time.Duration // 0: never read again because of its age
+	list   func(ctx context.Context) ([]backend.ModelInfo, error)
+	latest atomic.Pointer[listing]
+}
+
+// listing is one successful list and when it was read.
+type listing struct {
+	models []backend.ModelInfo
+	at     time.Time
+}
+
+// List calls the backend for its models and keeps them as its state, or
+// keeps no list if the call fails.
+func (l *ListedState) List(ctx context.Context) ([]backend.ModelInfo, error) {
+	models, err := l.list(ctx)
+	if err != nil {
+		l.latest.Store(nil)
+		return nil, err
+	}
+	l.latest.Store(&listing{models: models, at: time.Now()})
+	return models, nil
+}
+
+// State returns the latest list, or lists the backend if there is none or it
+// is too old.
+func (l *ListedState) State(ctx context.Context) ([]backend.ModelInfo, error) {
+	if latest := l.latest.Load(); latest != nil && (l.maxAge == 0 || time.Since(latest.at) < l.maxAge) {
+		return latest.models, nil
+	}
+	return l.List(ctx)
+}
+
+// Drop forgets the list, so the next state read lists the backend again.
+func (l *ListedState) Drop() {
+	l.latest.Store(nil)
 }
 
 // StateCache implements backend.ModelStateProvider's LoadedModels on top of an

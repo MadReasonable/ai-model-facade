@@ -282,6 +282,28 @@ func localAILoaded(t *testing.T, b Driver) string {
 	return strings.Join(ids, ",")
 }
 
+// OpenAI lists each model with its object and owner, answers a chat for a
+// listed model, and refuses one it doesn't list with 404 and the code
+// model_not_found, which the gateway passes on.
+func TestOpenAI_ListsModelsAndRefusesAnUnknownOne(t *testing.T) {
+	forEachOpenAI(t, func(t *testing.T, b HostedDriver) {
+		auth := map[string]string{"Authorization": "Bearer " + b.Key()}
+		_, models := hostedCall(t, b, http.MethodGet, "/v1/models", "", auth)
+		entry := gjson.Get(models, `data.#(id==`+strconv.Quote(b.Model())+`)`)
+		if gjson.Get(models, "object").String() != "list" || entry.Get("object").String() != "model" || !entry.Get("owned_by").Exists() {
+			t.Errorf("models: %.500s", models)
+		}
+		chat := `{"model":` + strconv.Quote(b.Model()) + `,"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}`
+		if status, body := hostedCall(t, b, http.MethodPost, "/v1/chat/completions", chat, auth); status != http.StatusOK {
+			t.Errorf("a chat: %d %.500s", status, body)
+		}
+		unknown := `{"model":"no-such-model","messages":[{"role":"user","content":"hi"}]}`
+		if status, body := hostedCall(t, b, http.MethodPost, "/v1/chat/completions", unknown, auth); status != http.StatusNotFound || gjson.Get(body, "error.code").String() != "model_not_found" {
+			t.Errorf("an unknown model: %d %.500s", status, body)
+		}
+	})
+}
+
 // Open WebUI lists each model of its connections as the entry builders
 // build it, with its connection's state: Ollama's with Ollama's loaded flag,
 // and llama-swap's base models and presets with llama-swap's status; and a

@@ -3,7 +3,9 @@ package testkit
 import (
 	"io"
 	"net/http"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -327,4 +329,75 @@ func (f *fakeOpenWebUI) Models(t *testing.T) string {
 	entries = append(entries, WorkspaceEntry("openWebUi-llm-1:NoThink", "ollama-llm-1:latest", ollama["ollama-llm-1:latest"]))
 	f.SetModels(entries...)
 	return get(t, f.URL+"/api/models?refresh=true")
+}
+
+// A hosted API has no dev-env backend and no state to set, so its claims run
+// against the fake, then against the real API when its key variable is set,
+// at the cost of a few tokens a run:
+//
+//	OPENAI_API_KEY=... go test ./internal/testkit/ -run /live
+
+// HostedDriver is a hosted API under a claim, fake or live: where it is, the
+// key to send, and a model it serves.
+type HostedDriver interface {
+	URL() string
+	Key() string
+	Model() string
+}
+
+// forEachHosted runs claim against the fake that fake builds, then against
+// the real API at url with the key in keyVar, skipping it without one. The
+// live model is modelVar's, else model.
+func forEachHosted(t *testing.T, keyVar, url, modelVar, model string, fake func(t *testing.T) HostedDriver, claim func(t *testing.T, b HostedDriver)) {
+	t.Run("fake", func(t *testing.T) { claim(t, fake(t)) })
+	t.Run("live", func(t *testing.T) {
+		key := os.Getenv(keyVar)
+		if key == "" {
+			t.Skip("set " + keyVar + " to check the real API")
+		}
+		if m := os.Getenv(modelVar); m != "" {
+			model = m
+		}
+		claim(t, hosted{url: url, key: key, model: model})
+	})
+}
+
+// hosted is a hosted API under a claim, fake or live.
+type hosted struct{ url, key, model string }
+
+func (h hosted) URL() string   { return h.url }
+func (h hosted) Key() string   { return h.key }
+func (h hosted) Model() string { return h.model }
+
+// hostedCall sends a request to the hosted API with these headers, and
+// returns its status and body, status 0 if it got no answer.
+func hostedCall(t *testing.T, b HostedDriver, method, path, body string, header map[string]string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, b.URL()+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Error(err)
+		return 0, ""
+	}
+	defer resp.Body.Close()
+	answer, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(answer)
+}
+
+// OpenAI's API, live at api.openai.com with OPENAI_API_KEY; its live model
+// defaults to gpt-5-mini, or OPENAI_LIVE_MODEL.
+
+func forEachOpenAI(t *testing.T, claim func(t *testing.T, b HostedDriver)) {
+	forEachHosted(t, "OPENAI_API_KEY", "https://api.openai.com", "OPENAI_LIVE_MODEL", "gpt-5-mini", func(t *testing.T) HostedDriver {
+		return hosted{url: NewOpenAI(t, "gpt-5-mini").URL, key: "test-key", model: "gpt-5-mini"}
+	}, claim)
 }

@@ -8,7 +8,7 @@ Models, quants and even backends can be swapped without any change on the client
 
 It is one static binary and one YAML file, with no runtime dependencies.
 The smallest useful config is a backend address and one facade mapped to one model.
-Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [LocalAI](https://localai.io), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
+Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [LocalAI](https://localai.io), [Ollama](https://ollama.com), [Open WebUI](https://openwebui.com) and OpenAI's API at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
 
 > [!NOTE]
 > **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
@@ -30,7 +30,7 @@ A facade moves that decision out of every client and into one place, where it is
 ## Quick Start
 
 This walkthrough uses llama-swap as the backend, so you need a running instance.
-llama-server, LM Studio, LocalAI, Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
+llama-server, LM Studio, LocalAI, Ollama, Open WebUI and OpenAI's API differ only in their `backends` entry; see [Configuration](#configuration).
 You need a binary from the [releases page](https://github.com/MadReasonable/ai-model-facade/releases), Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
 
 ```bash
@@ -219,6 +219,7 @@ Each backend reports which models are loaded in its own way, and that decides ho
 - **llama-server** in router mode reports `loaded` and `loading` for each model, but nothing for a model being unloaded, which reads as loaded until it is gone. In single-model mode its one model is loaded once the server has finished starting.
 - **LM Studio** lists the models it has loaded, and none as loading, so a load is visible only through the gateway's own requests, described after this list; it does list the model it is loading as loaded from the moment the load begins.
 - **LocalAI** and **Ollama** list a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
+- **OpenAI's API**, like any hosted API, loads nothing: every model it lists counts as loaded while it answers.
 - **Open WebUI** passes on what its connections report, which varies by connection; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). A model whose state it can't report is **unknown**: it counts as not loaded, so only `loadIfNone` can pick it, and the log says `state unknown`.
 
 On top of what a backend reports, a model counts as starting while a request the gateway forwarded to it is waiting for the model: until the response headers arrive, or for Open WebUI, until the reply's first output appears.
@@ -301,7 +302,7 @@ If a facade's candidates span two or more backends with `passthroughAuth`, the g
 
 ### Responses and errors
 
-A response from llama-swap, llama-server, LM Studio, LocalAI or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
+A response from llama-swap, llama-server, LM Studio, LocalAI, Ollama or OpenAI's API is passed on with its status, content type and body, and a stream is relayed event by event.
 Of the backend's other headers, only `Retry-After` is passed on, so a client refused with `429` or `503` knows when to try again; the rest describe the backend or the connection to it.
 Responses from Open WebUI are assembled by the gateway from the chat it ran; see [Open WebUI](#open-webui).
 Whenever a model was chosen, the response has an `X-Gateway-Target` header naming it.
@@ -323,7 +324,7 @@ If the backend fails mid-stream, the gateway sends a final `data: {"error": {...
 
 The config is YAML.
 `config.example.yaml` is a complete setup with two facades: `task-monkey` for Open WebUI background tasks, and `assistant` for a Home Assistant voice assistant that uses whichever `:Assistant` preset llama-swap has loaded.
-It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama` and `openWebUi` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
+It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi` and `openAI` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets; there is no other substitution.
@@ -359,7 +360,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama` or `openWebUi`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi` or `openAI`.
 All take these keys:
 
 | Key | Description |
@@ -446,6 +447,27 @@ Ollama itself ignores `apiKey`, but a proxy in front of it may need one.
 
 Model IDs are the full `name:tag` form that `ollama list` shows, such as `llama3:latest`.
 A candidate without a tag, such as `llama3`, isn't treated as `llama3:latest`; the startup check warns about it and suggests the tagged IDs Ollama lists.
+
+#### OpenAI
+
+An `openAI` backend is OpenAI's API, `https://api.openai.com`, or another hosted API that serves Chat Completions the same way, such as OpenRouter's, at its own `baseUrl`.
+Its models come from `/v1/models`, and every model listed counts as loaded while the API answers, since a hosted model needs no load.
+It takes no keys beyond the shared ones; `apiKey` is the API key.
+
+The gateway reads the list when it starts or reloads, and a request doesn't read it again, so a healthy API costs no state call per request.
+It reads the list again in two cases, so an API that goes down stops counting as loaded:
+
+- A request to the API gets no answer, or a `5xx`. That request still fails with `502`, since there is no failover, but the next request finds out whether the API answers.
+- The list is older than `stateCacheSeconds`, if that is set, so an outage shows within that time even before a request fails. With the default of `0`, only a failed request makes it check.
+
+While the list can't be read, the backend's candidates count as `state unavailable`, and selection passes over them; each request then tries the list again, so the backend is back as soon as the API answers.
+A `429` rate limit doesn't count as down: it is passed on with its `Retry-After`.
+A model the API adds becomes a candidate the next time the list is read.
+
+A candidate on it is ready whenever the API answers, so the first such candidate a list reaches wins, and the candidates after it are never reached; one placed after the local candidates is used when none of them is loaded, with no `loadIfNone` needed.
+The model list includes the API's embedding, image and audio models, since `/v1/models` doesn't say what each one does.
+
+These are from OpenAI's API documentation; the model list and a chat were checked against the API.
 
 #### Open WebUI
 
