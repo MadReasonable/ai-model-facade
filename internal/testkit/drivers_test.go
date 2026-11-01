@@ -216,6 +216,29 @@ func (f *fakeLMStudio) HoldLoads(t *testing.T) (release func()) {
 	return f.LMStudio.HoldLoads().Open
 }
 
+// LocalAI, as dev-env/ runs it: three models, the first with an alias, and
+// a limit of two loaded models (dev-env/config.yaml).
+
+var devLocalAI = []string{"localai-llm-1", "localai-llm-2", "localai-llm-3"}
+
+func forEachLocalAI(t *testing.T, claim func(t *testing.T, b Driver)) {
+	forEach(t, "localAI", "LOCALAI_PORT", "18086", func(t *testing.T) Driver {
+		f := NewLocalAI(t, 2, devLocalAI...)
+		f.SetAlias("localai-llm-1:alias", "localai-llm-1")
+		return &fakeLocalAI{f}
+	}, claim)
+}
+
+type fakeLocalAI struct{ *LocalAI }
+
+func (f *fakeLocalAI) URL() string                     { return f.LocalAI.URL }
+func (f *fakeLocalAI) Reset(t *testing.T)              { f.SetLoaded() }
+func (f *fakeLocalAI) Load(t *testing.T, model string) { f.SetLoaded(model) }
+
+func (f *fakeLocalAI) HoldLoads(t *testing.T) (release func()) {
+	return f.LocalAI.HoldLoads().Open
+}
+
 // Open WebUI, as dev-env/ runs it: connected to llama-swap and Ollama, with
 // one workspace model on Ollama's first (dev-env/config.yaml).
 

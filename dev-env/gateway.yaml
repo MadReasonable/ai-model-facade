@@ -39,6 +39,11 @@ backends:
     baseUrl: http://127.0.0.1:18085
     requestTimeoutSeconds: 60
 
+  localAI:
+    type: localAI
+    baseUrl: http://127.0.0.1:18086
+    requestTimeoutSeconds: 60
+
   llamaSwap:
     type: llamaSwap
     baseUrl: http://127.0.0.1:18082
@@ -97,6 +102,16 @@ models:
     candidates:
       - model: lmstudio-llm-1
       - model: lmstudio-llm-2
+        loadIfNone: true
+
+  # The same on LocalAI, which holds two models at once, as dev-env sets it
+  # up, so a request for localai-llm-3 evicts one of them, the one used least
+  # recently.
+  localai:
+    backend: localAI
+    candidates:
+      - model: localai-llm-1
+      - model: localai-llm-2
         loadIfNone: true
 
   # The same on Ollama.

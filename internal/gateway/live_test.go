@@ -28,6 +28,7 @@ var devPorts = map[string][2]string{
 	"ollama":      {"OLLAMA_PORT", "18083"},
 	"openWebUi":   {"OPEN_WEBUI_PORT", "18084"},
 	"lmStudio":    {"LM_STUDIO_PORT", "18085"},
+	"localAI":     {"LOCALAI_PORT", "18086"},
 }
 
 // liveGateway is dev-env/gateway.yaml served in-process, with the backends
@@ -107,6 +108,7 @@ func TestLive_UsesTheLoadedCandidateElseLoadsTheFallback(t *testing.T) {
 		{"swap", "llamaSwap", nil, "llamaSwap-llm-1", "llamaSwap-llm-2"},
 		{"router", "llamaRouter", nil, "llamaRouter-llm-1", "llamaRouter-llm-2"},
 		{"lmstudio", "lmStudio", nil, "lmstudio-llm-1", "lmstudio-llm-2"},
+		{"localai", "localAI", nil, "localai-llm-1", "localai-llm-2"},
 		{"ollama", "ollama", nil, "ollama-llm-1:latest", "ollama-llm-2:latest"},
 		{"webui", "ollama", []string{"openWebUi"}, "ollama-llm-1:latest", "ollama-llm-2:latest"},
 	}
@@ -209,6 +211,35 @@ func TestLive_LMStudioLoadIsNotAborted(t *testing.T) {
 	}
 	<-first.done
 	if r := first.resp; r.Response == nil || r.StatusCode != http.StatusOK || r.target() != "lmstudio-llm-2" {
+		t.Errorf("the request that started the load: %+v", r)
+	}
+}
+
+// While LocalAI, with its limit on loaded models, loads a model for one
+// of the gateway's requests, the gateway sends it nothing, since any request
+// for a model that isn't loaded, the loading one included, would evict it:
+// facades on it find it busy, and the request that started the load is
+// answered. LocalAI shows no load under way, so the check gives the first
+// request 300 ms to start its load, which takes seconds.
+func TestLive_LocalAILoadIsNotEvicted(t *testing.T) {
+	gw := startDevGateway(t, `
+  localai-3:
+    backend: localAI
+    candidates:
+      - model: localai-llm-3
+        loadIfNone: true
+`, "localAI")
+	b := gw.backends["localAI"]
+	b.Reset(t)
+	first := gw.askInBackground(t, "localai")
+	time.Sleep(300 * time.Millisecond)
+	for _, facade := range []string{"localai-3", "localai"} {
+		if r := gw.ask(t, facade); r.StatusCode != http.StatusServiceUnavailable || !strings.Contains(r.body, "no_candidate_loaded") {
+			t.Errorf("%s during the load: %d, target %q: %s", facade, r.StatusCode, r.target(), r.body)
+		}
+	}
+	<-first.done
+	if r := first.resp; r.Response == nil || r.StatusCode != http.StatusOK || r.target() != "localai-llm-2" {
 		t.Errorf("the request that started the load: %+v", r)
 	}
 }

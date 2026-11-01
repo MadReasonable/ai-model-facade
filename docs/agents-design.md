@@ -148,7 +148,7 @@ A model that is stopping or stopped never counts, since a request to it would lo
 A model whose state can't be read counts as not loaded, so only `loadIfNone` can pick it.
 
 A backend that serves nothing until a load ends is skipped whole while it loads: a request sent then would fail, so none of its candidates is waited on or picked as the fallback.
-An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503 and LM Studio's for a 500.
+An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503, LM Studio's for a 500, and LocalAI's, under a limit on loaded models, for a load of the gateway's under way.
 The log calls such a backend's candidates busy, and since its state was read, a request that finds nothing else gets `503` as with no candidate loaded, not the `502` of a backend whose state can't be read.
 LM Studio needs more (`backend.LoadsOneAtATime`): loading one model aborts a load of another under way and fails the request that started it, and it lists the model it is loading as loaded from the moment the load begins.
 So while one of its models has a request of the gateway's pending (`ModelInfo.Pending`), only candidates for that model are used there, ready, starting or as the fallback, since a request for it waits for the load; a candidate for another model is skipped, even one a state read from before the load still lists as loaded.
@@ -199,9 +199,9 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio` and `ollama` are built on it.
+Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio`, `localai` and `ollama` are built on it.
 An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
-A request is released when its response headers arrive, since llama-swap, llama-server's router, LM Studio and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, on llama-server b11580 and on LM Studio's llmster 0.0.25-1).
+A request is released when its response headers arrive, since llama-swap, llama-server's router, LM Studio, LocalAI and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, on llama-server b11580, on LM Studio's llmster 0.0.25-1 and on LocalAI v4.11.0).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
 On release, if the cached state didn't list the model as ready, a load just finished or failed and may have evicted other models, so the cache is dropped (`StateCache.Invalidate`); a refresh already in flight is then neither cached nor joined, since it may predate the change.
 
@@ -223,7 +223,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer`, `lmStudio` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer`, `lmStudio`, `localAI` and `ollama` forward requests unchanged through `openaihttp.Client`; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
@@ -294,6 +294,31 @@ LM Studio answers a request for a model it doesn't have with whichever model is 
 So only the startup check catches a candidate with the wrong ID, as with single-model llama-server; selection treats that candidate as unlisted, never loaded.
 
 A model loaded through LM Studio's own load endpoint (`POST /api/v1/models/load`) counts as loaded by hand and is exempt from the auto-unload (docs, Idle TTL and Auto-Evict; community reports), which the gateway never does: it loads only by sending the request.
+
+### LocalAI
+
+LocalAI loads models on demand, each in a backend process of its own, and keeps them until they are unloaded, unless `LOCALAI_MAX_ACTIVE_BACKENDS` limits how many stay loaded.
+Everything here was verified on v4.11.0 with its llama.cpp engine, using the environment in `dev-env/` with limits of one and two, unless marked as source.
+
+Models come from `GET /v1/models`, and state from `GET /system`, whose `loaded_models` lists a model only once its load has finished (source, `ModelLoader.loadModel` adds it to the store after the load).
+LocalAI reports no loading state, so a load shows as starting only through the pending count, as with Ollama; response headers wait for the load, since a chat writes nothing before its model has loaded (source, `ChatEndpoint` and `processStream`).
+The model list holds every config, embedding and image models included, since `/v1/models` doesn't say what a model does.
+
+Decided: LocalAI aliases are plain names.
+An alias config redirects every request to its target and ignores every other field (source, `ModelConfig.Alias`), and `/system` lists a model loaded through an alias under the target's ID.
+The adapter folds each alias from `GET /api/aliases` into its target and marks the model `PlainAliases`, as for llama-server.
+`/system`, `/api/aliases` and `/api/settings` sit behind LocalAI's admin check, so with its API keys set the gateway's key must be an admin's.
+
+Under a limit, a request for a model that isn't loaded first makes room, and only then joins a load under way (source, `ModelLoader.Load` calls `enforceLRULimit` before `loadModel`).
+Making room counts a loading model twice, as tracked and as pending, and evicts a model with no last use first, which a loading model is (source, `WatchDog.EnforceLRULimit`); the eviction waits for the load to end, then stops the model.
+So any such request during a load, for another model or the loading one, ends that load, even under a limit of two: the request that started it fails with 500 once its model is stopped, and the later request then loads its own (verified for both).
+A request for a model that is loaded is served without making room.
+So while `/api/settings` reports a limit and a model of the gateway's has a request pending and isn't listed, the adapter reports `backend.ErrLoading`, and selection sends LocalAI nothing until the load ends (Selection).
+Under a limit of one that rules out nothing that could have worked; under a higher limit it also holds back requests for models still loaded, which would have been served.
+Without the web UI there is no `/api/settings` (source, `RegisterUIAPIRoutes`), and the adapter assumes a limit, since that only holds requests back, where assuming none fails them.
+Decided against: `backend.LoadsOneAtATime`, LM Studio's rule, which still lets a request through for the model that is loading; on LocalAI that request ends the load too.
+Decided against: reporting the backend busy whether or not a limit is set, which would hold back every request during any load on LocalAI's default, unlimited setup.
+Limit: a load another client starts is invisible until it ends, so a request the gateway sends meanwhile can end it, and the other way round.
 
 ### Ollama
 

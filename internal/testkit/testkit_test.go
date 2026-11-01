@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -217,6 +218,68 @@ func TestLMStudio_RefusesEverythingWhileUnpacking(t *testing.T) {
 			t.Errorf("a request while unpacking: %d", resp.StatusCode)
 		}
 	}
+}
+
+// LocalAI lists an alias as a model of its own and maps it to its target in
+// /api/aliases; a request through the alias loads the target, which /system
+// lists, under the target's ID, only once the load ends.
+func TestLocalAI_ListsAliasesAndModelsOnlyOnceLoaded(t *testing.T) {
+	forEachLocalAI(t, func(t *testing.T, b Driver) {
+		if models := get(t, b.URL()+"/v1/models"); !gjson.Get(models, `data.#(id=="localai-llm-1:alias")`).Exists() {
+			t.Errorf("models: %s", models)
+		}
+		if aliases := get(t, b.URL()+"/api/aliases"); gjson.Get(aliases, `#(name=="localai-llm-1:alias").target`).String() != "localai-llm-1" {
+			t.Errorf("aliases: %s", aliases)
+		}
+		b.Reset(t)
+		release := b.HoldLoads(t)
+		chat := chatInBackground(t, b, "localai-llm-1:alias")
+		during(t, chat.done, "nothing in /system", func() bool { return localAILoaded(t, b) == "" })
+		release()
+		<-chat.done
+		if loaded := localAILoaded(t, b); chat.status != http.StatusOK || loaded != "localai-llm-1" {
+			t.Errorf("after the load: %d %s, loaded %q", chat.status, chat.body, loaded)
+		}
+	})
+}
+
+// With a limit on loaded models, even of two, a request for a model that
+// isn't loaded during a load, the loading one too, waits for it, then evicts
+// the model it loaded: the request that started the load fails with 500, and
+// the later request loads its model and answers. LocalAI shows no load under
+// way, so the claim gives each request 300 ms to arrive before the next
+// step; a real load takes longer.
+func TestLocalAI_EvictsALoadForAnyModelNotLoaded(t *testing.T) {
+	for _, second := range []string{"localai-llm-2", "localai-llm-1"} {
+		t.Run(second, func(t *testing.T) {
+			forEachLocalAI(t, func(t *testing.T, b Driver) {
+				b.Reset(t)
+				release := b.HoldLoads(t)
+				first := chatInBackground(t, b, "localai-llm-1")
+				time.Sleep(300 * time.Millisecond)
+				later := chatInBackground(t, b, second)
+				time.Sleep(300 * time.Millisecond)
+				release()
+				<-first.done
+				<-later.done
+				if first.status != http.StatusInternalServerError {
+					t.Errorf("the evicted request: %d %s", first.status, first.body)
+				}
+				if loaded := localAILoaded(t, b); later.status != http.StatusOK || loaded != second {
+					t.Errorf("the request that evicted it: %d %s, loaded %q", later.status, later.body, loaded)
+				}
+			})
+		})
+	}
+}
+
+// localAILoaded returns the models LocalAI lists as loaded, comma-separated.
+func localAILoaded(t *testing.T, b Driver) string {
+	var ids []string
+	for _, m := range gjson.Get(get(t, b.URL()+"/system"), "loaded_models.#.id").Array() {
+		ids = append(ids, m.String())
+	}
+	return strings.Join(ids, ",")
 }
 
 // Open WebUI lists each model of its connections as the entry builders

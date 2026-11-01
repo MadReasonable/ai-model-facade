@@ -86,6 +86,15 @@ backends:
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
 
+  # A LocalAI server takes them too. Its candidates are the names of its
+  # model configs, aliases included. With LocalAI's API keys set, apiKey
+  # must be an admin key, since its state comes from admin endpoints.
+  # localAI:
+  #   type: localAI
+  #   baseUrl: http://localai:8080
+  #   stateCacheSeconds: 2
+  #   requestTimeoutSeconds: 180
+
   # An Open WebUI backend runs each request through Open WebUI's own chat
   # flow, so Open WebUI's tools run on its server and any client gets them.
   # openWebUi:

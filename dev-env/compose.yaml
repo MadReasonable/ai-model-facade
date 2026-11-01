@@ -116,6 +116,22 @@ services:
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:${LM_STUDIO_PORT:-18085}:1234
 
+  # LocalAI, built from localai/Dockerfile, which adds the llama.cpp engine
+  # of the same release, since LocalAI's own image installs its engines from
+  # its gallery on first use. It reads the shared model files in place; its
+  # start script writes the model configs config.yaml lists; see
+  # localai/start.sh.
+  localai:
+    profiles: [localai]
+    build: ./localai
+    # control builds this image itself before starting the service, as for
+    # lm-studio above.
+    image: ai-model-facade-dev-localai
+    volumes:
+      - *models
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:${LOCALAI_PORT:-18086}:8080
+
 volumes:
   models:
   control: # control's own state: the API key it made on Open WebUI

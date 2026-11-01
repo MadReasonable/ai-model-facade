@@ -70,3 +70,16 @@ backends:
       - { id: lmstudio-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
       - { id: lmstudio-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
       - { id: lmstudio-llm-3, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+
+  # LocalAI, with the llama.cpp engine built into its image. Two models loaded
+  # at once, so a third evicts one; an alias is another name for a model,
+  # with no settings of its own.
+  localAI:
+    maxActiveBackends: 2
+    ctxSize: 4096
+    models:
+      - { id: localai-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+      - { id: localai-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+      - { id: localai-llm-3, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf }
+    aliases:
+      - { id: localai-llm-1:alias, model: localai-llm-1 }

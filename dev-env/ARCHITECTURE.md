@@ -33,7 +33,7 @@ All in `control/`, in the order a request reaches them:
 - `manifest.go`: the record, in the models store, of the files `control` downloaded, so a prune removes only those.
 - `http.go`: JSON calls to the backends, and their errors.
 - `gguf.go`: reading and editing GGUF metadata in place, for Ollama's copies.
-- `llamaserver.go`, `llamaswap.go`, `lmstudio.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
+- `llamaserver.go`, `llamaswap.go`, `lmstudio.go`, `localai.go`, `ollama.go`, `openwebui.go`: one file per kind of backend.
 
 ## Adding a backend
 
@@ -45,7 +45,7 @@ A backend is a Compose service plus a kind, so adding one touches each file that
 4. `config.yaml`: the backend's section under `backends`, named as the backend is registered.
 5. `README.md`: a section under Backends, and the port in Settings.
 
-A backend that publishes no image, such as LM Studio, also gets a folder of its own with its Dockerfile.
+A backend that publishes no image, such as LM Studio, or whose image needs more, such as LocalAI's, which lacks its engine, also gets a folder of its own with its Dockerfile.
 Its service in `compose.yaml` names both the folder as `build` and an `image`, and its registration sets `Build` and `Image` to the same two, because Compose run inside `control` can't read a build context at its host path; `control` builds the image itself, from its own mount, before each start.
 
 ## Pitfalls

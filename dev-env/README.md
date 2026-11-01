@@ -107,6 +107,7 @@ A setting given on the command line instead, such as `BIND_ADDRESS=0.0.0.0 docke
 | `OLLAMA_PORT` | `18083` | The host port of `ollama`. |
 | `OPEN_WEBUI_PORT` | `18084` | The host port of `open-webui`. |
 | `LM_STUDIO_PORT` | `18085` | The host port of `lm-studio`. |
+| `LOCALAI_PORT` | `18086` | The host port of `localai`. |
 
 A changed setting takes effect when a backend is next started, since a start recreates the container if its settings differ.
 A port published on another address than 127.0.0.1 is reachable from the network even if a host firewall such as ufw denies it, because Docker adds its own iptables rules for published ports, and the backends have no API key.
@@ -273,3 +274,22 @@ LM Studio holds one model at a time, unlike the other backends: a model loaded b
 While a load is under way, however long it takes, LM Studio's model list answers 500, "Model does not exist.", and no endpoint reports a loading state, so `GET .../models` answers `502` saying so until the load ends (verified on 0.0.25-1).
 No model unloads itself on idle; `start.sh` turns LM Studio's one-hour idle limit off, and a request can still set its own `ttl`.
 LM Studio's settings are set when it starts, so there is nothing to reload.
+
+### LocalAI
+
+The `localAI` backend runs LocalAI v4.11.0, built from `localai/Dockerfile`: LocalAI's image, `localai/localai:v4.11.0`, with the llama.cpp engine of the same release copied in, `quay.io/go-skynet/local-ai-backends:v4.11.0-cpu-llama-cpp`.
+LocalAI's own image carries no inference engines and installs them from its gallery on first use, whose llama.cpp entry follows the latest release; copying the engine in pins it, and nothing is downloaded at run time.
+`control` builds the image before the first start, which pulls about 1 GB.
+
+| Service | Port | Model IDs |
+|---|---|---|
+| `localai` | 18086 | `localai-llm-1`, `localai-llm-2`, `localai-llm-3`, and the alias `localai-llm-1:alias` |
+
+Its start script, `localai/start.sh`, writes a model config for each model and alias `config.yaml` lists into one file, which LocalAI reads at start; each model reads its file in place, since LocalAI's models folder is the shared store.
+An alias is another name for its model, with no settings of its own, and `/system` lists a model loaded through it under the model's ID.
+`/system` lists a model only once it has loaded, and no endpoint reports a loading state.
+
+It holds two models at once (`LOCALAI_MAX_ACTIVE_BACKENDS`), and to load a third it evicts the one used least recently.
+Under that limit, any request for a model that isn't loaded, the loading one included, also evicts a model that is still loading: the load ends, the model is stopped, and the request that started it fails with 500.
+`control` loads a model with a one-token request, and unloads one through `POST /backend/shutdown`, which answers once the model has stopped.
+LocalAI's settings are set when it starts, so there is nothing to reload.

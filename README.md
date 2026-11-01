@@ -8,7 +8,7 @@ Models, quants and even backends can be swapped without any change on the client
 
 It is one static binary and one YAML file, with no runtime dependencies.
 The smallest useful config is a backend address and one facade mapped to one model.
-Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
+Fully configured, one gateway fronts [llama-swap](https://github.com/mostlygeek/llama-swap), llama.cpp's [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [LM Studio](https://lmstudio.ai), [LocalAI](https://localai.io), [Ollama](https://ollama.com) and [Open WebUI](https://openwebui.com) at once, chooses among them per request, and hides Open WebUI's multi-request tool chats behind the same plain interface, so a client with no tool support of its own gets web search.
 
 > [!NOTE]
 > **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
@@ -30,7 +30,7 @@ A facade moves that decision out of every client and into one place, where it is
 ## Quick Start
 
 This walkthrough uses llama-swap as the backend, so you need a running instance.
-llama-server, LM Studio, Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
+llama-server, LM Studio, LocalAI, Ollama and Open WebUI differ only in their `backends` entry; see [Configuration](#configuration).
 You need a binary from the [releases page](https://github.com/MadReasonable/ai-model-facade/releases), Go 1.25 or newer, or Docker (see [Running in Docker](#running-in-docker)).
 
 ```bash
@@ -189,6 +189,7 @@ The gateway reads the backend's state, walks the list up to three times, and sto
 A model that is stopping or stopped never counts.
 A backend that serves nothing while it loads a model is skipped until it has: single-model llama-server answers every request with an error then, as LM Studio does while it unpacks its engines after starting.
 LM Studio would also abort a load to start another, so while it loads a model for one request, the gateway asks it for no other model.
+LocalAI with a limit on loaded models would evict a load for a request for any model that isn't loaded, the loading one included, so while it loads a model for one request, the gateway asks it for nothing.
 If nothing matches, the request gets `503`; Open WebUI, for example, then skips the task.
 
 There is no failover: a request is never retried against another model.
@@ -199,13 +200,13 @@ A candidate's `model` is one of three things.
 
 - **An exact model ID.** If the backend doesn't list it, the gateway warns at startup and `check` reports an error, either way suggesting IDs that differ only by tag.
 - **A pattern** such as `qwen3.8-27b:*`, using `*`, `?` or `[...]`. It matches ready (or starting) models, and the matched ID is forwarded. If several match, the first in sorted order wins. Quote a pattern that starts with `*`, because a leading `*` is YAML alias syntax.
-- **An alias**, a variant of a base model that the backend serves under its own ID: a llama-swap preset such as `qwen3.6-35b:Slacker`, a llama-server alias, or, through Open WebUI, a workspace model or a llama-swap preset whose base model Open WebUI also lists. It is ready (or starting) whenever its base model is, and is forwarded under its own ID so the backend applies the variant's settings. A pattern matches base models before aliases, so a pattern that matches both resolves to one well-defined model: `qwen3.8-27b:*` picks the quant, not its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
+- **An alias**, a variant of a base model that the backend serves under its own ID: a llama-swap preset such as `qwen3.6-35b:Slacker`, a llama-server or LocalAI alias, or, through Open WebUI, a workspace model or a llama-swap preset whose base model Open WebUI also lists. It is ready (or starting) whenever its base model is, and is forwarded under its own ID so the backend applies the variant's settings. A pattern matches base models before aliases, so a pattern that matches both resolves to one well-defined model: `qwen3.8-27b:*` picks the quant, not its `:Dreamer` preset. A pattern can also pick a preset across model families: if each family defines an `:Assistant` preset, `"*:Assistant"` matches whichever one is loaded.
 
 A llama-swap preset can set params of its own, and llama-swap applies them after the gateway's.
 Each top-level key the preset sets replaces the gateway's value whole, even an object such as `chat_template_kwargs`; every other key keeps the gateway's value.
 The gateway logs an INFO line at startup for each alias candidate that has params, and `check` notes it.
 That includes a llama-swap preset that Open WebUI lists without its base model: with no base to group it under, it is an ordinary model there, but llama-swap still applies its params.
-A llama-server alias is only another name for its model, with no params of its own, so it gets no such note.
+A llama-server or LocalAI alias is only another name for its model, with no params of its own, so it gets no such note.
 
 A candidate with `loadIfNone: true` is used like any other candidate when it is ready or starting, and is also the fallback in step 3.
 It can sit anywhere in the list: its position sets its priority in steps 1 and 2, while the fallback only happens after the entire list has been checked.
@@ -217,7 +218,7 @@ Each backend reports which models are loaded in its own way, and that decides ho
 - **llama-swap** reports `ready`, `starting` and `stopping` for each running model, so all three steps apply exactly.
 - **llama-server** in router mode reports `loaded` and `loading` for each model, but nothing for a model being unloaded, which reads as loaded until it is gone. In single-model mode its one model is loaded once the server has finished starting.
 - **LM Studio** lists the models it has loaded, and none as loading, so a load is visible only through the gateway's own requests, described after this list; it does list the model it is loading as loaded from the moment the load begins.
-- **Ollama** lists a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
+- **LocalAI** and **Ollama** list a model only once it has finished loading, so a load is visible only through the gateway's own requests, described after this list.
 - **Open WebUI** passes on what its connections report, which varies by connection; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). A model whose state it can't report is **unknown**: it counts as not loaded, so only `loadIfNone` can pick it, and the log says `state unknown`.
 
 On top of what a backend reports, a model counts as starting while a request the gateway forwarded to it is waiting for the model: until the response headers arrive, or for Open WebUI, until the reply's first output appears.
@@ -300,7 +301,7 @@ If a facade's candidates span two or more backends with `passthroughAuth`, the g
 
 ### Responses and errors
 
-A response from llama-swap, llama-server, LM Studio or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
+A response from llama-swap, llama-server, LM Studio, LocalAI or Ollama is passed on with its status, content type and body, and a stream is relayed event by event.
 Of the backend's other headers, only `Retry-After` is passed on, so a client refused with `429` or `503` knows when to try again; the rest describe the backend or the connection to it.
 Responses from Open WebUI are assembled by the gateway from the chat it ran; see [Open WebUI](#open-webui).
 Whenever a model was chosen, the response has an `X-Gateway-Target` header naming it.
@@ -322,7 +323,7 @@ If the backend fails mid-stream, the gateway sends a final `data: {"error": {...
 
 The config is YAML.
 `config.example.yaml` is a complete setup with two facades: `task-monkey` for Open WebUI background tasks, and `assistant` for a Home Assistant voice assistant that uses whichever `:Assistant` preset llama-swap has loaded.
-It also carries commented-out `llamaServer`, `lmStudio`, `ollama` and `openWebUi` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
+It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama` and `openWebUi` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets; there is no other substitution.
@@ -358,7 +359,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `ollama` or `openWebUi`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama` or `openWebUi`.
 All take these keys:
 
 | Key | Description |
@@ -414,6 +415,27 @@ LM Studio answers a request for a model it doesn't have with whichever model is 
 By default LM Studio holds one model loaded by a request at a time, and loading another unloads it.
 
 These are from LM Studio's headless daemon, llmster 0.0.25-1, checked against a running server.
+
+#### LocalAI
+
+A `localAI` backend is a LocalAI server, reached through its OpenAI-compatible endpoints.
+Its models come from `/v1/models`, and their state from `/system`, which lists the models LocalAI has loaded.
+LocalAI reports no loading state, so a load shows as starting only through the gateway's own requests; see [Where state comes from](#where-state-comes-from).
+It takes no keys beyond the shared ones.
+`/system` is one of LocalAI's admin endpoints, as are the two below, so with LocalAI's API keys set, `apiKey` must be an admin key.
+
+Model IDs are the names of LocalAI's model configs.
+A LocalAI alias, a config with only a `name` and an `alias`, is another name for its model, with no params of its own: it can be a candidate, and counts as loaded whenever its model is; the gateway finds aliases through `/api/aliases`.
+The model list holds every model LocalAI has, embedding and image models included, because LocalAI's list doesn't say what each model does.
+
+With a limit on loaded models (`LOCALAI_MAX_ACTIVE_BACKENDS`), LocalAI makes room for a model before it checks whether that model is already loading, and evicts a model still loading first.
+So any request for a model that isn't loaded, even the one loading, evicts a load under way, and the request that started that load fails with `500`.
+While `/api/settings` reports such a limit and the gateway has a load under way there, the backend is busy: none of its candidates is used, and a request that finds nothing else gets `503`.
+Under a limit of one nothing else is loaded meanwhile anyway; under a higher limit, the models still loaded are skipped too.
+With LocalAI's web UI off there is no `/api/settings`, and the gateway assumes a limit.
+A load that another client starts isn't visible, so a request the gateway sends then can evict it, and the other way round.
+
+These are from LocalAI v4.11.0, checked against a running server with limits of one and two.
 
 #### Ollama
 
