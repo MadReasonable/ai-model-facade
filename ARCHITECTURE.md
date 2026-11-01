@@ -79,7 +79,7 @@ Rules about backend state are implemented here once, not in each adapter.
 
 One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio` and `ollama` read their backend's state and forward requests unchanged.
-`openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself, the one place a response is synthesized; it can also take llama-swap models' state from a `llamaSwap` backend (`Link`).
+`openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself, the one place a response is synthesized; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
 
 ### `internal/testkit`

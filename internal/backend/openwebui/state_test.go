@@ -121,13 +121,14 @@ func TestOpenWebUI_FoldsLlamaSwapPresetsIntoTheirBase(t *testing.T) {
 	}
 }
 
-// A request for a folded preset or a workspace alias counts under its base
-// model's llama-swap ID, like a request for the base itself.
-func TestOpenWebUI_FindsTheLlamaSwapModelBehindAnAlias(t *testing.T) {
-	list := &swapList{bases: []swapBase{{id: "p.a", swapID: "a", aliases: []string{"p.a:Fast", "w"}}, {id: "x"}}}
+// A request for a folded preset or a workspace alias counts under the ID its
+// linked backend gives the base model, like a request for the base itself.
+func TestOpenWebUI_FindsTheLinkedModelBehindAnAlias(t *testing.T) {
+	l := &link{name: "ls"}
+	list := &linkList{bases: []linkedBase{{id: "p.a", link: l, linkedID: "a", aliases: []string{"p.a:Fast", "w"}}, {id: "x"}}}
 	for id, want := range map[string]string{"p.a": "a", "p.a:Fast": "a", "w": "a", "x": "", "unlisted": ""} {
-		if got := list.swapIDOf(id); got != want {
-			t.Errorf("%s: got %q, want %q", id, got, want)
+		if base, _ := list.baseOf(id); base.linkedID != want {
+			t.Errorf("%s: got %q, want %q", id, base.linkedID, want)
 		}
 	}
 }
@@ -139,6 +140,8 @@ func TestOpenWebUI_RejectsAWrongConfig(t *testing.T) {
 		"{type: openWebUi, baseUrl: x, pollIntervalSeconds: -1}",
 		"{type: openWebUi, baseUrl: x, llamaSwap: {prefixId: p}}",
 		"{type: openWebUi, baseUrl: x, llamaSwap: {backend: ls, prefix: p}}",
+		"{type: openWebUi, baseUrl: x, links: [{prefixId: p}]}",
+		"{type: openWebUi, baseUrl: x, links: {backend: ls}}",
 	} {
 		if _, err := New(testkit.Entry(t, "openWebUi", src), discard); err == nil {
 			t.Errorf("%s: expected an error", src)

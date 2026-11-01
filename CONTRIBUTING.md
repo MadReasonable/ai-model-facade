@@ -51,7 +51,7 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | Package | What its tests cover |
 |---|---|
 | `internal/backend/openaihttp` | The shared HTTP client and state cache: auth, timeouts, caching, single-flight fetches, pending counts. Adapters build on these and don't test them again. |
-| `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `ollama`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and the llamaSwap block. |
+| `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `ollama`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and its links. |
 | `internal/selector` | The selection order and how patterns and aliases match. |
 | `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |

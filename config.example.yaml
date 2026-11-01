@@ -100,11 +100,15 @@ backends:
   #   pollIntervalSeconds: 0.25     # how often to read the answer while it is generated
   #   # Open WebUI reports load state precisely only for Ollama connections. For
   #   # an OpenAI-compatible connection it passes on that server's own model
-  #   # list, and llama-swap's says "loaded" even while a model is starting or
-  #   # stopping. If Open WebUI uses the same llama-swap as the backend above,
-  #   # this reads those models' state from llama-swap directly instead. Add
-  #   # prefixId if Open WebUI's connection prefixes the model IDs.
-  #   llamaSwap: { backend: llamaSwap }
+  #   # list, which has no state for most servers, and llama-swap's says
+  #   # "loaded" even while a model is starting or stopping. If Open WebUI
+  #   # connects to a server that one of the backends above also reaches, a
+  #   # link reads the state of that server's models from the backend instead.
+  #   # Add prefixId if Open WebUI's connection prefixes the model IDs.
+  #   links:
+  #     - backend: llamaSwap
+  #     # - backend: lmStudio
+  #     #   prefixId: studio
 
 models:
   # Open WebUI runs titles, tags, follow-ups and search queries on a task

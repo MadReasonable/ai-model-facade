@@ -136,6 +136,13 @@ func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error)
 	return b.State.LoadedModels(ctx)
 }
 
+// Pending counts a request for model as pending in the backend's state
+// cache, for a request that reaches the backend another way, such as through
+// Open WebUI; see StateCache.Pending.
+func (b *Backend) Pending(model string) (release func()) {
+	return b.State.Pending(model)
+}
+
 // Chat posts the request to its OpenAI endpoint path on the backend.
 func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
 	accept := ""
@@ -388,8 +395,8 @@ func (s *StateCache) LoadedModels(ctx context.Context) ([]backend.ModelInfo, err
 type Adjust func(ctx context.Context, models []backend.ModelInfo) ([]backend.ModelInfo, error)
 
 // LoadedModelsAdjusted is LoadedModels with adjust, if not nil, applied to
-// the backend's state on every read: the llamaSwap block of an openWebUi
-// backend applies llama-swap's current state to a cached Open WebUI list.
+// the backend's state on every read: the links of an openWebUi backend apply
+// each linked backend's current state to a cached Open WebUI list.
 func (s *StateCache) LoadedModelsAdjusted(ctx context.Context, adjust Adjust) ([]backend.ModelInfo, error) {
 	// Pending before and after the read: a load that finishes during it is
 	// still in the first set, one that starts during it is in the second.

@@ -63,7 +63,7 @@ Three interfaces separate the stages, and each one is where a kind of extension 
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
 Further capabilities follow the same pattern: an interface a backend may implement, found by type assertion (`backend.Has`), and required by the selectors or facade types that need it.
-A backend that refers to other backends, as the Open WebUI adapter's `llamaSwap` block does, implements `Link`, which the gateway calls once every backend exists.
+A backend that refers to other backends, as the Open WebUI adapter's `links` do, implements `Link`, which the gateway calls once every backend exists.
 
 ### Facade types
 
@@ -361,18 +361,29 @@ Each entry's state depends on where Open WebUI got it:
 - **llama-swap connection** (recognised by `meta.llamaswap`, not by a `status` field, so another provider's `status` is never misread): `status.value` is `loaded` for any process that isn't stopped, so it can't tell starting or stopping from ready (llama-swap source, `handleListModels`; verified on v263). Decided: by default `loaded` reads as ready, accepting those misreads.
 - **A facade of an ai-model-facade gateway** (a `current` key): `current.reason` is that gateway's own selection, so it is read as the state and the chain behind it is never followed. No `current` means that gateway couldn't read its backend: unknown.
 - **Workspace model:** its base model's state.
-- **Anything else:** unknown.
+- **Anything else:** unknown, LM Studio and llama-server included. LM Studio's `/v1/models` carries no load state (believed; not checked against a running LM Studio). llama-server's router puts a `status` in its `/v1/models`, which Open WebUI likely passes on (not checked), but nothing in the entry says it came from llama-server, so it isn't read; a link gives both exact state.
 
-The optional `llamaSwap: {backend, prefixId}` block removes the llama-swap misreads by taking those models' state from a `llamaSwap` backend of the same gateway.
+Links remove the misreads and the unknowns for a server the gateway also has a backend for: `links: [{backend, prefixId}]` takes the state of that server's models from the gateway's backend for it.
+The older `llamaSwap: {backend, prefixId}` block is one more link, kept so existing configs work, and still requires a `llamaSwap` backend.
+A link may name any backend built on `openaihttp.NewBackend`, since each reads its state from its server and has a state cache to count pending requests in (`Pending`); an `openWebUi` backend can't be linked.
+
+An entry belongs to a link when its ID, prefix removed, is a model or alias the linked backend lists, and Open WebUI's list doesn't say it came from another kind of server: an entry with `meta.llamaswap` matches only a link to a `llamaSwap` backend, an Ollama connection's (`owned_by: ollama`) only a link to an `ollama` backend, and a facade's (`current`) never, since its state is exact already.
 `prefixId` is needed because Open WebUI applies a connection's prefix to the model ID in place, so the original ID can't be read back from the entry.
-A wrong prefix or the wrong llama-swap never fixes itself, so a check warns (and `check` fails) when a llama-swap entry, prefix removed, isn't listed by the named backend.
-If that backend can't be reached, the `status` in Open WebUI's list is used, as without the block; going down and coming back are each logged once.
+Each Open WebUI fetch lists every linked backend for this, so a model added to a server is linked from the next fetch; a backend that can't be listed is left out of that fetch, and its models keep the state Open WebUI reports.
+Decided: matching by ID.
+Decided against: identifying the connection by Open WebUI's `urlIdx`, which depends on the order of Open WebUI's connections and is unverified; and requiring a prefix on every linked connection, which forces a setting on Open WebUI.
+Limit: two connections that list the same ID with no prefix can't be told apart; the entry takes the first link's state, with a warning.
 
-The llama-swap state is applied when the state is read, not when Open WebUI's list is fetched: the fetch stores Open WebUI's own fields, and every read applies the `llamaSwap` backend's state of that moment (`StateCache.LoadedModelsAdjusted`).
-Decided against: storing the combined state at fetch time, which froze the llama-swap part for the Open WebUI cache's lifetime and hid loads started through the `llamaSwap` backend from facades on Open WebUI.
-The llama-swap read may wait even under `WithoutStateWait`, because llama-swap answers `/running` and `/v1/models` from its own state and can't loop back into the gateway (v263 source, `handleRunning` and `handleListModels`).
+A wrong prefix or the wrong backend never fixes itself, so a check warns (and `check` fails) when a linked backend lists none of Open WebUI's models, when a llama-swap entry isn't listed by any linked `llamaSwap` backend, and when two linked backends list one entry.
+If a linked backend's state can't be read, its models take the state in Open WebUI's list, as without the link; going down and coming back are each logged once.
 
-A request through Open WebUI to a llama-swap model counts as pending in the `llamaSwap` backend's cache, under the llama-swap base model, so facades on both backends see the load, and its release drops only that cache: a `/running` call rather than a refresh of Open WebUI's list.
+The linked state is applied when the state is read, not when Open WebUI's list is fetched: the fetch stores Open WebUI's own fields and which link each model has, and every read applies each linked backend's state of that moment (`StateCache.LoadedModelsAdjusted`).
+Decided against: storing the combined state at fetch time, which froze the linked part for the Open WebUI cache's lifetime and hid loads started through the linked backend from facades on Open WebUI.
+The linked read may wait even under `WithoutStateWait`, because every linkable backend answers from its own server and can't loop back into the gateway (for llama-swap, v263 source, `handleRunning` and `handleListModels`).
+
+A request through Open WebUI to a linked model counts as pending in the linked backend's cache, under the ID that backend gives the model's base, so facades on both backends see the load, and its release drops only that cache: a call to that backend rather than a refresh of Open WebUI's list.
+For LM Studio this is the only way the gateway knows of such a load, and selection on the `lmStudio` backend then sends LM Studio nothing for another model.
+To do: the same protection for facades on the `openWebUi` backend; `LoadsOneAtATime` is checked against a candidate's own backend, so a candidate on Open WebUI for another LM Studio model can still abort the load.
 
 Decided: llama-swap presets fold into their base model.
 With llama-swap's `includeAliasesInList`, Open WebUI lists each preset as its own entry, with `meta.llamaswap.modelID` naming its base.

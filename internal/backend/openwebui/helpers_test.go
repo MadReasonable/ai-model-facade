@@ -42,22 +42,28 @@ func newSwap(t *testing.T, extra string, models ...testkit.SwapModel) (*testkit.
 	return f, ls
 }
 
-// link links b to the named backends and runs the checks it asks for, as the
-// gateway does once every backend has been listed, and returns their
-// warnings.
-func link(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {
+// linkAndCheck links b to the named backends and runs the checks it asks
+// for, as the gateway does once every backend has been listed, and returns
+// their warnings.
+func linkAndCheck(t *testing.T, b *Backend, backends map[string]backend.Backend) ([]string, error) {
 	t.Helper()
 	var checks []backend.ListingCheck
 	if err := b.Link(backends, func(c backend.ListingCheck) { checks = append(checks, c) }); err != nil {
 		return nil, err
 	}
 	catalogs := map[string]*backend.Catalog{}
-	for name, other := range map[string]backend.Backend{b.name: b, "ls": backends["ls"]} {
+	for name, other := range backends {
+		if other == backend.Backend(b) {
+			name = b.name
+		}
 		models, err := other.ListModels(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		catalogs[name] = backend.NewCatalog(models)
+	}
+	if catalogs[b.name] == nil {
+		catalogs[b.name] = backend.NewCatalog(must(b.ListModels(context.Background())))
 	}
 	var warned []string
 	for _, c := range checks {

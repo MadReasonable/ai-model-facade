@@ -442,7 +442,8 @@ A refusal from a server behind Open WebUI, such as llama-swap's `429`, reaches t
 |-----|-------------|
 | `chats` | What happens to the chat after each request: `delete` (default), `archive` or `keep`. |
 | `pollIntervalSeconds` | How often to poll the chat while the answer is generated. Default `0.25`. |
-| `llamaSwap` | Optional: `{backend: <name>, prefixId: <prefix>}`. Read the state of Open WebUI's llama-swap models directly from that `llamaSwap` backend; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
+| `links` | Optional: a list of `{backend: <name>, prefixId: <prefix>}`. Read the state of the Open WebUI models that one of the gateway's other backends serves directly from that backend; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
+| `llamaSwap` | Optional: `{backend: <name>, prefixId: <prefix>}`. One more link, to a `llamaSwap` backend only. |
 
 ##### What a request can use
 
@@ -481,30 +482,43 @@ For an OpenAI-compatible connection there is no standard way to ask which models
 - llama-swap models: llama-swap's `status` field, which says `loaded` for any model that isn't stopped. A model that is still starting, or already stopping, looks ready.
 - Facades of a gateway connected to Open WebUI: that gateway's own `current` selection.
 - Workspace models: their base model's state, as aliases of it; see [What a candidate can be](#what-a-candidate-can-be).
-- Anything else, such as a hosted OpenAI-compatible provider: unknown, which selects like not loaded.
+- Anything else, such as LM Studio, llama-server or a hosted OpenAI-compatible provider: unknown, which selects like not loaded.
 
-If Open WebUI uses llama-swap as one of its connections, and the gateway can reach that llama-swap too, the `llamaSwap` key lets the gateway skip Open WebUI for state and ask llama-swap directly.
-llama-swap's `/running` reports each model as `ready`, `starting` or `stopping`, so the selection steps apply exactly, as they do for a `llamaSwap` backend.
-The gateway reads that state through the named backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list.
-It also counts its own requests to llama-swap models through Open WebUI in that backend.
-So a load the gateway started through either backend shows as starting for facades on both at once.
-A llama-swap preset takes its base model's state this way even if Open WebUI doesn't list the base.
-Set `backend` to the gateway's `llamaSwap` backend entry for that same llama-swap, and `prefixId` to the prefix Open WebUI's connection adds to its model IDs, if it has one:
+If the gateway also has a backend for a server that Open WebUI connects to, a link lets the gateway skip Open WebUI for that server's state and ask its backend directly.
+Each link names the gateway's backend entry for the same server, and `prefixId`, the prefix Open WebUI's connection adds to its model IDs, if it has one:
 
 ```yaml
 backends:
   llamaSwap:
     type: llamaSwap
     baseUrl: http://llama-swap:8080
+  lmStudio:
+    type: lmStudio
+    baseUrl: http://lm-studio:1234
   openWebUi:
     type: openWebUi
     baseUrl: http://open-webui:8080
     apiKey: ${OPEN_WEBUI_API_KEY}
-    llamaSwap: { backend: llamaSwap }
+    links:
+      - backend: llamaSwap
+      - backend: lmStudio
+        prefixId: studio
 ```
 
-If that llama-swap can't be reached, its models fall back to the `status` Open WebUI reports, as without the key.
-If a llama-swap model in Open WebUI's list isn't listed by the named backend, `prefixId` or `backend` is wrong, and those models would never show as loaded; a warning says so, at startup, or once both backends answer if one of them was down.
+An Open WebUI model belongs to a link when its ID, with the prefix removed, is a model or alias that the linked backend lists.
+Open WebUI's list marks llama-swap's models and those of its Ollama connections, so those match only a link to a backend of the same type; any other model can match any link.
+A linked model takes the state its backend reports, so the selection steps apply exactly, as they do for a facade on that backend: llama-swap's `starting` and `stopping`, llama-server's `loading`, LM Studio's loaded instances.
+The gateway reads that state through the linked backend each time it needs Open WebUI's state, not only when it fetches Open WebUI's model list.
+It also counts its own requests to linked models through Open WebUI in that backend.
+So a load the gateway started through either backend shows as starting for facades on both at once.
+A llama-swap preset takes its base model's state this way even if Open WebUI doesn't list the base.
+LM Studio's rule of one load at a time does not extend through a link: a facade on Open WebUI can still send a request for another LM Studio model during a load, which aborts it.
+
+If a linked backend can't be reached, its models fall back to the state Open WebUI reports, as without the link.
+A link that can't be right gets a warning, at startup, or once the backends answer if one of them was down: a linked backend that lists none of Open WebUI's models, a llama-swap model that no linked `llamaSwap` backend lists, or a model that two linked backends list, which takes the state of the first.
+Each means a wrong `backend` or `prefixId`, and two links to servers with the same model IDs need a prefix on at least one connection.
+
+The `llamaSwap: {backend, prefixId}` key is another way to write one link, and it requires the named backend to be a `llamaSwap` one.
 
 The API key needs these Open WebUI endpoints: `/api/models`, `/api/v1/chats/new`, `/api/chat/completions`, `/api/v1/chats/{id}` (`GET` and `DELETE`), `/api/tasks/chat/{id}` and `/api/tasks/chat/{id}/stop`, plus `/api/v1/chats/{id}/archive` with `chats: archive`.
 

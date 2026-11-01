@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
@@ -39,17 +41,26 @@ import (
 type Config struct {
 	Type                string `yaml:"type"`
 	openaihttp.Config   `yaml:",inline"`
-	Chats               string           `yaml:"chats"`               // delete (default) | archive | keep
-	PollIntervalSeconds float64          `yaml:"pollIntervalSeconds"` // default 0.25
-	LlamaSwap           *LlamaSwapConfig `yaml:"llamaSwap"`
+	Chats               string       `yaml:"chats"`               // delete (default) | archive | keep
+	PollIntervalSeconds float64      `yaml:"pollIntervalSeconds"` // default 0.25
+	Links               []LinkConfig `yaml:"links"`
+	LlamaSwap           *LinkConfig  `yaml:"llamaSwap"` // one more link, to a llamaSwap backend only
 }
 
-// LlamaSwapConfig takes the state of Open WebUI's llama-swap models from a
-// llamaSwap backend of this gateway, whose /running is exact, instead of from
-// llama-swap's `status`, which reads `loaded` while starting and stopping too.
-type LlamaSwapConfig struct {
+// LinkConfig takes the state of the Open WebUI models that one of its
+// connections serves from this gateway's backend for the same server, whose
+// state is exact, instead of from what Open WebUI passes on from the server's
+// /v1/models: no state at all for most servers, and for llama-swap a `status`
+// that reads `loaded` while starting and stopping too.
+type LinkConfig struct {
 	Backend  string `yaml:"backend"`
 	PrefixID string `yaml:"prefixId"` // the Open WebUI connection's prefix_id, if any
+}
+
+// linkConfig is a LinkConfig with the key it came from, links or llamaSwap.
+type linkConfig struct {
+	LinkConfig
+	key string
 }
 
 type Backend struct {
@@ -58,11 +69,10 @@ type Backend struct {
 	state              *openaihttp.StateCache
 	chats              string
 	poll               time.Duration
-	llamaSwapConfig    *LlamaSwapConfig
-	llamaSwap          *llamaswap.Backend            // set by Link
-	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkPrefixes
-	swapList           atomic.Pointer[swapList]      // from the latest-started state fetch, with the llamaSwap block
-	swapDown           atomic.Bool                   // the llamaSwap backend's last state read failed
+	linkConfigs        []linkConfig
+	links              []*link                       // set by Link
+	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkLinks
+	linkList           atomic.Pointer[linkList]      // from the latest-started state fetch, with links
 	log                *slog.Logger
 }
 
@@ -87,66 +97,177 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 	if poll == 0 {
 		poll = 250 * time.Millisecond
 	}
-	if c.LlamaSwap != nil && c.LlamaSwap.Backend == "" {
-		return nil, fmt.Errorf("llamaSwap.backend is required")
+	var links []linkConfig
+	for _, l := range c.Links {
+		links = append(links, linkConfig{l, "links"})
+	}
+	if c.LlamaSwap != nil {
+		links = append(links, linkConfig{*c.LlamaSwap, "llamaSwap"})
+	}
+	for _, l := range links {
+		if l.Backend == "" {
+			return nil, fmt.Errorf("%s.backend is required", l.key)
+		}
 	}
 	client, err := openaihttp.NewClient(c.Config)
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, llamaSwapConfig: c.LlamaSwap, log: log}
+	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, linkConfigs: links, log: log}
 	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
 	return b, nil
 }
 
-// Link resolves the llamaSwap block once every backend exists; naming a
-// backend that isn't a llamaSwap one fails. It then asks for the prefix check
-// (see checkPrefixes), which runs once both backends have been listed.
+// link is a resolved LinkConfig.
+type link struct {
+	name     string // the linked backend's entry under backends
+	prefixID string
+	target   linkTarget
+	origin   string      // what originOf says of the models of target's kind of server
+	down     atomic.Bool // the linked backend's last state read failed
+}
+
+// linkTarget is a backend a link can name: one that reads its state from its
+// server, and in which a request through Open WebUI can count as pending.
+// Every adapter built on openaihttp.NewBackend is one; an openWebUi backend
+// is not.
+type linkTarget interface {
+	backend.Backend
+	backend.ModelStateProvider
+	Pending(model string) (release func())
+}
+
+// Link resolves the links once every backend exists. A link fails if it
+// names a backend that doesn't exist, can't be linked or is already linked,
+// and the llamaSwap block also if it names a backend of another type. It then
+// asks for checkLinks, which runs once this backend and the linked ones have
+// all been listed.
 func (b *Backend) Link(backends map[string]backend.Backend, check func(backend.ListingCheck)) error {
-	if b.llamaSwapConfig == nil {
+	if len(b.linkConfigs) == 0 {
 		return nil
 	}
-	name := b.llamaSwapConfig.Backend
-	ls, ok := backends[name].(*llamaswap.Backend)
-	if !ok {
-		if backends[name] == nil {
-			return fmt.Errorf("llamaSwap.backend '%s' is not defined", name)
+	names := []string{b.name}
+	for _, c := range b.linkConfigs {
+		other := backends[c.Backend]
+		if other == nil {
+			return fmt.Errorf("%s.backend '%s' is not defined", c.key, c.Backend)
 		}
-		return fmt.Errorf("llamaSwap.backend '%s' is not a llamaSwap backend", name)
+		if _, isSwap := other.(*llamaswap.Backend); c.key == "llamaSwap" && !isSwap {
+			return fmt.Errorf("llamaSwap.backend '%s' is not a llamaSwap backend", c.Backend)
+		}
+		target, ok := other.(linkTarget)
+		if !ok {
+			return fmt.Errorf("%s.backend '%s' can't be linked; a link names the backend of a server Open WebUI connects to, such as a llamaSwap or lmStudio backend", c.key, c.Backend)
+		}
+		if slices.Contains(names[1:], c.Backend) {
+			return fmt.Errorf("%s.backend '%s' is linked more than once", c.key, c.Backend)
+		}
+		names = append(names, c.Backend)
+		b.links = append(b.links, &link{name: c.Backend, prefixID: c.PrefixID, target: target, origin: originOfBackend(other)})
 	}
-	b.llamaSwap = ls
-	check(backend.ListingCheck{Backends: []string{b.name, name}, Run: func(catalogs map[string]*backend.Catalog, warn func(error)) {
+	check(backend.ListingCheck{Backends: names, Run: func(catalogs map[string]*backend.Catalog, warn func(error)) {
 		// Listing this backend stored what Open WebUI listed, entries the
 		// catalog doesn't keep.
 		if models := b.listed.Load(); models != nil {
-			b.checkPrefixes(*models, catalogs[name], func(err error) { warn(fmt.Errorf("backends.%s: %w", b.name, err)) })
+			b.checkLinks(*models, catalogs, func(err error) { warn(fmt.Errorf("backends.%s: %w", b.name, err)) })
 		}
 	}})
 	return nil
 }
 
-// checkPrefixes checks that each llama-swap model Open WebUI lists, prefix
-// removed, is listed by the llamaSwap backend. A mismatch is a config error
-// that never recovers by itself: those models are never found among
-// llama-swap's running models, so they read as unloaded.
-func (b *Backend) checkPrefixes(models []listedModel, catalog *backend.Catalog, warn func(error)) {
-	for _, m := range models {
-		if !m.isLlamaSwap() {
-			continue
+// checkLinks warns about links that can't be right, each a config error that
+// never recovers by itself: a linked backend that lists none of Open WebUI's
+// models, a llama-swap model that no linked llamaSwap backend lists, and a
+// model that more than one linked backend lists. A model no link matches
+// takes the state Open WebUI reports, as without links.
+func (b *Backend) checkLinks(models []listedModel, catalogs map[string]*backend.Catalog, warn func(error)) {
+	matched := map[*link]bool{}
+	bases, _ := group(models)
+	for _, m := range bases {
+		var names []string
+		for _, l := range b.links {
+			if _, ok := l.linkedID(m, catalogs[l.name]); ok {
+				matched[l] = true
+				names = append(names, "'"+l.name+"'")
+			}
 		}
-		if id, ok := b.llamaSwapID(m.ID); !ok || !catalog.Contains(id) {
-			warn(fmt.Errorf("Open WebUI model '%s' is a llama-swap model, but '%s' is not listed by llamaSwap.backend '%s' and won't count as loaded; check llamaSwap.prefixId", m.ID, id, b.llamaSwapConfig.Backend))
+		if len(names) > 1 {
+			warn(fmt.Errorf("Open WebUI model '%s' is listed by more than one linked backend, %s, and takes the state of the first; set prefixId on the links so that one matches", m.ID, strings.Join(names, ", ")))
+		}
+		if len(names) == 0 && m.isLlamaSwap() && b.linksTo("llamaSwap") {
+			warn(fmt.Errorf("Open WebUI model '%s' is a llama-swap model, but no linked llamaSwap backend lists it, so it takes the status Open WebUI reports; check prefixId", m.ID))
+		}
+	}
+	for _, l := range b.links {
+		if !matched[l] {
+			warn(fmt.Errorf("linked backend '%s' lists none of Open WebUI's models, so the link does nothing; check its prefixId", l.name))
 		}
 	}
 }
 
-// llamaSwapID turns an Open WebUI model ID into the llama-swap ID it stands
-// for, by removing the connection's prefix.
-func (b *Backend) llamaSwapID(id string) (string, bool) {
-	if b.llamaSwapConfig.PrefixID == "" {
+// linksTo reports whether a link names a backend whose models have this origin.
+func (b *Backend) linksTo(origin string) bool {
+	return slices.ContainsFunc(b.links, func(l *link) bool { return l.origin == origin })
+}
+
+// linkedID returns the ID that l's backend gives the base model of Open WebUI
+// model m, if that backend lists m: m's ID, prefix removed, is one of its
+// models or aliases, and Open WebUI doesn't say m came from another kind of
+// server (originOf). A facade of a gateway behind Open WebUI is never linked,
+// since its `current` is exact already.
+func (l *link) linkedID(m listedModel, catalog *backend.Catalog) (string, bool) {
+	if catalog == nil || m.Current != nil || originOf(m) != l.origin {
+		return "", false
+	}
+	id := m.ID
+	if l.prefixID != "" {
+		var ok bool
+		if id, ok = strings.CutPrefix(id, l.prefixID+"."); !ok {
+			return "", false
+		}
+	}
+	if base, isAlias := catalog.AliasOf[id]; isAlias {
+		return base, true
+	}
+	if _, ok := catalog.Model(id); ok {
 		return id, true
 	}
-	return strings.CutPrefix(id, b.llamaSwapConfig.PrefixID+".")
+	return "", false
+}
+
+// linkOf returns the first link whose backend lists Open WebUI model m, with
+// the ID that backend gives m's base model, or nil.
+func linkOf(m listedModel, links []*link, catalogs map[string]*backend.Catalog) (*link, string) {
+	for _, l := range links {
+		if id, ok := l.linkedID(m, catalogs[l.name]); ok {
+			return l, id
+		}
+	}
+	return nil, ""
+}
+
+// originOf is the kind of server Open WebUI's list says model m came from:
+// llamaSwap for an entry with meta.llamaswap, ollama for an Ollama
+// connection's, "" if the list doesn't say. originOfBackend names a
+// backend's kind of server in the same terms.
+func originOf(m listedModel) string {
+	switch {
+	case m.isLlamaSwap():
+		return "llamaSwap"
+	case m.OwnedBy == "ollama":
+		return "ollama"
+	}
+	return ""
+}
+
+func originOfBackend(b backend.Backend) string {
+	switch b.(type) {
+	case *llamaswap.Backend:
+		return "llamaSwap"
+	case *ollama.Backend:
+		return "ollama"
+	}
+	return ""
 }
 
 // listedModel is the part of an /api/models entry the adapter reads. Open
@@ -278,7 +399,7 @@ func swapBaseOf(m listedModel, byID map[string]listedModel) (listedModel, bool) 
 
 // ListModels lists the models with workspace models and llama-swap presets
 // folded in as aliases (see group), and marks a preset left standalone as
-// Preset. It keeps what Open WebUI listed for checkPrefixes, which needs the
+// Preset. It keeps what Open WebUI listed for checkLinks, which needs the
 // entries' meta.
 func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	models, err := b.models(ctx)
@@ -298,7 +419,7 @@ func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 }
 
 func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
-	return b.state.LoadedModelsAdjusted(ctx, b.applySwapStates)
+	return b.state.LoadedModelsAdjusted(ctx, b.applyLinkStates)
 }
 
 type modelState int
@@ -314,8 +435,7 @@ const (
 //
 //   - an Ollama model is ready when `loaded` is true;
 //   - a llama-swap model (`meta.llamaswap`) is ready when llama-swap's
-//     `status` is `loaded`; with the llamaSwap block, each read replaces
-//     that with the named backend's state (applySwapStates);
+//     `status` is `loaded`;
 //   - an ai-model-facade virtual model (`current`) has the state its own
 //     selection reports: `loaded` is ready, `starting` starting, and
 //     `loadIfNone` or `no candidate loaded` unloaded. The chain behind it
@@ -323,25 +443,23 @@ const (
 //   - a workspace model, or a llama-swap preset listed with its base model,
 //     has its base model's state (see group);
 //   - anything else is unknown.
+//
+// With links, each read replaces the state of a model a linked backend lists
+// with that backend's state (applyLinkStates).
 func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 	start := time.Now()
 	models, err := b.models(ctx)
 	if err != nil {
 		return nil, err
 	}
+	catalogs := b.linkCatalogs(ctx)
 	bases, aliases := group(models)
-	list := &swapList{started: start}
+	list := &linkList{started: start}
 	var infos []backend.ModelInfo
 	for _, m := range bases {
-		if b.llamaSwap != nil {
-			base := swapBase{id: m.ID, aliases: aliases[m.ID]}
-			if m.isLlamaSwap() {
-				// A preset loads with its base model, so it takes the base's
-				// state, running or not.
-				if base.swapID = m.swapBaseID(); base.swapID == "" {
-					base.swapID, _ = b.llamaSwapID(m.ID)
-				}
-			}
+		if len(b.links) > 0 {
+			base := linkedBase{id: m.ID, aliases: aliases[m.ID]}
+			base.link, base.linkedID = linkOf(m, b.links, catalogs)
 			list.bases = append(list.bases, base)
 		}
 		info := backend.ModelInfo{ID: m.ID, Aliases: aliases[m.ID]}
@@ -356,87 +474,97 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 		}
 		infos = append(infos, info)
 	}
-	if b.llamaSwap != nil {
-		b.storeSwapList(list)
+	if len(b.links) > 0 {
+		b.storeLinkList(list)
 	}
 	return infos, nil
 }
 
-// swapList is what the llamaSwap block needs from one Open WebUI fetch:
-// every base model in Open WebUI's order, with the llama-swap ID of each
-// llama-swap model, so a read can apply llama-swap's state also to models
-// the fetch found unloaded.
-type swapList struct {
-	started time.Time
-	bases   []swapBase
-}
-
-type swapBase struct {
-	id      string
-	swapID  string // the llama-swap base model; empty for a model that isn't llama-swap's
-	aliases []string
-}
-
-// swapIDOf returns the llama-swap base model behind Open WebUI model id,
-// which may be a model or one of its aliases, or "" if it isn't a llama-swap
-// model or isn't in the list.
-func (l *swapList) swapIDOf(id string) string {
-	for _, base := range l.bases {
-		if base.id == id || slices.Contains(base.aliases, id) {
-			return base.swapID
+// linkCatalogs lists each linked backend, to tell which of Open WebUI's
+// models it serves. A backend that can't be listed is left out, so its models
+// take the state Open WebUI reports until a later fetch lists it.
+func (b *Backend) linkCatalogs(ctx context.Context) map[string]*backend.Catalog {
+	catalogs := map[string]*backend.Catalog{}
+	for _, l := range b.links {
+		if models, err := l.target.ListModels(ctx); err == nil {
+			catalogs[l.name] = backend.NewCatalog(models)
 		}
 	}
-	return ""
+	return catalogs
 }
 
-// pending counts a request for Open WebUI model id as pending. With the
-// llamaSwap block, a llama-swap model counts in the llamaSwap backend's
-// cache under its llama-swap base model: every read here applies that
-// cache's state, so facades on both backends see the load, and its release
-// drops that cache (a /running call) rather than this one (a refresh of
-// Open WebUI's list). Any other model counts in this backend's cache.
+// linkList is what links need from one Open WebUI fetch: every base model in
+// Open WebUI's order, with the link of each model a linked backend lists, so
+// a read can apply that backend's state also to models the fetch found
+// unloaded.
+type linkList struct {
+	started time.Time
+	bases   []linkedBase
+}
+
+type linkedBase struct {
+	id       string
+	aliases  []string
+	link     *link  // nil for a model no linked backend lists
+	linkedID string // the ID the linked backend gives this model, a preset's base for a preset
+}
+
+// baseOf returns the base model behind Open WebUI model id, which may be a
+// model or one of its aliases.
+func (l *linkList) baseOf(id string) (linkedBase, bool) {
+	for _, base := range l.bases {
+		if base.id == id || slices.Contains(base.aliases, id) {
+			return base, true
+		}
+	}
+	return linkedBase{}, false
+}
+
+// pending counts a request for Open WebUI model id as pending. A model a
+// linked backend lists counts in that backend's cache, under the ID it gives
+// the model: every read here applies that cache's state, so facades on both
+// backends see the load, and its release drops that cache rather than this
+// one (a refresh of Open WebUI's list). Any other model counts in this
+// backend's cache.
 func (b *Backend) pending(id string) (release func()) {
-	if list := b.swapList.Load(); b.llamaSwap != nil && list != nil {
-		if swapID := list.swapIDOf(id); swapID != "" {
-			return b.llamaSwap.Pending(swapID)
+	if list := b.linkList.Load(); list != nil {
+		if base, ok := list.baseOf(id); ok && base.link != nil {
+			return base.link.target.Pending(base.linkedID)
 		}
 	}
 	return b.state.Pending(id)
 }
 
-// storeSwapList keeps list unless a fetch that began later already stored
+// storeLinkList keeps list unless a fetch that began later already stored
 // its own, so fetches that finish out of order don't bring back an older list.
-func (b *Backend) storeSwapList(list *swapList) {
+func (b *Backend) storeLinkList(list *linkList) {
 	for {
-		old := b.swapList.Load()
+		old := b.linkList.Load()
 		if old != nil && old.started.After(list.started) {
 			return
 		}
-		if b.swapList.CompareAndSwap(old, list) {
+		if b.linkList.CompareAndSwap(old, list) {
 			return
 		}
 	}
 }
 
-// applySwapStates gives Open WebUI's llama-swap models the state the
-// llamaSwap backend reports at the time of the read, in place of the
-// `status` the cached fetch read. That state comes through the backend's own
-// cache, so its pending requests and invalidations show here at once, and
-// under the request's own context, so a llama-swap state fetched since the
-// request arrived is reused (backend.WithRequestStart): a gateway that is an
-// Open WebUI connection may have read llama-swap while Open WebUI answered
-// this read. If the backend can't be read, the fetched `status` stands.
-func (b *Backend) applySwapStates(ctx context.Context, models []backend.ModelInfo) ([]backend.ModelInfo, error) {
-	list := b.swapList.Load()
-	if b.llamaSwap == nil || list == nil {
+// applyLinkStates gives each model a linked backend lists the state that
+// backend reports at the time of the read, in place of the state the cached
+// fetch read. That state comes through the backend's own cache, so its
+// pending requests and invalidations show here at once, and under the
+// request's own context, so a state fetched since the request arrived is
+// reused (backend.WithRequestStart): a gateway that is an Open WebUI
+// connection may have read the same backend while Open WebUI answered this
+// read. If a linked backend can't be read, its models keep the fetched state.
+func (b *Backend) applyLinkStates(ctx context.Context, models []backend.ModelInfo) ([]backend.ModelInfo, error) {
+	list := b.linkList.Load()
+	if list == nil {
 		return models, nil
 	}
-	// llama-swap's state doesn't pass through Open WebUI, so this read may
-	// wait even under WithoutStateWait.
-	states := b.swapStates(backend.WithStateWait(ctx))
-	if states == nil {
-		return models, nil
-	}
+	// A linked backend reads its state from its server, not through Open
+	// WebUI, so this read may wait even under WithoutStateWait.
+	states := b.linkStates(backend.WithStateWait(ctx))
 	byID := map[string]backend.ModelInfo{}
 	for _, m := range models {
 		byID[m.ID] = m
@@ -445,13 +573,14 @@ func (b *Backend) applySwapStates(ctx context.Context, models []backend.ModelInf
 	var out []backend.ModelInfo
 	for _, base := range list.bases {
 		done[base.id] = true
-		if base.swapID == "" {
+		linkStates, ok := states[base.link]
+		if !ok {
 			if m, ok := byID[base.id]; ok {
 				out = append(out, m)
 			}
 			continue
 		}
-		switch states[base.swapID] { // not running: unloaded
+		switch linkStates[base.linkedID] { // not loaded: unloaded
 		case ready:
 			out = append(out, backend.ModelInfo{ID: base.id, Aliases: base.aliases})
 		case starting:
@@ -501,36 +630,41 @@ func (b *Backend) stateOf(m listedModel) modelState {
 	return unknown
 }
 
-// swapStates returns the llamaSwap backend's states, or nil to read
-// llama-swap's own `status` from Open WebUI's list instead, as if the
-// llamaSwap block weren't set: when the block isn't set, or the backend can't
-// be reached. Going down and coming back are each logged once.
-func (b *Backend) swapStates(ctx context.Context) map[string]modelState {
-	if b.llamaSwap == nil {
-		return nil
+// linkStates reads every linked backend at once and returns the states of
+// those that answered, by link. A backend left out keeps for its models the
+// state Open WebUI reports, as without the link; it going down and coming
+// back are each logged once.
+func (b *Backend) linkStates(ctx context.Context) map[*link]map[string]modelState {
+	read := make([]map[string]modelState, len(b.links))
+	var wg sync.WaitGroup
+	for i, l := range b.links {
+		wg.Go(func() { read[i] = l.states(ctx, b.log) })
 	}
-	states, err := b.llamaSwapStates(ctx)
-	if err != nil {
-		if !b.swapDown.Swap(true) {
-			b.log.Warn(fmt.Sprintf("%v; using llama-swap's status as Open WebUI reports it until it answers", err))
+	wg.Wait()
+	states := map[*link]map[string]modelState{}
+	for i, l := range b.links {
+		if read[i] != nil {
+			states[l] = read[i]
 		}
-		return nil
-	}
-	if b.swapDown.Swap(false) {
-		b.log.Info(fmt.Sprintf("llamaSwap.backend '%s' answers again; using its state", b.llamaSwapConfig.Backend))
 	}
 	return states
 }
 
-// llamaSwapStates maps each running llama-swap base model to its state.
-func (b *Backend) llamaSwapStates(ctx context.Context) (map[string]modelState, error) {
-	loaded, err := b.llamaSwap.LoadedModels(ctx)
+// states maps each model the linked backend has loaded or loading, by the
+// ID it gives the model, to its state, or returns nil if the backend can't
+// be read. Every linked model of Open WebUI's resolves to its base model
+// before the lookup, an alias through the backend's catalog (linkedID).
+func (l *link) states(ctx context.Context, log *slog.Logger) map[string]modelState {
+	loaded, err := l.target.LoadedModels(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("llamaSwap.backend '%s': %w", b.llamaSwapConfig.Backend, err)
+		if !l.down.Swap(true) {
+			log.Warn(fmt.Sprintf("linked backend '%s': %v; its models take the state Open WebUI reports until it answers", l.name, err))
+		}
+		return nil
 	}
-	// Base models only: every llama-swap entry of Open WebUI's resolves to
-	// its base before the lookup, a folded preset through its base's entry
-	// and a standalone one through meta.llamaswap.modelID.
+	if l.down.Swap(false) {
+		log.Info(fmt.Sprintf("linked backend '%s' answers again; its models take its state", l.name))
+	}
 	states := map[string]modelState{}
 	for _, m := range loaded {
 		state := ready
@@ -539,7 +673,7 @@ func (b *Backend) llamaSwapStates(ctx context.Context) (map[string]modelState, e
 		}
 		states[m.ID] = state
 	}
-	return states, nil
+	return states
 }
 
 // Chat runs Open WebUI's chat flow for a chat completion. Open WebUI has no
