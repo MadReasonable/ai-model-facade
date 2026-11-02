@@ -37,7 +37,7 @@ The rest of this file explains how they are organised and written, so a new test
 ### Running the tests
 
 `go test ./...` runs everything.
-CI runs `gofmt -l .`, `go vet ./...` and `go test -race ./...` on every push to a branch and on every pull request, so run all three before pushing.
+CI runs `gofmt -l .`, `go vet ./...` and `go test -race ./...` on every push to master and on every pull request, so run all three before opening a pull request.
 With `-race`, each package takes about a second longer, because the race detector waits a second when a test binary exits.
 
 Test names start with their unit, so `-run` selects an area, for example `go test ./... -run 'TestStateCache_'`.

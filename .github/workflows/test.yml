@@ -1,12 +1,13 @@
-# Runs gofmt, go vet and the race-enabled tests on every push to a branch
-# and on every pull request. Version tags are tested by release.yml before
-# it builds.
+# Runs gofmt, go vet and the race-enabled tests on every push to master, on
+# every pull request, and when another workflow calls it. Version tags are
+# tested by release.yml before it builds.
 name: test
 
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
