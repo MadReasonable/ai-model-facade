@@ -86,8 +86,8 @@ services:
       ENABLE_SIGNUP: "False"
       ENABLE_API_KEYS: "True"
       # Fewer built-in tools, whose definitions every request through its
-      # chat flow carries, so a prompt fits the small models' 4096-token
-      # context; memories stay, for a tool to call.
+      # chat flow carries, so a prompt fits the 4096-token context most of the
+      # small models have; memories stay, for a tool to call.
       ENABLE_CODE_INTERPRETER: "False"
       ENABLE_NOTES: "False"
       ENABLE_AUTOMATIONS: "False"

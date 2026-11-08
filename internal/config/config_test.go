@@ -104,6 +104,7 @@ func TestParse_RejectsUnknownKeys(t *testing.T) {
 		"server":    strings.Replace(minimal, "listen:", "listn: x\n  listen:", 1),
 		"api key":   strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a, key: b, scope: c}]", 1),
 		"logging":   minimal + "logging: {levl: info}\n",
+		"api":       minimal + "api: {openAi: {curent: true}}\n",
 	}
 	for name, src := range cases {
 		if _, err := Parse([]byte(src), env(nil)); err == nil || !strings.Contains(err.Error(), "unknown key") {

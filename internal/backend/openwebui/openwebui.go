@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -562,9 +563,7 @@ func (b *Backend) applyLinkStates(ctx context.Context, models []backend.ModelInf
 	if list == nil {
 		return models, nil
 	}
-	// A linked backend reads its state from its server, not through Open
-	// WebUI, so this read may wait even under WithoutStateWait.
-	states := b.linkStates(backend.WithStateWait(ctx))
+	states := b.linkStates(ctx)
 	byID := map[string]backend.ModelInfo{}
 	for _, m := range models {
 		byID[m.ID] = m
@@ -656,6 +655,9 @@ func (b *Backend) linkStates(ctx context.Context) map[*link]map[string]modelStat
 // before the lookup, an alias through the backend's catalog (linkedID).
 func (l *link) states(ctx context.Context, log *slog.Logger) map[string]modelState {
 	loaded, err := l.target.LoadedModels(ctx)
+	if errors.Is(err, backend.ErrStateBusy) {
+		return nil // a refresh is in flight, so the backend isn't down
+	}
 	if err != nil {
 		if !l.down.Swap(true) {
 			log.Warn(fmt.Sprintf("linked backend '%s': %v; its models take the state Open WebUI reports until it answers", l.name, err))

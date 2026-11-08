@@ -8,11 +8,13 @@ startPort: 10001
 # adapter folds into its base model.
 includeAliasesInList: true
 
+# An 8192-token context, twice the other backends', so that two requests
+# through Open WebUI's chat flow, about 2,700 tokens each, fit at once.
 macros:
   llama-server: >-
     /app/llama-server --host 127.0.0.1 --port ${PORT}
     --model /models/Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
-    --ctx-size 4096 --jinja --reasoning-format deepseek
+    --ctx-size 8192 --jinja --reasoning-format deepseek
 
 # All three IDs start llama-server on the same file. The matrix below lets
 # any two run at once, so a request to the third evicts one. The third also

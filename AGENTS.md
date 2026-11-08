@@ -35,8 +35,8 @@ Each has its reasoning in `docs/agents-design.md`, in the section named after it
 9. **Selections are observable** (Observability). One log line per request (facade, candidates checked, winner, reason) and the `X-Gateway-Target` response header.
 10. **The gateway may be on both sides of Open WebUI** (The concept: facades). A request chain can pass through the same gateway more than once, so:
     - **Loops are per facade** (Routing loops). Each process has a random ID and each hop is `<ID>/<facade>`; the front end refuses (508) a request whose `ai_model_facade_route` already holds its hop, and removes the field. Only the `openwebui` adapter sends it on. The same gateway twice for different facades is not a loop.
-    - **One state read per backend per request chain** (Fetching). Every request carries its arrival time (`backend.WithRequestStart`), and a state fetched since then is reused, so a nested request's fetch serves the outer one. `/v1/models` also reads each backend once per listing (`backend.WithStateSnapshot`).
-    - **`/v1/models` never waits on a fetch in flight** (Not waiting on itself). It reads state under `backend.WithoutStateWait`, answering from the cache or omitting `current`, because the fetch it would wait on may be its own, looped back through Open WebUI.
+    - **One state read per backend per request chain** (Fetching). Every request carries its arrival time (`backend.WithRequestStart`), and a state fetched since then is reused, so a nested request's fetch serves the outer one. `/amf/models` and `/v1/models` also read each backend once per listing (`backend.WithStateSnapshot`).
+    - **`/v1/models` never waits on a fetch in flight** (Not waiting on itself). With `api.openAi.addCurrent` on, it reads state under `backend.WithoutStateWait`, answering from the cache or omitting `current`, because the fetch it would wait on may be its own, looped back through Open WebUI. Only a backend configured with `loopsBack: true`, for a server whose state read can reach this gateway, is exempt from waiting; any other waits.
 
 ## Pitfalls
 

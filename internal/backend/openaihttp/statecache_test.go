@@ -144,13 +144,12 @@ func TestStateCache_ReaderLeavingDoesNotStopTheFetch(t *testing.T) {
 	}
 }
 
-// A read that may not wait (WithoutStateWait) gets ErrStateBusy before any
-// state was fetched, or the last state while a refresh is in flight; with no
-// refresh in flight it fetches like any read.
+// A read of a backend with loopsBack, under WithoutStateWait, gets ErrStateBusy before any state was fetched, or the last state while a refresh
+// is in flight; with no refresh in flight it fetches like any read.
 func TestStateCache_ReadThatMayNotWait(t *testing.T) {
 	f := newFetcher(backend.ModelInfo{ID: "m"})
 	f.gate = make(chan struct{})
-	s := NewStateCache(Config{}, f.fetch)
+	s := NewStateCache(Config{LoopsBack: true}, f.fetch)
 	noWait := backend.WithoutStateWait(context.Background())
 	firstWaiting := readersWaiting(t, s, 1)
 	first := make(chan error)
@@ -180,6 +179,30 @@ func TestStateCache_ReadThatMayNotWait(t *testing.T) {
 
 // A refresh that began before Invalidate isn't cached, and reads after
 // Invalidate don't join it: it may predate what made the state stale.
+// WithoutStateWait doesn't apply to a backend without loopsBack, the default:
+// the read joins the refresh in flight and gets its result.
+func TestStateCache_WaitsUnderWithoutStateWaitByDefault(t *testing.T) {
+	f := newFetcher(backend.ModelInfo{ID: "m"})
+	f.gate = make(chan struct{})
+	s := NewStateCache(Config{}, f.fetch)
+	joined := readersWaiting(t, s, 2)
+	first := make(chan error)
+	go func() { _, err := s.LoadedModels(context.Background()); first <- err }()
+	second := make(chan error)
+	go func() {
+		_, err := s.LoadedModels(backend.WithoutStateWait(context.Background()))
+		second <- err
+	}()
+	joined()
+	close(f.gate)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("under WithoutStateWait: got %v", err)
+	}
+}
+
 func TestStateCache_IgnoresRefreshStartedBeforeInvalidate(t *testing.T) {
 	stale := make(chan struct{})
 	var calls atomic.Int32

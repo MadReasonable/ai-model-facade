@@ -144,22 +144,38 @@ Point any OpenAI-compatible client at `http://<gateway>:8088/v1`, with the key f
 |----------|-------------|
 | `POST /v1/chat/completions` | Chat completions, streamed or not. |
 | `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. |
-| `GET /v1/models` | Lists only the facades, so clients that pick from a list see just those. Each includes `current` (below). |
-| `GET /v1/models/{id}` | One facade, including `current`, or `404`. |
+| `GET /v1/models` | Lists only the facades, so clients that pick from a list see just those. |
+| `GET /v1/models/{id}` | One facade, or `404`. |
+| `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state (below). |
+| `GET /amf/models/{id}` | One entry of that list, or `404`. |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
 Clients that should use a backend's models directly keep their existing connection to that backend.
 
-Model objects have the standard OpenAI fields plus `current`: where a request would be routed right now.
+The endpoints under `/amf` belong to the gateway rather than to a client API, so they report what an OpenAI model object has no place for: `current`, where a request would be routed right now, and the state of every candidate.
+They need the same key as the rest of the API, and they send no requests, so they never trigger a load.
 
 ```json
-{"id":"task-monkey","object":"model","created":1792628190,"owned_by":"ai-model-facade",
+{"id":"task-monkey",
  "description":"Background tasks on whichever LLM is already loaded, thinking off",
- "current":{"model":"qwen3.8-flash-next:iq3_s","reason":"loaded"}}
+ "current":{"model":"qwen3.8-flash-next:iq3_s","reason":"loaded"},
+ "candidates":[
+  {"model":"qwen3.8-flash-next:*","backend":"llamaSwap","state":"loaded","match":"qwen3.8-flash-next:iq3_s","winner":true},
+  {"model":"qwen2.5-coder-3b:q8_0","backend":"llamaSwap","loadIfNone":true,"state":"not loaded"}]}
 ```
 
 It is a snapshot, so the next request can be routed differently if what is loaded changes.
-The fields are explained under [Choosing a model](#choosing-a-model).
+`current` is explained under [Reading `current`](#reading-current).
+A candidate's `state` is `loaded`, `starting` or `not loaded`, or one of these:
+
+- `unknown`: its backend doesn't report this model's state, which selects like not loaded.
+- `unavailable`: its backend's state couldn't be read.
+- `busy`: its backend is loading a model and serves nothing until it has.
+- `blocked`: its backend has a request pending for another model, which a request for this one would abort.
+
+`match` is the model a pattern resolved to, `aliasOf` is present when that model is an alias, and `winner` marks the candidate a request made now would go to.
+
+Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api).
 
 ### Example: Open WebUI task model
 
@@ -239,11 +255,11 @@ Wherever a candidate's backend isn't the facade's own, the log, `check` and `cur
 
 #### Reading `current`
 
-`current` on a model object is the result of running the three steps now, without sending a request.
+`current` is the result of running the three steps now, without sending a request.
 
 - `reason` is `loaded`, `starting` or `loadIfNone`, matching the step that would pick `model`.
 - When no request would succeed, `model` is absent and `reason` is `no candidate loaded`.
-- `alias_of` is present when `model` is an alias, and `backend` when the model is on another backend than the facade's own.
+- `aliasOf` is present when `model` is an alias, and `backend` when the model is on another backend than the facade's own.
 - If no backend's state can be read, `current` is left out.
 
 ### Rewriting the request
@@ -358,6 +374,14 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `level` | `debug`, `info` (default), `warning` or `error`. |
 | `logSelection` | Log one line per request: facade, candidates checked, winner and reason. Failed requests are always logged. |
 
+### `api`
+
+The `api` section configures what the gateway presents to the clients of each API family.
+
+| Key | Description |
+|-----|-------------|
+| `openAi.addCurrent` | `true`: `/v1/models` and `/v1/models/{id}` include `current`. Default `false`, so those endpoints answer from the config and read no backend's state. A gateway that is a connection of an Open WebUI which another gateway reads needs it on: see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
+
 ### `backends`
 
 Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAi` or `anthropic`.
@@ -368,8 +392,9 @@ All take these keys:
 | `baseUrl` | The backend's address. Required. |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own `Authorization` header (or none). Default `false`. |
-| `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks once per request: a request reads each backend's state once, even for several facades in a `/v1/models` listing, or when it loops back to the gateway through Open WebUI. Concurrent requests share one in-flight check either way. |
+| `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks once per request: a request reads each backend's state once, even for several facades in a `/amf/models` listing, or when it loops back to the gateway through Open WebUI. Concurrent requests share one in-flight check either way. |
 | `stateTimeoutSeconds` | Timeout for the state and model-list calls. Default `10`. |
+| `loopsBack` | `true`: reading this backend's state can lead back to this gateway's `/v1/models`, as reading Open WebUI can when this gateway has `api.openAi.addCurrent` on and is one of its connections. `/v1/models` then doesn't wait for a read of this backend already in flight, and answers from the last state, or leaves `current` out if there is none. Default `false`: `/v1/models` waits, so `current` reflects that read. If the read does lead back to this gateway with this off, the read waits on itself until `stateTimeoutSeconds` and fails, so listings stall and chat requests that need that state fail with `502`. |
 | `listRetrySeconds` | If the backend couldn't be listed at startup, how often to ask it for its models again, so the checks that need them run once it answers; see [Errors and warnings](#errors-and-warnings). Default `30`. |
 | `connectTimeoutSeconds` | Connection timeout. Default `0`, no limit. |
 | `requestTimeoutSeconds` | How long to wait for the backend to start responding. Allow for a cold load of a `loadIfNone` candidate; a stream isn't cut off once it has started. Default `0`, no limit. |
@@ -550,9 +575,13 @@ For an OpenAI-compatible connection there is no standard way to ask which models
 
 - Ollama models: whether Ollama has them loaded, as Open WebUI reports it.
 - llama-swap models: llama-swap's `status` field, which says `loaded` for any model that isn't stopped. A model that is still starting, or already stopping, looks ready.
-- Facades of a gateway connected to Open WebUI: that gateway's own `current` selection.
+- Facades of a gateway connected to Open WebUI: that gateway's own `current` selection, which it reports only with [`api.openAi.addCurrent`](#api) on. With it off, they are unknown.
 - Workspace models: their base model's state, as aliases of it; see [What a candidate can be](#what-a-candidate-can-be).
 - Anything else, such as LM Studio, llama-server or a hosted OpenAI-compatible provider: unknown, which selects like not loaded.
+
+A gateway can read its own facades this way, when it is itself one of the connections of the Open WebUI it reads.
+Reading Open WebUI's state then makes Open WebUI call this gateway's `/v1/models`, which with `api.openAi.addCurrent` on reads the same state, so the `openWebUi` backend needs `loopsBack: true`.
+Without it, the read waits on itself until `stateTimeoutSeconds` and fails: listings and Open WebUI's own model list stall, and chats on that backend fail with `502`.
 
 If the gateway also has a backend for a server that Open WebUI connects to, a link lets the gateway skip Open WebUI for that server's state and ask its backend directly.
 Each link names the gateway's backend entry for the same server, and `prefixId`, the prefix Open WebUI's connection adds to its model IDs, if it has one:
@@ -601,7 +630,7 @@ Each entry is a facade, and its name is what clients request.
 | `backend` | Name of a `backends` entry: the default for its candidates. Required unless every candidate names its own. |
 | `candidates` | The models to choose from, in order of preference. Required. |
 | `params` | Applied to every request for this facade. Optional. |
-| `description` | Shown in `GET /v1/models`. Optional. |
+| `description` | Shown in `GET /v1/models` and `GET /amf/models`. Optional. |
 | `type` | Facade type. `candidates`, the default, is the only type today. |
 
 Each candidate takes:

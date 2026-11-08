@@ -37,6 +37,7 @@ type Config struct {
 	PassthroughAuth       bool    `yaml:"passthroughAuth"` // chat requests carry the client's own Authorization
 	StateCacheSeconds     float64 `yaml:"stateCacheSeconds"`
 	StateTimeoutSeconds   float64 `yaml:"stateTimeoutSeconds"` // state and model-list calls; default 10
+	LoopsBack             bool    `yaml:"loopsBack"`           // a state read can reach this gateway's /v1/models
 	ListRetrySeconds      float64 `yaml:"listRetrySeconds"`    // asking again for the models of a backend that couldn't be listed; default 30
 	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds"`
 	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds"` // until response headers arrive
@@ -399,6 +400,11 @@ func (l *ListedState) Drop() {
 // starting where the backend doesn't report them: a backend may list a model
 // only once loaded, and a cached state can predate a load the gateway began.
 type StateCache struct {
+	// loopsBack says a fetch can end up calling this gateway's /v1/models, so
+	// a read under backend.WithoutStateWait mustn't wait on it. The gateway
+	// can't tell what a backend's server calls, so this comes from the config.
+	loopsBack bool
+
 	ttl   time.Duration
 	fetch func(ctx context.Context) ([]backend.ModelInfo, error)
 
@@ -428,7 +434,7 @@ type stateFetch struct {
 }
 
 func NewStateCache(c Config, fetch func(ctx context.Context) ([]backend.ModelInfo, error)) *StateCache {
-	return &StateCache{ttl: seconds(c.StateCacheSeconds), fetch: fetch, pending: map[string]int{}}
+	return &StateCache{loopsBack: c.LoopsBack, ttl: seconds(c.StateCacheSeconds), fetch: fetch, pending: map[string]int{}}
 }
 
 // Pending counts a request for model as pending until the returned release
@@ -532,7 +538,7 @@ func (s *StateCache) cached(ctx context.Context) ([]backend.ModelInfo, error) {
 		return models, nil
 	}
 	f := s.inFlight
-	if f != nil && !backend.StateWaitAllowed(ctx) {
+	if f != nil && s.loopsBack && !backend.StateWaitAllowed(ctx) {
 		// Possibly our own refresh, looped back through another service.
 		defer s.mu.Unlock()
 		if !s.fetched {

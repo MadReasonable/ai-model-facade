@@ -175,7 +175,13 @@ If some backends can't be read, their candidates count as not loaded; if none ca
 
 Every request logs one line with the facade, each candidate checked and its outcome, the winner and the reason, and the response carries the winner in `X-Gateway-Target`.
 Selection depends on state that changes from second to second, so without these a surprising choice couldn't be explained afterwards.
-`GET /v1/models` adds a non-standard `current` to each facade: the selection a request would get now, through `Handler.Current`.
+`GET /amf/models` reports each facade's `current`, the selection a request would get now, and every candidate's state, through `Handler.Inspect`, which shares its classification with selection, so what it reports is what a request would act on.
+`GET /amf/models/{id}` is one entry of that list, so a client needs one shape for both.
+Decided against: a param to choose whether candidates are returned, since they come from the state read `current` already needs, and the list is for seeing why a facade picks what it does.
+`/amf` belongs to the gateway rather than to a client API, so it needs no client's format and can always read state.
+
+`GET /v1/models` adds `current` as a non-standard field only with `api.openAi.addCurrent` on, because a gateway behind Open WebUI reports its facades' state to another gateway that way (Open WebUI).
+Decided: off by default, so a listing for an ordinary client answers from the config and contacts no backend.
 
 ## Backend state
 
@@ -192,7 +198,7 @@ This matters when the gateway sits on both sides of Open WebUI (The concept: fac
 Decided against: special cases that passed a start time through particular call paths, which covered fewer setups and threaded a time through every adapter.
 The reuse works only between reads of the same backend entry in the same process.
 
-`/v1/models` selects every facade against one snapshot (`backend.WithStateSnapshot`), so one listing reads each backend once and never judges two facades against different states.
+`/amf/models` and `/v1/models` select every facade against one snapshot (`backend.WithStateSnapshot`), so one listing reads each backend once and never judges two facades against different states.
 
 ### Loads the gateway started
 
@@ -215,11 +221,19 @@ A model also stops counting when its request ends, however it ends; if the clien
 
 ### Not waiting on itself
 
-When the gateway is an Open WebUI connection and also has an Open WebUI backend, building `current` for `/v1/models` refreshes Open WebUI's model list, which makes Open WebUI call this gateway's `/v1/models` again.
+With `api.openAi.addCurrent` on, when the gateway is an Open WebUI connection and also has an Open WebUI backend, building `current` for `/v1/models` refreshes Open WebUI's model list, which makes Open WebUI call this gateway's `/v1/models` again.
 That nested call would join the fetch already in flight and wait on itself until the state timeout.
-So `/v1/models` reads state under `backend.WithoutStateWait`: if a fetch is in flight it answers from the last cached state, or omits `current` if there is none.
+So `/v1/models` reads state under `backend.WithoutStateWait`: if a fetch is in flight, it answers from the last cached state, or omits `current` if there is none.
+
+The gateway can't tell whether a server's answer depends on this gateway, so `loopsBack: true` on a backend says it does.
+With it, `/v1/models` doesn't wait for that backend's fetch; without it, the default, a read waits for the fetch in flight and reports its state.
+A wrong `true` costs a stale or missing `current`.
+A wrong `false` makes the fetch wait on itself until `stateTimeoutSeconds` and fail, so the listing stalls, Open WebUI's own model list stalls with it, and a chat request needing that state fails with 502 (verified through a real loop on Open WebUI v0.12.3, 10 s at the default timeout).
+Decided: off by default anyway, because a loop needs a deliberate setup, `api.openAi.addCurrent` on and this gateway as a connection of a server it reads, and most deployments would otherwise pay with a stale `current` for a case they don't have.
+llama-swap is an example of why this can't be decided per adapter: it answers `/running` and `/v1/models` from memory (read from source at `1249e7c`, not run), but a future version could call out, and it can reach a gateway through a model's `proxy`, a peer, or the capability detection it runs when a model becomes ready.
+Decided against: fixing the choice per adapter, which turns a fact about one deployment's servers into a fact about the adapter's code.
 Any such loop, through however many gateways and Open WebUI instances, comes back to a gateway whose fetch is in flight, so it ends after one round.
-Chat selection still waits as usual.
+Chat selection still waits as usual, and so does `/amf/models`: Open WebUI's refresh calls `/v1/models`, never `/amf/models`, so that refresh can't be waiting on it.
 The cost is that the copy of this gateway's list Open WebUI caches during the loop may show a stale or missing `current` for facades on Open WebUI.
 
 ## Backend adapters
@@ -439,7 +453,7 @@ Each entry's state depends on where Open WebUI got it:
 
 - **Ollama connection:** `loaded`, set from Ollama's `/api/ps`; `true` is ready (verified through a load and an unload).
 - **llama-swap connection** (recognised by `meta.llamaswap`, not by a `status` field, so another provider's `status` is never misread): `status.value` is `loaded` for any process that isn't stopped, so it can't tell starting or stopping from ready (llama-swap source, `handleListModels`; verified on v263). Decided: by default `loaded` reads as ready, accepting those misreads.
-- **A facade of an ai-model-facade gateway** (a `current` key): `current.reason` is that gateway's own selection, so it is read as the state and the chain behind it is never followed. No `current` means that gateway couldn't read its backend: unknown.
+- **A facade of an ai-model-facade gateway** (a `current` key): `current.reason` is that gateway's own selection, so it is read as the state and the chain behind it is never followed. No `current` means that gateway has `api.openAi.addCurrent` off or couldn't read its backend: unknown.
 - **Workspace model:** its base model's state.
 - **Anything else:** unknown, LM Studio and llama-server included. LM Studio's `/v1/models` carries no load state (believed; not checked against a running LM Studio). llama-server's router puts a `status` in its `/v1/models`, which Open WebUI likely passes on (not checked), but nothing in the entry says it came from llama-server, so it isn't read; a link gives both exact state.
 
@@ -459,7 +473,7 @@ If a linked backend's state can't be read, its models take the state in Open Web
 
 The linked state is applied when the state is read, not when Open WebUI's list is fetched: the fetch stores Open WebUI's own fields and which link each model has, and every read applies each linked backend's state of that moment (`StateCache.LoadedModelsAdjusted`).
 Decided against: storing the combined state at fetch time, which froze the linked part for the Open WebUI cache's lifetime and hid loads started through the linked backend from facades on Open WebUI.
-The linked read may wait even under `WithoutStateWait`, because every linkable backend answers from its own server and can't loop back into the gateway (for llama-swap, v263 source, `handleRunning` and `handleListModels`).
+A linked read follows the same rule as any state read (Not waiting on itself); if it may not wait, its models take the state in Open WebUI's list for that read, and it isn't logged as down.
 
 A request through Open WebUI to a linked model counts as pending in the linked backend's cache, under the ID that backend gives the model's base, so facades on both backends see the load, and its release drops only that cache: a call to that backend rather than a refresh of Open WebUI's list.
 For LM Studio this is the only way the gateway knows of such a load, and selection on the `lmStudio` backend then sends LM Studio nothing for another model.

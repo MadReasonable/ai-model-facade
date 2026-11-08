@@ -43,10 +43,32 @@ type Current struct {
 	Reason  string
 }
 
+// CandidateStatus is one candidate's state now. Match is the model the
+// candidate resolves to when that differs from Model: a pattern's match.
+// Winner marks the candidate a request made now would go to.
+type CandidateStatus struct {
+	Model      string
+	Backend    string
+	LoadIfNone bool
+	State      string
+	Match      string
+	AliasOf    string
+	Winner     bool
+}
+
+// Inspection is a facade's routing now, with every candidate's state.
+type Inspection struct {
+	Current    *Current // nil if no backend's state could be read
+	Candidates []CandidateStatus
+}
+
 type Handler interface {
 	Description() string
 	// Current predicts the routing of a request made now, without making one.
 	Current(ctx context.Context) (Current, error)
+	// Inspect is Current with the state of every candidate. A non-nil error
+	// means Current is nil; Candidates are still filled.
+	Inspect(ctx context.Context) (Inspection, error)
 	Chat(ctx context.Context, endpoint backend.Endpoint, body []byte, client backend.Client) (Result, error)
 	// Describe prints the entry's resolved configuration for the check command.
 	Describe(w io.Writer)

@@ -478,3 +478,56 @@ func TestCandidate_Validate(t *testing.T) {
 		}
 	}
 }
+
+// Inspect reports every candidate, including those after the one Select would
+// pick, with the state Select acts on.
+func TestFirstLoaded_InspectReportsEveryCandidate(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{
+		{Model: "a"},
+		{Model: "b:*"},
+		{Model: "c"},
+		{Model: "d"},
+		{Model: "qwen3.6-35b:Slacker", LoadIfNone: true},
+	}}
+	f := &fakeBackend{
+		loaded:   []string{"b:q8", "qwen3.6-35b:q8"},
+		starting: []string{"c"},
+		unknown:  []string{"d"},
+		aliases:  map[string][]string{"qwen3.6-35b:q8": {"qwen3.6-35b:Slacker"}},
+	}
+	got := s.Inspect(context.Background(), f)
+	want := []struct{ state, id, aliasOf string }{
+		{StateNotLoaded, "", ""},
+		{StateLoaded, "b:q8", ""},
+		{StateStarting, "c", ""},
+		{StateUnknown, "d", ""},
+		{StateLoaded, "qwen3.6-35b:Slacker", "qwen3.6-35b:q8"},
+	}
+	for i, w := range want {
+		if got[i].State != w.state || got[i].ID != w.id || got[i].AliasOf != w.aliasOf {
+			t.Errorf("%s: got %q, %q, %q, want %q, %q, %q", got[i].Model, got[i].State, got[i].ID, got[i].AliasOf, w.state, w.id, w.aliasOf)
+		}
+	}
+}
+
+// Inspect reports the candidates Select skips, and why it skips them.
+func TestFirstLoaded_InspectReportsSkippedCandidates(t *testing.T) {
+	s := &FirstLoaded{Candidates: []Candidate{{Model: "a"}, {Model: "b"}}}
+	cases := []struct {
+		name    string
+		b       backend.Backend
+		a, want string
+	}{
+		{"backend loading", &fakeBackend{err: backend.ErrLoading}, StateBusy, StateBusy},
+		{"state unreadable", &fakeBackend{err: errors.New("down")}, StateUnavailable, StateUnavailable},
+		{"request pending for another model", oneAtATime{&fakeBackend{starting: []string{"b"}, pending: []string{"b"}}}, StateBlocked, StateStarting},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := s.Inspect(context.Background(), c.b)
+			if got[0].State != c.a || got[1].State != c.want {
+				t.Errorf("got %q and %q, want %q and %q", got[0].State, got[1].State, c.a, c.want)
+			}
+		})
+	}
+}

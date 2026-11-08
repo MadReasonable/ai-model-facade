@@ -110,36 +110,36 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 	for i, c := range s.Candidates {
 		st := states[c.backendOr(b)]
 		<-st.done
-		if st.busy {
+		state, id, base := st.classify(c)
+		switch state {
+		case StateBusy:
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": "+backend.ErrLoading.Error())
 			continue
-		}
-		if st.pending != nil {
-			if _, _, ok := st.pending.match(c.Model); !ok {
-				sel.Checked = append(sel.Checked, c.On(c.Model)+": not used while another model there has a request pending")
-				continue
-			}
-		}
-		if st.err != nil {
+		case StateBlocked:
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": not used while another model there has a request pending")
+			continue
+		case StateUnavailable:
 			sel.Checked = append(sel.Checked, c.On(c.Model)+": state unavailable")
-		} else if id, base, ok := st.ready.match(c.Model); ok {
+		case StateLoaded:
 			return winner(sel, i, id, base, describe(c, id, base, "loaded"), "loaded"), nil
-		} else if id, base, ok := st.starting.match(c.Model); ok {
+		case StateStarting:
 			sel.Checked = append(sel.Checked, describe(c, id, base, "starting"))
 			if wait < 0 {
 				wait, waitID, waitBase = i, id, base
 			}
-		} else if id, _, ok := st.unknown.match(c.Model); ok {
+		case StateUnknown:
 			// Selects like not loaded, but the log shouldn't claim it isn't.
 			if IsGlob(c.Model) {
 				sel.Checked = append(sel.Checked, c.On(c.Model)+": no match loaded; state unknown for "+id)
 			} else {
 				sel.Checked = append(sel.Checked, c.On(c.Model)+": state unknown")
 			}
-		} else if IsGlob(c.Model) {
-			sel.Checked = append(sel.Checked, c.On(c.Model)+": no match loaded")
-		} else {
-			sel.Checked = append(sel.Checked, c.On(c.Model)+": not loaded")
+		default:
+			if IsGlob(c.Model) {
+				sel.Checked = append(sel.Checked, c.On(c.Model)+": no match loaded")
+			} else {
+				sel.Checked = append(sel.Checked, c.On(c.Model)+": not loaded")
+			}
 		}
 		if c.LoadIfNone && fallback < 0 {
 			fallback = i
@@ -169,6 +169,69 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 	}
 	sel.Reason = "no candidate loaded"
 	return sel, nil
+}
+
+// The states a candidate can be in, as Inspect reports them.
+const (
+	StateLoaded      = "loaded"
+	StateStarting    = "starting"
+	StateNotLoaded   = "not loaded"
+	StateUnknown     = "unknown"     // selects like not loaded
+	StateUnavailable = "unavailable" // its backend's state couldn't be read
+	StateBusy        = "busy"        // its backend is loading a model and serves nothing until it has
+	StateBlocked     = "blocked"     // its backend has a request pending for another model, which this would abort
+)
+
+// CandidateState is one candidate's state now. ID is the model it resolves
+// to, set when the state comes from a listed model; AliasOf is the base model
+// when ID is an alias.
+type CandidateState struct {
+	Candidate
+	State   string
+	ID      string
+	AliasOf string
+}
+
+// Inspect reports the state of every candidate, including those Select would
+// never reach because an earlier one wins. It sends no request, so it never
+// triggers a load.
+func (s *FirstLoaded) Inspect(ctx context.Context, b backend.Backend) []CandidateState {
+	states := s.states(ctx, b)
+	inspected := make([]CandidateState, len(s.Candidates))
+	for i, c := range s.Candidates {
+		st := states[c.backendOr(b)]
+		<-st.done
+		state, id, base := st.classify(c)
+		inspected[i] = CandidateState{Candidate: c, State: state, ID: id, AliasOf: base}
+	}
+	return inspected
+}
+
+// classify returns c's state on this backend, with the model it resolves to
+// when one is listed. Select and Inspect share it, so what Inspect reports is
+// what Select acts on.
+func (st *backendState) classify(c Candidate) (state, id, base string) {
+	if st.busy {
+		return StateBusy, "", ""
+	}
+	if st.pending != nil {
+		if _, _, ok := st.pending.match(c.Model); !ok {
+			return StateBlocked, "", ""
+		}
+	}
+	if st.err != nil {
+		return StateUnavailable, "", ""
+	}
+	if id, base, ok := st.ready.match(c.Model); ok {
+		return StateLoaded, id, base
+	}
+	if id, base, ok := st.starting.match(c.Model); ok {
+		return StateStarting, id, base
+	}
+	if id, _, ok := st.unknown.match(c.Model); ok {
+		return StateUnknown, id, ""
+	}
+	return StateNotLoaded, "", ""
 }
 
 // backendState is one backend's models, sorted by state, or why they

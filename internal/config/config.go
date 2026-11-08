@@ -16,6 +16,7 @@ import (
 type Config struct {
 	Server   Server    `yaml:"server"`
 	Logging  Logging   `yaml:"logging"`
+	API      API       `yaml:"api"`
 	Vars     yaml.Node `yaml:"vars"` // ignored; a home for anchors
 	Backends yaml.Node `yaml:"backends"`
 	Models   yaml.Node `yaml:"models"`
@@ -36,6 +37,18 @@ type APIKey struct {
 type Logging struct {
 	Level        string `yaml:"level"`
 	LogSelection bool   `yaml:"logSelection"`
+}
+
+// API configures what the gateway presents to clients of each API family.
+type API struct {
+	OpenAI APIFamily `yaml:"openAi"`
+}
+
+// APIFamily configures one API family's endpoints.
+type APIFamily struct {
+	// AddCurrent adds `current` to the family's model objects. Off by default,
+	// since it makes a listing read backend state.
+	AddCurrent bool `yaml:"addCurrent"`
 }
 
 // UnknownClient is the client name logged for a key not in server.apiKeys.

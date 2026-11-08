@@ -45,7 +45,7 @@ backends:
   ollama:
     maxLoadedModels: 2
     keepAlive: "-1" # never on idle; Ollama has no per-model setting for it
-    ctxSize: 4096   # in place of Ollama's 2048, like the other backends
+    ctxSize: 4096   # in place of Ollama's 2048, like llama-server's
     models:
       - { id: ollama-llm-1, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 0 }
       - { id: ollama-llm-2, file: Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf, copy: 2 }

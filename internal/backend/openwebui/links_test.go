@@ -337,3 +337,24 @@ func must(models []backend.ModelInfo, err error) []backend.ModelInfo {
 	}
 	return models
 }
+
+// busyTarget is a linked backend whose state read may not wait for a refresh
+// in flight.
+type busyTarget struct{ linkTarget }
+
+func (busyTarget) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	return nil, backend.ErrStateBusy
+}
+
+// A linked read that may not wait keeps Open WebUI's state for that read, and
+// doesn't report the backend as down, since a refresh of it is in flight.
+func TestLinks_ReadThatMayNotWaitIsNotADownBackend(t *testing.T) {
+	var logs bytes.Buffer
+	l := &link{name: "swap", target: busyTarget{}}
+	if states := l.states(context.Background(), slog.New(slog.NewTextHandler(&logs, nil))); states != nil {
+		t.Errorf("states: %v", states)
+	}
+	if l.down.Load() || logs.Len() != 0 {
+		t.Errorf("down %v; logs: %s", l.down.Load(), logs.String())
+	}
+}

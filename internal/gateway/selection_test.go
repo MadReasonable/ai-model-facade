@@ -94,7 +94,7 @@ func TestSelection_PicksAmongCandidatesOnSeveralBackends(t *testing.T) {
 	swap := newSwap(t)
 	ollama := testkit.NewOllama(t, "qwen3:1.7b")
 	ollama.SetLoaded("qwen3:1.7b")
-	gw := startGateway(t, mixedConfig, map[string]string{"SWAP_URL": swap.URL, "OLLAMA_URL": ollama.URL})
+	gw := startGateway(t, currentOn+mixedConfig, map[string]string{"SWAP_URL": swap.URL, "OLLAMA_URL": ollama.URL})
 	swap.Reset()
 	r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"task","messages":[]}`)
 	req, _ := ollama.Last("POST /v1/chat/completions")

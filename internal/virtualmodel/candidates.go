@@ -196,11 +196,32 @@ func (m *candidates) Current(ctx context.Context) (Current, error) {
 	if err != nil {
 		return Current{}, err
 	}
+	return m.currentOf(sel), nil
+}
+
+func (m *candidates) currentOf(sel selector.Selection) Current {
 	cur := Current{Model: sel.Target, AliasOf: sel.AliasOf, Reason: sel.Reason}
 	if sel.Index >= 0 {
 		cur.Backend = m.selector.Candidates[sel.Index].BackendName
 	}
-	return cur, nil
+	return cur
+}
+
+func (m *candidates) Inspect(ctx context.Context) (Inspection, error) {
+	sel, err := m.selector.Select(ctx, nil, m.backend)
+	var inspection Inspection
+	if err == nil {
+		cur := m.currentOf(sel)
+		inspection.Current = &cur
+	}
+	for i, c := range m.selector.Inspect(ctx, m.backend) {
+		status := CandidateStatus{Model: c.Model, Backend: m.backendNames[i], LoadIfNone: c.LoadIfNone, State: c.State, AliasOf: c.AliasOf, Winner: err == nil && sel.Index == i}
+		if c.ID != c.Model {
+			status.Match = c.ID
+		}
+		inspection.Candidates = append(inspection.Candidates, status)
+	}
+	return inspection, err
 }
 
 func (m *candidates) Chat(ctx context.Context, endpoint backend.Endpoint, body []byte, client backend.Client) (Result, error) {

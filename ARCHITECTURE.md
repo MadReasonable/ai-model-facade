@@ -48,7 +48,8 @@ Builds a running gateway from a config (`Build`) and serves it.
 
 Facade types, each with its own schema, validator and `Handler`.
 `candidates`, the only type and the default, compiles the facade's and each candidate's params, checks candidate IDs against their backends, and on each request runs the selector, applies params and calls the winner's backend.
-`Handler.Current` predicts the selection without making a request, for `current` in `/v1/models`.
+`Handler.Current` predicts the selection without making a request, for `current` in `/v1/models` with `api.openAi.addCurrent` on.
+`Handler.Inspect` adds the state of every candidate, for `/amf/models`.
 A new behaviour is a new type here, so existing config entries never change meaning.
 
 ### `internal/selector`

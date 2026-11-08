@@ -175,6 +175,7 @@ Instances on the same file share its pages, so each one beyond the first adds on
 
 The `llamaSwap` backend runs llama-swap v263, `ghcr.io/mostlygeek/llama-swap:v263-cpu-b11552-non-root`, which starts one llama-server process per model on demand; the image bundles llama.cpp b11552.
 Its config is `backend-config/llama-swap.yaml`, and every ID loads the Qwen3 0.6B file.
+Its models have an 8192-token context, twice the other backends', because the slots of one llama-server appear to share its context, and Open WebUI's chat flow takes about 2,700 tokens a request: at 4096, the second of two requests at once fails, and the gateway reports the stream as `unexpected EOF`, while at 8192 both are served (verified on v263 and Open WebUI v0.12.3; the sharing is inferred from that and from `/props`).
 
 | Service | Port | Model IDs |
 |---|---|---|
@@ -196,7 +197,7 @@ The `ollama` backend runs Ollama 0.40.8, `ollama/ollama:0.40.8`, which loads and
 | `ollama` | 18083 | `ollama-llm-1:latest`, `ollama-llm-2:latest`, `ollama-llm-3:latest`, `ollama-llm-4:latest` |
 
 Ollama doesn't load a GGUF from a path: a model is imported into its store first, and its name always gets a tag, `:latest` here.
-`control` does the import as the backend's setup step, once Ollama is up, through Ollama's API: it uploads the file's bytes and creates each model from them, with a 4096-token context like the other backends' in place of Ollama's 2048.
+`control` does the import as the backend's setup step, once Ollama is up, through Ollama's API: it uploads the file's bytes and creates each model from them, with a 4096-token context like llama-server's in place of Ollama's 2048.
 
 The setup step makes Ollama's models match the `ollama` section of `config.yaml`, which is why it is done only when they do.
 It compares each model Ollama has with the section, by name, by the blob it was made from and by its context size, then creates each model that is missing or differs and deletes each one the section doesn't list; a model that matches is left alone.
@@ -251,7 +252,7 @@ A gateway config can take it from the environment, as `apiKey: ${OPEN_WEBUI_API_
 With `ENABLE_PERSISTENT_CONFIG=False` that change is kept in memory, not in its database, so the next start takes the environment again, which says the same (verified on v0.12.3).
 Loading and unloading are done on the backend behind Open WebUI, so `control` answers `409` to them here.
 
-Open WebUI adds the definitions of its built-in tools to every request through its chat flow, which took a three-word prompt to 5,148 tokens, more than the models' 4096-token context.
+Open WebUI adds the definitions of its built-in tools to every request through its chat flow, which took a three-word prompt to 5,148 tokens, more than the 4096-token context of most backends here.
 So `compose.yaml` turns off its code interpreter, notes, automations and calendar, and the same prompt takes 2,597.
 Memories stay on: their tools are added only to a request that asks for them, as the gateway's `webui-memory` facade does, which takes about 3,800 tokens a call (verified on v0.12.3).
 

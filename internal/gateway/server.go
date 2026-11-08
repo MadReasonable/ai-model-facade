@@ -48,6 +48,8 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /v1/models", s.authenticated(s.listModels))
 	mux.HandleFunc("GET /v1/models/{id...}", s.authenticated(s.getModel))
+	mux.HandleFunc("GET /amf/models", s.authenticated(s.listFacades))
+	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(s.getFacade))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticated(s.completions(backend.ChatCompletions)))
 	mux.HandleFunc("POST /v1/completions", s.authenticated(s.completions(backend.Completions)))
 	// Every request carries its arrival time, so its state reads reuse any
@@ -102,7 +104,8 @@ func (s *server) authenticated(next clientHandler) http.HandlerFunc {
 }
 
 // modelObject is a virtual model in OpenAI's model-object shape, plus
-// `current`, an addition clients that don't know it ignore.
+// `current` when api.openAi.addCurrent is on, an addition clients that don't
+// know it ignore.
 type modelObject struct {
 	ID          string         `json:"id"`
 	Object      string         `json:"object"`
@@ -116,23 +119,43 @@ type modelObject struct {
 // which can change by the next request.
 type currentObject struct {
 	Model   string `json:"model,omitempty"`
-	AliasOf string `json:"alias_of,omitempty"`
+	AliasOf string `json:"aliasOf,omitempty"`
 	Backend string `json:"backend,omitempty"` // when it isn't the virtual model's own
 	Reason  string `json:"reason"`
 }
 
-// modelObject describes m. If the backend's state can't be read, `current`
-// is left out rather than failing the listing. It never waits on a state
-// refresh already in flight, which may be the one asking: Open WebUI's model
-// refresh calls this gateway's /v1/models while this gateway fetches it.
+func newCurrentObject(cur virtualmodel.Current) *currentObject {
+	return &currentObject{Model: cur.Model, AliasOf: cur.AliasOf, Backend: cur.Backend, Reason: cur.Reason}
+}
+
+// currentOf returns where a request for m would go now. If the backend's
+// state can't be read it returns nil, so the caller leaves `current` out
+// rather than failing the listing.
+func (s *server) currentOf(ctx context.Context, m Model) *currentObject {
+	cur, err := m.Handler.Current(ctx)
+	if err != nil {
+		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
+		return nil
+	}
+	return newCurrentObject(cur)
+}
+
+// modelObject describes m for an OpenAI client. With api.openAi.addCurrent off,
+// no backend's state is read.
 func (s *server) modelObject(ctx context.Context, m Model) modelObject {
 	obj := modelObject{ID: m.Name, Object: "model", Created: s.started, OwnedBy: "ai-model-facade", Description: m.Handler.Description()}
-	if cur, err := m.Handler.Current(backend.WithoutStateWait(ctx)); err == nil {
-		obj.Current = &currentObject{Model: cur.Model, AliasOf: cur.AliasOf, Backend: cur.Backend, Reason: cur.Reason}
-	} else {
-		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
+	if s.gateway.Config.API.OpenAI.AddCurrent {
+		obj.Current = s.currentOf(ctx, m)
 	}
 	return obj
+}
+
+// listingContext is the context for building `current` in an OpenAI listing.
+// It never waits on a state refresh already in flight, which may be the one
+// asking: Open WebUI's model refresh calls this gateway's /v1/models while
+// this gateway fetches it.
+func listingContext(ctx context.Context) context.Context {
+	return backend.WithoutStateWait(ctx)
 }
 
 func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backend.Client) {
@@ -140,7 +163,7 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 		Object string        `json:"object"`
 		Data   []modelObject `json:"data"`
 	}{Object: "list", Data: []modelObject{}}
-	ctx := backend.WithStateSnapshot(r.Context())
+	ctx := listingContext(backend.WithStateSnapshot(r.Context()))
 	for _, m := range s.gateway.Models {
 		list.Data = append(list.Data, s.modelObject(ctx, m))
 	}
@@ -153,11 +176,75 @@ func (s *server) getModel(w http.ResponseWriter, r *http.Request, client backend
 	for _, m := range s.gateway.Models {
 		if m.Name == id {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.modelObject(r.Context(), m))
+			json.NewEncoder(w).Encode(s.modelObject(listingContext(r.Context()), m))
 			return
 		}
 	}
 	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
+}
+
+// facadeObject is a facade in the gateway's own /amf shape, the same in the
+// list and alone. It always reports `current` and its candidates, whatever
+// api.openAi.addCurrent says.
+type facadeObject struct {
+	ID          string            `json:"id"`
+	Description string            `json:"description,omitempty"`
+	Current     *currentObject    `json:"current,omitempty"`
+	Candidates  []candidateObject `json:"candidates,omitempty"`
+}
+
+// candidateObject is one candidate of a facade and its state now.
+type candidateObject struct {
+	Model      string `json:"model"`
+	Backend    string `json:"backend,omitempty"`
+	LoadIfNone bool   `json:"loadIfNone,omitempty"`
+	State      string `json:"state"`
+	Match      string `json:"match,omitempty"`
+	AliasOf    string `json:"aliasOf,omitempty"`
+	Winner     bool   `json:"winner,omitempty"`
+}
+
+// listFacades serves /amf/models. Unlike /v1/models it may wait on a state
+// refresh in flight: Open WebUI calls /v1/models during its refresh, never
+// this, so the refresh can't be waiting on this request.
+func (s *server) listFacades(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	list := struct {
+		Models []facadeObject `json:"models"`
+	}{Models: []facadeObject{}}
+	ctx := backend.WithStateSnapshot(r.Context())
+	for _, m := range s.gateway.Models {
+		list.Models = append(list.Models, s.facadeObject(ctx, m))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+// getFacade serves /amf/models/{id}: one entry of the list.
+func (s *server) getFacade(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	id := r.PathValue("id")
+	for _, m := range s.gateway.Models {
+		if m.Name == id {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(s.facadeObject(backend.WithStateSnapshot(r.Context()), m))
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
+}
+
+func (s *server) facadeObject(ctx context.Context, m Model) facadeObject {
+	inspection, err := m.Handler.Inspect(ctx)
+	if err != nil {
+		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
+	}
+	obj := facadeObject{ID: m.Name, Description: m.Handler.Description()}
+	if inspection.Current != nil {
+		obj.Current = newCurrentObject(*inspection.Current)
+	}
+	for _, c := range inspection.Candidates {
+		obj.Candidates = append(obj.Candidates, candidateObject{Model: c.Model, Backend: c.Backend, LoadIfNone: c.LoadIfNone, State: c.State, Match: c.Match, AliasOf: c.AliasOf, Winner: c.Winner})
+	}
+	return obj
 }
 
 // completions serves one completion endpoint. Chat and legacy completions

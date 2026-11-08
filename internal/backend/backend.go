@@ -128,19 +128,14 @@ const RouteField = "ai_model_facade_route"
 
 type noStateWaitKey struct{}
 
-// WithoutStateWait marks ctx so that LoadedModels doesn't wait for a state
-// refresh already in flight: it answers from the last cached state, or fails
-// with ErrStateBusy. /v1/models uses it, because building `current` can loop
-// back into this gateway through Open WebUI, and the nested call would
-// otherwise wait on the refresh that is waiting for it.
+// WithoutStateWait marks ctx so that LoadedModels, on a backend configured with
+// loopsBack, doesn't wait for a state refresh already in flight: it answers
+// from the last cached state, or fails with ErrStateBusy. /v1/models uses it,
+// because building `current` can loop back through Open WebUI, and the nested
+// call would otherwise wait on the refresh that is waiting for it. A backend
+// without loopsBack waits as usual.
 func WithoutStateWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, noStateWaitKey{}, true)
-}
-
-// WithStateWait undoes WithoutStateWait for a state read that can't loop back
-// into this gateway, such as llama-swap's.
-func WithStateWait(ctx context.Context) context.Context {
-	return context.WithValue(ctx, noStateWaitKey{}, nil)
 }
 
 // StateWaitAllowed reports whether ctx may wait for a refresh in flight.
