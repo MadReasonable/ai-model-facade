@@ -12,7 +12,7 @@ import (
 
 func newBackend(t *testing.T, f *testkit.OpenAI, extra string) *Backend {
 	t.Helper()
-	b, err := New(testkit.Entry(t, "openAI", `{type: openAI, baseUrl: "`+f.URL+`", apiKey: test-key`+extra+`}`))
+	b, err := New(testkit.Entry(t, "openAi", `{type: openAi, baseUrl: "`+f.URL+`", apiKey: test-key`+extra+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +109,8 @@ func TestOpenAI_StateListsTheAPIIfNotListedYet(t *testing.T) {
 }
 
 func TestOpenAI_RejectsAWrongConfig(t *testing.T) {
-	for _, src := range []string{"{type: openAI}", "{type: openAI, baseUrl: x, organization: o}"} {
-		if _, err := New(testkit.Entry(t, "openAI", src)); err == nil {
+	for _, src := range []string{"{type: openAi}", "{type: openAi, baseUrl: x, organization: o}"} {
+		if _, err := New(testkit.Entry(t, "openAi", src)); err == nil {
 			t.Errorf("%s: expected an error", src)
 		}
 	}

@@ -247,7 +247,7 @@ func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 		return localai.New(e)
 	case "ollama":
 		return ollama.New(e)
-	case "openAI":
+	case "openAi":
 		return openai.New(e)
 	case "anthropic":
 		return anthropic.New(e)

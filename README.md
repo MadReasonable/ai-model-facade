@@ -324,7 +324,7 @@ If the backend fails mid-stream, the gateway sends a final `data: {"error": {...
 
 The config is YAML.
 `config.example.yaml` is a complete setup with two facades: `task-monkey` for Open WebUI background tasks, and `assistant` for a Home Assistant voice assistant that uses whichever `:Assistant` preset llama-swap has loaded.
-It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAI` and `anthropic` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
+It also carries commented-out `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAi` and `anthropic` backend entries, and a commented-out `researcher` facade that gives any client Open WebUI's web search and memory.
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets; there is no other substitution.
@@ -360,7 +360,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAI` or `anthropic`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAi` or `anthropic`.
 All take these keys:
 
 | Key | Description |
@@ -450,7 +450,7 @@ A candidate without a tag, such as `llama3`, isn't treated as `llama3:latest`; t
 
 #### OpenAI
 
-An `openAI` backend is OpenAI's API, `https://api.openai.com`, or another hosted API that serves Chat Completions the same way, such as OpenRouter's, at its own `baseUrl`.
+An `openAi` backend is OpenAI's API, `https://api.openai.com`, or another hosted API that serves Chat Completions the same way, such as OpenRouter's, at its own `baseUrl`.
 Its models come from `/v1/models`, and every model listed counts as loaded while the API answers, since a hosted model needs no load.
 It takes no keys beyond the shared ones; `apiKey` is the API key.
 
@@ -472,7 +472,7 @@ These are from OpenAI's API documentation; the model list and a chat were checke
 #### Anthropic
 
 An `anthropic` backend is Anthropic's Claude API, `https://api.anthropic.com`, reached through its Messages API: the gateway translates each Chat Completions request into a Messages request, and the response, whole or streamed, back into a chat completion.
-Its models come from `/v1/models`, and it counts them as loaded exactly as an `openAI` backend does: every listed model while the API answers, with the list read again after a failed request or once older than `stateCacheSeconds`, so a candidate placed after the local candidates is used when none of them is loaded.
+Its models come from `/v1/models`, and it counts them as loaded exactly as an `openAi` backend does: every listed model while the API answers, with the list read again after a failed request or once older than `stateCacheSeconds`, so a candidate placed after the local candidates is used when none of them is loaded.
 It takes no keys beyond the shared ones; `apiKey` is a Claude API key.
 A key that isn't scoped to one workspace needs Anthropic's `anthropic-workspace-id` header, which the gateway doesn't send, so use a workspace key.
 

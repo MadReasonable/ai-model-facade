@@ -225,7 +225,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama` and `openAI` forward requests unchanged through `openaihttp.Client`; `anthropic` translates requests and responses to and from the Claude API's Messages API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama` and `openAi` forward requests unchanged through `openaihttp.Client`; `anthropic` translates requests and responses to and from the Claude API's Messages API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
