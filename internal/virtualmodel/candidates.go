@@ -260,6 +260,27 @@ func (m *candidates) Inspect(ctx context.Context) (Inspection, error) {
 	return inspection, err
 }
 
+func (m *candidates) OutputCap() (limit int64, ok bool) {
+	for i, c := range m.selector.Candidates {
+		catalog := m.catalogs[i]
+		ids := []string{c.Model}
+		if selector.IsGlob(c.Model) {
+			bases, aliases := selector.Matches(c.Model, catalog.Models)
+			ids = append(bases, aliases...)
+		}
+		for _, id := range ids {
+			if base, isAlias := catalog.AliasOf[id]; isAlias {
+				id = base
+			}
+			model, _ := catalog.Model(id)
+			if model.OutputCap > 0 && (!ok || model.OutputCap < limit) {
+				limit, ok = model.OutputCap, true
+			}
+		}
+	}
+	return limit, ok
+}
+
 func (m *candidates) Serves(protocol backend.Protocol) bool {
 	return m.protocols == nil || slices.Contains(m.protocols, protocol)
 }
@@ -270,7 +291,7 @@ func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body [
 		return res, err
 	}
 	reply, err := pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
-	res.Chat = reply
+	res.Chat, res.Dropped = reply.Chat, reply.Dropped
 	return res, err
 }
 

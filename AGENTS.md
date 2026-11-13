@@ -1,6 +1,6 @@
 # ai-model-facade
 
-An OpenAI-compatible gateway that serves facades: model names that exist only in its config.
+An LLM gateway that serves facades to OpenAI and Claude clients: model names that exist only in its config.
 A client asks for a facade such as `task`; the gateway picks a real model from that facade's candidate list, based on which models its backends have loaded, patches the request with the configured params, and forwards it through a backend adapter (llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI's API or Anthropic's Claude API).
 A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side tools: the `openwebui` adapter runs Open WebUI's multi-request chat flow and returns one ordinary response or stream, so its polling, synthesized responses and route field are the point of that adapter, not inconsistencies to remove.
 
@@ -28,7 +28,7 @@ Each has its reasoning in `docs/agents-design.md`, in the section named after it
 2. **Params are merge patches** (Params as merge patches). Every `params` value is applied as JSON Merge Patch (RFC 7386): objects merge recursively, scalars and arrays replace, `null` deletes. `params` may be a map or a list of maps applied in order. Never completely replace a top-level key; that is the llama-swap behaviour this project exists to avoid.
 3. **Fixed order of application:** client body, then any translation to the protocol the adapter receives, then the facade's `params`, then the winning candidate's `params`, each `all` before its protocol's block, then `model` rewritten to the chosen ID. Gateway params override the client.
 4. **Key order is kept** (The walker). Existing body keys stay in place; keys a patch adds are appended to their object in config order. Patches are built from the `yaml.Node` tree, never from a Go map.
-5. **Each facade is self-contained** (The concept: facades). No families or other implicit matching by model ID. Shared settings come only from YAML anchors under `vars:`, referenced explicitly.
+5. **Each facade is self-contained** (The concept: facades). No model families or other implicit matching by model ID. Shared settings come only from YAML anchors under `vars:`, referenced explicitly.
 6. **Never trigger a load the list didn't ask for** (Selection). The winner is the first candidate its backend reports ready; else the first one still starting; else the first `loadIfNone: true` candidate, wherever it sits. A backend loading a model is sent nothing while it loads that it would refuse or that would abort the load. Stopping or stopped models never count. An alias has its base model's state; patterns prefer base models over aliases.
 7. **Adapters may stream.** An adapter returns a complete response or a chunk stream, and the front end handles both.
 8. **Fail only on a wrong config** (Errors and warnings). Unknown keys, an undefined `${ENV}`, a duplicated name, an undefined backend reference, or a selector whose required capability the backend lacks are startup errors. A check that depends on a backend being up and current is a warning (`Gateway.Warnings`): `serve` and reloads log it and start, `check` reports it as an error and exits non-zero.
@@ -59,7 +59,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `cmd/ai-model-facade`: the commands; `run` returns the exit code, so they're tested in-process.
 - `internal/config`: parsing, `${ENV}` expansion, strict decoding (`DecodeStrict`, since yaml.v3's `KnownFields(true)` doesn't apply to `yaml.Node.Decode`).
 - `internal/protocols`: one descriptor per protocol (path, family, stream framing, stream error event). Code reads the descriptor rather than switching on the protocol.
-- `internal/gateway`: building and reloading a gateway, and the front end. The front end does HTTP and SSE framing only; selection belongs to the facade, and everything after it to the pipeline.
+- `internal/gateway`: building and reloading a gateway, the API families (`family.go`), and the front end. The front end does HTTP and SSE framing only; selection belongs to the facade, and everything after it to the pipeline.
 - `internal/virtualmodel`: facade types, which select a candidate and hand it to the pipeline. A new behaviour is a new type with its own schema, validator and handler, never a change to `candidates`.
 - `internal/pipeline`: the run after selection, the same for every facade type: route, translation, params, model, backend call, reply translated back.
 - `internal/selector`: the selection order (`FirstLoaded`) and how patterns and aliases match.

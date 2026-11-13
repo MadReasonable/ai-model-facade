@@ -49,7 +49,7 @@ client -> front end -> facade -> selector -> pipeline -> backend adapter -> back
                                               translate, mergepatch
 ```
 
-The front end (`internal/gateway`) serves the OpenAI API at the paths in the protocols' descriptors (`internal/protocols`), and does HTTP and SSE framing only.
+The front end (`internal/gateway`) serves each API family's endpoints, built from the protocols' descriptors (`internal/protocols`), and does HTTP and SSE framing only.
 A facade (`internal/virtualmodel`) owns its policy: which selector, which params, which backends.
 The selector (`internal/selector`) turns backend state into one chosen model.
 The pipeline (`internal/pipeline`) runs everything after the choice, the same for every facade type: the route to the backend, translation (`internal/translate`), params as byte edits (`internal/mergepatch`), the model rewritten, the backend call, and the reply translated back.
@@ -389,6 +389,9 @@ As for OpenAI, every listed model is ready while the API answers, and the list i
 The adapter declares only `anthropicMessages`, so a legacy completion can't reach it, and params for it are always in Messages spelling.
 Limit: a key that isn't scoped to one workspace needs `anthropic-workspace-id` on every request, which the gateway doesn't send.
 
+Before a request reaches the API, the adapter removes the thinking blocks the gateway made, whose signature is `amf-unsigned`, since only Claude may write a signed one (`withoutUnsignedThinking`).
+The API refuses them, and they reach a Claude candidate whenever a conversation started elsewhere continues there.
+
 ### Open WebUI
 
 The adapter gives a client without tool support Open WebUI's tools, by running a request the way Open WebUI's own UI does and returning one ordinary OpenAI response or stream.
@@ -488,17 +491,17 @@ A loop is caught on its first repeat, with no hop limit to choose, and a chain o
 ## Translation
 
 A request whose protocol the selected backend doesn't accept is translated to one it does, and the reply translated back, streamed or not (`internal/translate`).
-Translation is the one place request bodies are rebuilt rather than patched, so it keeps two rules: what crosses keeps its meaning, and what can't cross is either dropped or refused with 400 before anything is sent.
+Translation is the one place request bodies are rebuilt rather than patched, so it keeps two rules: what crosses keeps its meaning, and what can't cross is either dropped and reported (`X-Gateway-Dropped`) or refused with 400 before anything is sent.
 A field is dropped when the request still means what the client asked without it, such as a sampling setting the target lacks, and refused when the client would otherwise go without what it asked for and not know, such as `n` above 1.
 
 ### Routes and pairs
 
-Decided: a direct translator from Chat Completions to Messages, for the Claude API, held in the pair's file (`chat_messages.go`).
+Decided: a direct translator for each direction between the two client protocols, Chat Completions and Messages, held in one file for the pair (`chat_messages.go`).
 `translate.Route` picks the identity route when the backend accepts the request's protocol, else the direct translator to the first protocol it accepts.
 Decided against, for now: an intermediate form that every protocol translates to and from, a hub.
 A direct pair carries what both of its protocols have, where a hub carries only what its form has, so the pair stays a valid route beside a hub when one is built.
 
-Each protocol has a module: `chat.go` reads Chat Completions requests into small values (messages and parts, tools, tool choice, format, effort) and writes their replies through one writer used streamed and not, `chatWriter`, and `messages.go` builds a Messages request's blocks.
+Each protocol has a module (`chat.go`, `messages.go`) that reads its requests into small values (messages and parts, tools, tool choice, format, effort) and writes its replies through one writer used streamed and not: `chatWriter`, `messagesWriter`.
 Decided: a writer per protocol, so every translator answering a client of that protocol writes the same shapes and events, and a fix to a reply's shape is made once.
 A translator runs before params, since params are written in the protocol the adapter receives.
 
@@ -522,17 +525,22 @@ An API error keeps its status and `Retry-After`, with its message and type in Op
 
 Limit: Chat Completions has no place for a thinking block's signature, without which the API won't take thinking back, so an assistant turn's `reasoning_content` isn't sent back. The API accepts a tool loop without it (verified, with thinking on), and the model continues without its earlier reasoning.
 
+A Messages request is translated to Chat Completions by `toChat` in the same file, the reverse of each rule above where one exists; thinking, `cache_control`, `service_tier` and `context_management` are dropped, since a Chat Completions model has no use for them.
+A model's reasoning comes back as a thinking block signed with `amf-unsigned`, which only the gateway writes, so that history can still reach the Claude API once the adapter has removed the block (Anthropic).
+A Chat Completions stream has no blocks, and Messages sends one block at a time and can't reopen one, so the first tool call streams its arguments and later calls are sent complete at the end.
+Decided (2026-11-10): reasoning and text that arrive while the first call's block is open are held until the stream ends and sent after the call, since a Chat Completions stream never says that a call's arguments are complete, and closing the block would lose its later arguments.
+
 ### Effort
 
 Reasoning effort levels differ between vendors (verified 2026-11-10): Claude takes `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI `none`, `low`, `medium`, `high` and `xhigh`, and `minimal` on some models.
-A level crosses as itself where Claude has it, else as the nearest Claude has (`effort.go`): `none` and `minimal` reach Claude as `low`.
+A level crosses as itself where both have it, else as the nearest the other has (`effort.go`): `none` and `minimal` reach Claude as `low`, and `max` reaches OpenAI as `xhigh`.
 A level neither knows passes on as sent, for the backend to accept or refuse.
 
 ## Errors
 
-Before the response starts, an error is an OpenAI-style error body with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read.
-A request fails with one error type, `pipeline.Error`, holding the status, an OpenAI error type and the message.
-After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]`.
+Before the response starts, an error is an error body in the shape of the client's API family, with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read.
+A request fails with one error type, `pipeline.Error`, holding the status, an OpenAI error type and the message, and the front end writes it in OpenAI's shape or Anthropic's, whose error types Claude's clients use to decide whether to retry.
+After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]` for Chat Completions, and an `error` event for Messages.
 Clients then show an error instead of a silently cut reply.
 A backend's error event already in the protocol's shape is relayed as is.
 

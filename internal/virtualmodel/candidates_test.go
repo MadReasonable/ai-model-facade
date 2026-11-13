@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/selector"
 )
 
 // A preset listed without its base model gets the same override note as an
@@ -57,6 +58,43 @@ func TestCandidates_NoOverrideNoteForAPlainAlias(t *testing.T) {
 		noteAliases(slog.New(slog.NewTextHandler(&logged, nil)), "m", c.candidate, catalog, true)
 		if logged.Len() > 0 {
 			t.Errorf("startup log, %s: %q", c.candidate, logged.String())
+		}
+	}
+}
+
+// A facade's output cap is the smallest any model it can select has: an
+// exact ID, an alias as its base model, and every model a pattern matches,
+// with a model whose list gives none left out.
+func TestCandidates_OutputCapIsTheSmallestAmongCandidates(t *testing.T) {
+	claude := backend.NewCatalog([]backend.ModelInfo{
+		{ID: "claude-a", OutputCap: 64000},
+		{ID: "claude-b", OutputCap: 32000, Aliases: []string{"b"}},
+		{ID: "other-c", OutputCap: 8000},
+	})
+	local := backend.NewCatalog([]backend.ModelInfo{{ID: "qwen"}})
+	cases := []struct {
+		models []string
+		limit  int64
+		ok     bool
+	}{
+		{[]string{"claude-a"}, 64000, true},
+		{[]string{"claude-a", "b"}, 32000, true},
+		{[]string{"qwen", "claude-*"}, 32000, true},
+		{[]string{"qwen"}, 0, false},
+		{[]string{"unlisted"}, 0, false},
+	}
+	for _, c := range cases {
+		m := &candidates{selector: &selector.FirstLoaded{}}
+		for _, model := range c.models {
+			m.selector.Candidates = append(m.selector.Candidates, selector.Candidate{Model: model})
+			if model == "qwen" {
+				m.catalogs = append(m.catalogs, local)
+			} else {
+				m.catalogs = append(m.catalogs, claude)
+			}
+		}
+		if limit, ok := m.OutputCap(); limit != c.limit || ok != c.ok {
+			t.Errorf("%v: got %d %v, want %d %v", c.models, limit, ok, c.limit, c.ok)
 		}
 	}
 }

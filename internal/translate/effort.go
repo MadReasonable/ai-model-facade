@@ -16,3 +16,12 @@ func claudeEffort(level string) string {
 	}
 	return level
 }
+
+// openAIEffort is a Claude effort level as OpenAI takes it: OpenAI's highest
+// is xhigh.
+func openAIEffort(level string) string {
+	if level == "max" {
+		return "xhigh"
+	}
+	return level
+}

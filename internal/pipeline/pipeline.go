@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -25,7 +26,8 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/translate"
 )
 
-// Error is a request failure with the HTTP status and OpenAI error type to report.
+// Error is a request failure with the HTTP status and OpenAI error type to
+// report; the front end gives it the client's family's shape.
 type Error struct {
 	Status  int
 	Type    string
@@ -56,37 +58,53 @@ type Selected struct {
 	Params func(protocol backend.Protocol) []mergepatch.Patch
 }
 
-// Serve runs a request in protocol on the selected candidate, and returns
-// its result as the client gets it.
-func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client, sel Selected) (backend.ChatResult, error) {
+// Reply is a request's result as the client gets it, and the client's fields
+// the run left out.
+type Reply struct {
+	Chat    backend.ChatResult
+	Dropped []string
+}
+
+// Serve runs a request in protocol on the selected candidate.
+func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client, sel Selected) (Reply, error) {
 	to, translator, ok := translate.Route(protocol, sel.Accepted)
 	if !ok {
-		return backend.ChatResult{}, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s' can't be reached from %s", sel.BackendName, protocol)}
+		return Reply{}, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s' can't be reached from %s", sel.BackendName, protocol)}
 	}
+	var reply Reply
 	var back translate.Reply
 	if translator != nil {
 		var err error
 		if body, back, err = translator.Request(body); err != nil {
 			var refused *translate.Refusal
 			if errors.As(err, &refused) {
-				return backend.ChatResult{Response: refused.Response}, nil
+				reply.Chat = backend.ChatResult{Response: refused.Response}
+				return reply, nil
 			}
-			return backend.ChatResult{}, gatewayError(err)
+			return reply, gatewayError(err)
 		}
+		reply.drop(back.Dropped())
 	}
 	body, err := prepare(body, sel, to)
 	if err != nil {
-		return backend.ChatResult{}, gatewayError(err)
+		return reply, gatewayError(err)
 	}
 	req := backend.ChatRequest{Protocol: to, Body: body, Stream: gjson.GetBytes(body, "stream").Bool(), Client: client, AliasOf: sel.AliasOf}
-	result, err := sel.Backend.Chat(ctx, req)
-	if err != nil {
-		return backend.ChatResult{}, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", sel.BackendName, err)}
+	if reply.Chat, err = sel.Backend.Chat(ctx, req); err != nil {
+		return reply, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", sel.BackendName, err)}
 	}
 	if back != nil {
-		result = back.Result(result)
+		reply.Chat = back.Result(reply.Chat)
 	}
-	return result, nil
+	return reply, nil
+}
+
+func (r *Reply) drop(names []string) {
+	for _, name := range names {
+		if !slices.Contains(r.Dropped, name) {
+			r.Dropped = append(r.Dropped, name)
+		}
+	}
 }
 
 // prepare applies the selected candidate's params for a body in protocol,

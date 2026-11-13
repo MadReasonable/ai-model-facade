@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -190,6 +191,205 @@ func TestAnthropic_PassesOnAnAPIError(t *testing.T) {
 	}
 	if n := f.Count("GET /v1/models"); n != 2 {
 		t.Errorf("/v1/models read %d times, want 2: once at the start, once after the 500", n)
+	}
+}
+
+// A Messages request becomes a chat completion request with the client's keys
+// in their order: the system prompt as the first message, a tool result as a
+// tool message right after its call, thinking left out, the settings under
+// their Chat Completions names, and a key with no translation unchanged.
+func TestMessagesToChat_TranslatesARequest(t *testing.T) {
+	body := `{"model":"m","max_tokens":5,"top_k":3,"stream":true,"system":[{"type":"text","text":"be brief","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"adaptive"},` +
+		`"stop_sequences":["x"],"output_config":{"effort":"low"},"metadata":{"user_id":"u"},` +
+		`"tools":[{"name":"f","description":"d","input_schema":{"type":"object"}}],"tool_choice":{"type":"any","disable_parallel_tool_use":true},` +
+		`"messages":[{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"s"},{"type":"text","text":"ok"},{"type":"tool_use","id":"c1","name":"f","input":{"a":1}}]},` +
+		`{"role":"user","content":[{"type":"text","text":"and"},{"type":"tool_result","tool_use_id":"c1","content":"bad","is_error":true},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`
+	out, _, err := messagesToChat{}.Request([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model":"m","max_tokens":5,"top_k":3,"stream":true,"stop":["x"],"reasoning_effort":"low","user":"u",` +
+		`"tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object"}}}],"tool_choice":"required","parallel_tool_calls":false,` +
+		`"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":"ok","tool_calls":[{"type":"function","function":{"name":"f","arguments":"{\"a\":1}"},"id":"c1"}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"Error: bad"},` +
+		`{"role":"user","content":[{"type":"text","text":"and"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}],"stream_options":{"include_usage":true}}`
+	if string(out) != want {
+		t.Errorf("got  %s\nwant %s", out, want)
+	}
+}
+
+// A system message in the conversation joins the system prompt at the front,
+// since Claude Code sends one and not every model takes one mid-conversation.
+func TestMessagesToChat_GathersSystemMessages(t *testing.T) {
+	out, _, err := messagesToChat{}.Request([]byte(`{"system":"first","messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"text","text":"second"}]},{"role":"user","content":"more"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"messages":[{"role":"system","content":"first\n\nsecond"},{"role":"user","content":"hi"},{"role":"user","content":"more"}]}`
+	if string(out) != want {
+		t.Errorf("got  %s\nwant %s", out, want)
+	}
+}
+
+// What only the Claude API provides is refused with a 400 in Anthropic's shape.
+func TestMessagesToChat_RefusesWhatChatCompletionsCantServe(t *testing.T) {
+	for _, body := range []string{
+		`{"tools":[{"type":"web_search_20260209","name":"web_search"}],"messages":[]}`,
+		`{"tools":[{"type":"bash_20250124","name":"bash"}],"messages":[]}`,
+		`{"mcp_servers":[{}],"messages":[]}`,
+		`{"container":"c","messages":[]}`,
+		`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"u"}}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"web_search_tool_result"}]}]}`,
+		`{"messages":[{"role":"tool","content":"s"}]}`,
+	} {
+		_, _, err := messagesToChat{}.Request([]byte(body))
+		var refused *Refusal
+		if !errors.As(err, &refused) || refused.Response.Status != http.StatusBadRequest || gjson.GetBytes(refused.Response.Body, "error.type").String() != "invalid_request_error" || gjson.GetBytes(refused.Response.Body, "type").String() != "error" {
+			t.Errorf("%s: got %v", body, err)
+		}
+	}
+}
+
+// A chat completion becomes a message: reasoning as a thinking block with the
+// marker for a signature, tool calls with their arguments as an object, usage
+// with cache reads apart. An error keeps its status and Retry-After.
+func TestMessagesToChat_TranslatesAResponse(t *testing.T) {
+	completion := `{"id":"c","model":"m","choices":[{"finish_reason":"tool_calls","message":{"reasoning_content":"why","content":"ok","tool_calls":[{"id":"t","function":{"name":"f","arguments":"{\"a\":1}"}},{"id":"u","function":{"name":"g","arguments":"nope"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}`
+	res := (&chatReply{}).Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, ContentType: "application/json; charset=utf-8", Body: []byte(completion)}})
+	got := gjson.ParseBytes(res.Response.Body)
+	for path, want := range map[string]string{
+		"id": "msg_c", "type": "message", "role": "assistant", "model": "m", "stop_reason": "tool_use",
+		"content.0.type": "thinking", "content.0.thinking": "why", "content.0.signature": backend.UnsignedThinking,
+		"content.1.text": "ok", "content.2.id": "t", "content.2.input.a": "1", "content.3.input._invalidArguments": "nope",
+		"usage.input_tokens": "7", "usage.output_tokens": "2", "usage.cache_read_input_tokens": "3",
+	} {
+		if v := got.Get(path).String(); v != want {
+			t.Errorf("%s: got %q, want %q in %s", path, v, want, res.Response.Body)
+		}
+	}
+	res = (&chatReply{}).Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 429, Body: []byte(`{"error":{"message":"slow down"}}`), RetryAfter: "3"}})
+	if r := res.Response; r.Status != 429 || r.RetryAfter != "3" || gjson.GetBytes(r.Body, "error.type").String() != "rate_limit_error" || gjson.GetBytes(r.Body, "error.message").String() != "slow down" {
+		t.Errorf("error: got %+v %s", r, r.Body)
+	}
+}
+
+// Chunks have no blocks, so the stream opens one when the kind of delta changes:
+// reasoning closes with the marker as its signature, the first tool call
+// streams, a call interleaved with it arrives whole, and the end brings the
+// finish reason and usage, which came in a chunk of their own.
+func TestMessagesToChat_TranslatesAStream(t *testing.T) {
+	result := (&chatReply{}).Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"id":"c","model":"m","choices":[{"delta":{"role":"assistant"}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"th"}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"ink"}}]}`,
+		`{"choices":[{"delta":{"content":"hi"}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t0","function":{"name":"f","arguments":"{\"a\""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"t1","function":{"name":"g","arguments":"{\"b\":"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"2}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":5}}`,
+	}}})
+	events, err := eventsOf(t, result.Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range events {
+		line := e.Get("type").String()
+		if d := e.Get("delta"); d.Exists() && d.Get("type").Exists() {
+			line += ":" + d.Get("type").String() + ":" + d.Get("thinking").String() + d.Get("text").String() + d.Get("signature").String() + d.Get("partial_json").String()
+		}
+		if b := e.Get("content_block"); b.Exists() {
+			line += ":" + b.Get("type").String() + ":" + b.Get("id").String()
+		}
+		if i := e.Get("index"); i.Exists() {
+			line += "@" + i.String()
+		}
+		got = append(got, line)
+	}
+	want := []string{
+		"message_start",
+		"content_block_start:thinking:@0", "content_block_delta:thinking_delta:th@0", "content_block_delta:thinking_delta:ink@0",
+		"content_block_delta:signature_delta:" + backend.UnsignedThinking + "@0", "content_block_stop@0",
+		"content_block_start:text:@1", "content_block_delta:text_delta:hi@1", "content_block_stop@1",
+		"content_block_start:tool_use:t0@2", `content_block_delta:input_json_delta:{"a"@2`, "content_block_delta:input_json_delta::1}@2", "content_block_stop@2",
+		"content_block_start:tool_use:t1@3", `content_block_delta:input_json_delta:{"b":2}@3`, "content_block_stop@3",
+		"message_delta", "message_stop",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	last := events[len(events)-2]
+	if last.Get("delta.stop_reason").String() != "tool_use" || last.Get("usage.input_tokens").Int() != 4 || last.Get("usage.output_tokens").Int() != 5 {
+		t.Errorf("message_delta: %s", last.Raw)
+	}
+}
+
+// Reasoning and content that come while the first call streams are held
+// until the end, since its block can't be reopened, so the call keeps every
+// argument and nothing is lost.
+func TestMessagesToChat_HoldsTextThatComesDuringTheFirstCall(t *testing.T) {
+	result := (&chatReply{}).Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"id":"c","model":"m","choices":[{"delta":{"role":"assistant"}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t0","function":{"name":"f","arguments":"{\"a\""}}]}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"hm","content":"wait"}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}`,
+		`{"choices":[{"delta":{"content":"ed"},"finish_reason":"tool_calls"}]}`,
+	}}})
+	events, err := eventsOf(t, result.Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range events {
+		switch e.Get("type").String() {
+		case "content_block_start":
+			got = append(got, e.Get("content_block.type").String())
+		case "content_block_delta":
+			d := e.Get("delta")
+			got = append(got, d.Get("partial_json").String()+d.Get("thinking").String()+d.Get("text").String())
+		}
+	}
+	want := `tool_use|{"a"|:1}|thinking|hm||text|wait|ed`
+	if strings.Join(got, "|") != want {
+		t.Errorf("got %s, want %s", strings.Join(got, "|"), want)
+	}
+}
+
+// A backend's error event becomes Anthropic's shape, and a body that ends early
+// stays an error, so the client doesn't take the reply as complete.
+func TestMessagesToChat_EndsABrokenStreamWithAnError(t *testing.T) {
+	result := (&chatReply{}).Result(backend.ChatResult{Stream: &chunks{end: &backend.StreamError{Data: []byte(`{"error":{"message":"boom"}}`)}, data: []string{`{"choices":[{"delta":{"content":"hi"}}]}`}}})
+	_, err := eventsOf(t, result.Stream)
+	var streamErr *backend.StreamError
+	if !errors.As(err, &streamErr) || gjson.GetBytes(streamErr.Data, "type").String() != "error" || gjson.GetBytes(streamErr.Data, "error.message").String() != "boom" {
+		t.Errorf("error event: got %v", err)
+	}
+	result = (&chatReply{}).Result(backend.ChatResult{Stream: &chunks{end: io.ErrUnexpectedEOF, data: []string{`{"choices":[{"delta":{"content":"hi"}}]}`}}})
+	if _, err := eventsOf(t, result.Stream); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("early end: got %v", err)
+	}
+}
+
+// Fields of a Chat Completions request that have no Messages counterpart are
+// left out and reported: a participant's name, an image's detail, and
+// OpenAI's prompt caching and moderation settings.
+func TestChatToMessages_ReportsWhatItLeavesOut(t *testing.T) {
+	body := `{"prompt_cache_key":"k","prompt_cache_retention":"24h","moderation":{},"messages":[{"role":"user","name":"ann","content":[{"type":"image_url","image_url":{"url":"https://x/i.png","detail":"high"}}]}]}`
+	out, reply, err := chatToMessages{}.Request([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"prompt_cache_key", "prompt_cache_retention", "moderation", "name", "detail"} {
+		if strings.Contains(string(out), `"`+key+`"`) {
+			t.Errorf("%s was sent: %s", key, out)
+		}
+	}
+	if got := strings.Join(reply.Dropped(), ","); got != "name,image_url.detail,prompt_cache_key,prompt_cache_retention,moderation" {
+		t.Errorf("dropped %s", got)
 	}
 }
 

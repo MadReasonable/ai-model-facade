@@ -21,6 +21,8 @@ type Result struct {
 	Checked []string
 	Reason  string
 	Chat    backend.ChatResult
+	// Dropped names the client's fields a translation left out.
+	Dropped []string
 }
 
 // Current is what a request would be routed to right now. Model is empty
@@ -62,6 +64,11 @@ type Handler interface {
 	// Serves reports whether the facade takes requests in protocol, which its
 	// protocols list can narrow.
 	Serves(protocol backend.Protocol) bool
+	// OutputCap is the most max_tokens may be for every model the facade can
+	// select, from its backends' lists at startup: the smallest output cap
+	// among them, so a request sent with it is refused by none. ok is false
+	// when no list gives one.
+	OutputCap() (limit int64, ok bool)
 	// Describe prints the entry's resolved configuration for the check command.
 	Describe(w io.Writer)
 }

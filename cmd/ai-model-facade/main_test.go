@@ -84,7 +84,7 @@ func TestRun_PrintsTheVersion(t *testing.T) {
 // exits 2.
 func TestRun_PrintsUsageWithoutACommand(t *testing.T) {
 	for _, args := range [][]string{nil, {"check"}, {"nope", "config.yaml"}} {
-		if r := runArgs(args...); r.code != 2 || !strings.Contains(r.stderr, "An OpenAI-compatible gateway") || !strings.Contains(r.stderr, "usage:") {
+		if r := runArgs(args...); r.code != 2 || !strings.Contains(r.stderr, "An LLM gateway") || !strings.Contains(r.stderr, "usage:") {
 			t.Errorf("%q: got %+v", args, r)
 		}
 	}

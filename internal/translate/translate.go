@@ -24,6 +24,19 @@ type Translator interface {
 // Reply converts a response, an error or a stream back to the client's protocol.
 type Reply interface {
 	Result(result backend.ChatResult) backend.ChatResult
+	// Dropped names the client's fields the translation left out, in the order
+	// they were found, so the client can be told. A field converted to a
+	// counterpart isn't one of them.
+	Dropped() []string
+}
+
+// droppedFields collects field names without repeats.
+type droppedFields []string
+
+func (d *droppedFields) add(name string) {
+	if !slices.Contains(*d, name) {
+		*d = append(*d, name)
+	}
 }
 
 // Refusal is a request a translator won't send, with the response in the
@@ -40,6 +53,7 @@ type pair struct{ from, to backend.Protocol }
 // direct holds the translators written for one pair of protocols.
 var direct = map[pair]Translator{
 	{backend.OpenAIChat, backend.AnthropicMessages}: chatToMessages{},
+	{backend.AnthropicMessages, backend.OpenAIChat}: messagesToChat{},
 }
 
 // Route picks the protocol to send a request in to a backend that accepts

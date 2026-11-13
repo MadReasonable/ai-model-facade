@@ -9,7 +9,7 @@ Read it too before changing a part whose reasons this file doesn't give.
 
 ## Bird's-eye view
 
-The gateway is an OpenAI-compatible HTTP server whose model names are facades: entries in its config, each with an ordered list of candidate models on one or more backends.
+The gateway is an HTTP server for OpenAI and Claude clients whose model names are facades: entries in its config, each with an ordered list of candidate models on one or more backends.
 A facade decides which candidate answers; everything after that choice is the same for every facade, and runs in one pipeline:
 
 ```
@@ -51,28 +51,30 @@ Code that needs one of these reads the descriptor (`protocols.Of`) instead of sw
 Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds.
-`server.go` is the front end: the OpenAI endpoints, at their descriptors' paths, less the protocols `api.openAi.protocols` turns off, auth, the routing-loop check, the selection log line, and SSE relay.
+`family.go` holds the API families, OpenAI's, Anthropic's and the gateway's own `/amf`: each family's routes come from its protocols' descriptors, less those `api.<family>.protocols` turns off, with its credential header, error shape and model list.
+`server.go` is the front end: auth, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.
 
 ### `internal/virtualmodel`
 
 Facade types, each with its own schema, validator and `Handler`.
 `candidates`, the only type and the default, compiles the facade's and each candidate's params, checks candidate IDs against their backends, and on each request runs the selector and hands the winner to the pipeline as a `pipeline.Selected`.
-`Handler.Current` predicts the selection without making a request, for `current` in `/v1/models` with `api.openAi.addCurrent` on; `Handler.Inspect` adds the state of every candidate, for `/amf/models`.
+`Handler.Current` predicts the selection without making a request, for `current` in the model lists; `Handler.Inspect` adds the state of every candidate, for `/amf/models`; `Handler.OutputCap` is the smallest output cap among the models the facade can select, for the Anthropic list's `max_tokens`.
 A new behaviour is a new type here, so existing config entries never change meaning.
 
 ### `internal/pipeline`
 
 Runs a request after selection, the same way for every facade type: the route to the backend (`translate.Route`), translation, params in the protocol the backend receives, the model rewritten to the candidate's ID, the backend call, and the reply translated back.
-`pipeline.Error` is the one error type a request fails with.
+`pipeline.Error` is the one error type a request fails with, given the client's family's shape by the front end.
 
 ### `internal/translate`
 
 Converts a request and its reply between protocols, for a request whose protocol the selected backend doesn't accept.
 `Route` picks the identity route when the backend accepts the protocol, otherwise a direct translator for the pair.
 The code is in two layers.
-Each protocol has a module: `chat.go` reads Chat Completions requests into small values and writes their replies through one writer used streamed and not (`chatWriter`), so every translator answering a Chat Completions client produces the same shapes, and `messages.go` builds a Messages request's blocks.
-The pair has a file, `chat_messages.go`, holding the translator from Chat Completions to Messages, built on the two modules, and `effort.go` maps effort levels to Claude's.
+Each protocol has a module, `chat.go` and `messages.go`, which reads that protocol's requests into small values and writes its replies through one writer used streamed and not (`chatWriter`, `messagesWriter`), so every translator answering a client of that protocol produces the same shapes.
+The pair has a file, `chat_messages.go`, holding the two translators between them, built on the two modules.
+`effort.go` holds the effort levels both directions share.
 It runs before params, which are written in the protocol the adapter receives.
 
 ### `internal/selector`
@@ -91,6 +93,7 @@ It walks the patch, not the body, so keys the config doesn't mention are never t
 The contracts between the gateway and its adapters.
 `Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
 `ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages, which sends no `[DONE]`.
+The markers the translators put on what the gateway made, such as unsigned thinking, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 
 ### `internal/backend/openaihttp`
@@ -103,7 +106,7 @@ Rules about backend state are implemented here once, not in each adapter.
 
 One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged.
-`anthropic` forwards Messages to the Claude API, and fills a missing `max_tokens` from the model's output cap.
+`anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, and removes what the gateway made that only Claude may write.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
 
@@ -117,7 +120,7 @@ Fake llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI an
 - A new config option for a backend: its adapter's `Config`, or `openaihttp.Config` if every adapter takes it.
 - A new rule about which model wins: the selector, or a new facade type if it isn't load-aware selection.
 - A new rule about how backend state is read or reused: `openaihttp.StateCache`.
-- A new endpoint or response header: `internal/gateway/server.go`.
+- A new endpoint or response header: `internal/gateway/server.go`, or `family.go` for a family's own endpoints.
 - A new protocol: a descriptor in `internal/protocols`, a module in `internal/translate`, and a translator for each pair it joins.
 - A field that crosses a translation differently: the pair's file, or the protocol's module if every pair from or to it shares the change.
 - A new step every request takes after selection: `internal/pipeline`.

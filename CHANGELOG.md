@@ -4,13 +4,19 @@ Before 1.0, a minor release can change config keys.
 
 ## [Unreleased]
 
+Clients built for Claude can use every facade, including those on local models, through Anthropic's Messages API.
+
 ### Added
 
-- `/amf/models` and `/amf/models/{id}`, the gateway's own listing: each facade with `current` and the state of every candidate, including those after the winner, so why a facade picked a model can be seen without reading the logs.
-- The `api` section: `api.openAi.addCurrent` adds `current` to the model list, and `api.openAi.protocols` turns a protocol off gateway-wide.
-- A facade's `protocols` list, which narrows the protocols that reach it.
+- Anthropic's Messages API at `/anthropic/v1/messages`, streamed or not, so a client built for Claude, such as Claude Code, can use the gateway. A request for a candidate on an `anthropic` backend is forwarded unchanged apart from params and the model, and one for any other backend is translated to Chat Completions and its reply translated back.
+- `X-Gateway-Dropped`, a response header naming the client's fields a translation left out, such as `thinking` or `cache_control`; the selection log line has the same list as `dropped`.
+- `/anthropic/v1/models` and `/anthropic/v1/models/{id}`, the facades in Anthropic's list format, each with the smallest output limit among the models it can select as its `max_tokens`.
+- `/amf/models` and `/amf/models/{id}`, the gateway's own listing: each facade with `current` and the state of every candidate, including those after the winner, so why a facade picked a model can be seen without reading the logs. Clients of either API can call it with the key in `Authorization` or `x-api-key`.
+- The `api` section: `default` gives the root to the OpenAI or the Anthropic API, `basePath` sets each API's path, `/openai` and `/anthropic` by default, `addCurrent` adds `current` to each API's model list, and `protocols` turns an API's protocols off gateway-wide.
+- A facade's `protocols` list, which narrows the APIs that reach it. A facade it leaves out of every protocol of an API isn't in that API's model list.
 - Params blocks: `params` can hold a block per protocol, `openAiChat`, `openAiCompletions` or `anthropicMessages`, plus `all`, for a setting spelled differently in each API. A `params` without them applies to every protocol, as before.
 - `loopsBack` on a backend, for one whose state read can lead back to this gateway, such as an Open WebUI that has this gateway as a connection.
+- A wrong path or method under `/anthropic` gets a `404` or `405` in Anthropic's JSON error shape, as Anthropic's own API answers one.
 
 ### Changed
 
@@ -20,6 +26,7 @@ Before 1.0, a minor release can change config keys.
 - **Breaking:** params for a candidate on an `anthropic` backend now patch the Messages body, after translation, so they are written in Messages spelling. `reasoning_effort`, `response_format` and `stop` in them were translated before, and now reach the Claude API, which refuses them; use `output_config` and `stop_sequences`. The gateway warns at load about those keys.
 - **Breaking:** `alias_of` in `current` is now `aliasOf`, as the gateway's other field names are camelCase.
 - A candidate whose backend can't serve a request's protocol is now skipped, so a legacy completion reaches a later candidate instead of failing at the first.
+- A request without `max_tokens` to an `anthropic` backend gets the model's output limit whichever API the client used.
 
 ## [0.2.1] - 2026-11-02
 

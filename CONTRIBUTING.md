@@ -93,6 +93,10 @@ They skip without `AMF_LIVE` too; run them with:
 
     AMF_LIVE=http://127.0.0.1:18090 go test ./internal/gateway/ -run Live
 
+Its Messages checks serve a facade on the real Claude API, so they skip without `ANTHROPIC_API_KEY` rather than `AMF_LIVE`, and need no Docker; `ANTHROPIC_LIVE_MODEL` names their model, and a run costs a few tokens:
+
+    ANTHROPIC_API_KEY=... go test ./internal/gateway/ -run Live_Messages
+
 Both sets change the same backends, so a test process holds dev-env, through a lock file in the temp directory, from its first live check until it exits.
 They can therefore run in one `go test ./...`, where packages run at the same time: the second package to reach a live check waits for the first to finish.
 Windows has no flock, so there they don't wait; run them one at a time.

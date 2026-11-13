@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"bytes"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -60,4 +61,10 @@ func base64DataURL(url string) (mediaType, data string, ok bool) {
 		return "", "", false
 	}
 	return mediaType, data, true
+}
+
+// bytesContain reports whether body holds a quoted key, which can only match
+// a real key, since quotes inside a JSON string are escaped.
+func bytesContain(body []byte, key string) bool {
+	return bytes.Contains(body, []byte(`"`+key+`"`))
 }

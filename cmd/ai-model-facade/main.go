@@ -1,4 +1,4 @@
-// Command ai-model-facade is an OpenAI-compatible gateway serving virtual models.
+// Command ai-model-facade is an LLM gateway serving virtual models to OpenAI and Claude clients.
 //
 //	ai-model-facade serve <config>    run the gateway
 //	ai-model-facade check <config>    validate the config and print each virtual
@@ -28,8 +28,8 @@ import (
 
 // about precedes the usage line, for someone who runs the binary without
 // knowing what it is. It is the README's summary.
-const about = `An OpenAI-compatible gateway that gives clients a stable model name
-and decides, at request time, which real model answers.
+const about = `An LLM gateway that gives OpenAI and Claude clients a stable model
+name and decides, at request time, which real model answers.
 https://github.com/MadReasonable/ai-model-facade
 `
 

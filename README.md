@@ -1,13 +1,13 @@
 # ai-model-facade
 
-**An OpenAI-compatible gateway that gives clients a stable model name and decides, at request time, which real model answers.**
+**An LLM gateway that gives OpenAI and Claude clients a stable model name and decides, at request time, which real model answers.**
 
 A client asks for a virtual model defined in the gateway's config, such as `assistant`.
 That model is a facade, and the gateway picks a real model from a list you wrote, based on what is currently loaded, applies the parameters you configured, and forwards the request.
 Models and even backends can be swapped without any change on the client side.
 
 It is one compiled binary with one configuration file, and runs as a service or as a container from the published image.
-It serves OpenAI's Chat Completions API, and translates it for the Claude API, so a client built for it works with any backend.
+It serves OpenAI's Chat Completions API and Anthropic's Messages API at the same time, and translates between them, so a client built for either works with any backend.
 OpenAI, Claude, llama-swap, llama.cpp's llama-server, LM Studio, LocalAI, Ollama and Open WebUI are all supported.
 
 The simplest config would map a single facade to a single backend model.
@@ -28,6 +28,8 @@ A facade moves that decision out of every client and into one place, where it is
 **Swap models without touching clients.** On a server that loads models on demand, such as llama-swap or Ollama, fixed model names can cause the server to waste time juggling models in and out of memory when an already loaded model could easily handle many of the simpler requests. A facade names a list instead, and the first model on it that is already loaded wins. [Open WebUI's background tasks](#open-webui-task-model) run on whatever LLM is up, with thinking off; [a voice assistant](#voice-assistant-on-whichever-preset-is-loaded) always has a fast, non-thinking model, whether the coding set or the general set is loaded. Nothing is evicted unless nothing on the list is loaded, and the config decides what happens then.
 
 **Evaluate models without re-pointing clients.** A facade wired into clients such as Cline, llama.vscode or Home Assistant can list every model under evaluation as its candidates: quants of one model, or entirely different generations and families. Requests are routed to whichever model is loaded, so trying the next model means loading it on the backend, with no change to any client or to the gateway's config. Each response carries an `X-Gateway-Target` header naming the model that answered, so each result can be attributed to the model that produced it.
+
+**Claude clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded.
 
 **Keep keys and addresses out of clients.** Clients get one address and one key, the gateway's. The backends' addresses and keys live in the gateway's config, and a client's own key reaches a backend only where you turn passthrough on. In that respect it is a reverse proxy for LLM endpoints, limited to each API's chat, completion and model-list endpoints.
 
@@ -319,14 +321,32 @@ X-Gateway-Target: qwen3.8-27b:q6_k
 {"choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"hello"}}], ...}
 ```
 
+A client built for Claude uses `http://localhost:8088/anthropic` as its base URL, and the same facade:
+
+```bash
+curl -i http://localhost:8088/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model": "quick", "max_tokens": 100, "messages": [{"role": "user", "content": "Reply with exactly one word: hello"}]}'
+```
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Gateway-Target: qwen3.8-27b:q6_k
+
+{"content":[{"text":"hello","type":"text"}],"model":"qwen3.8-27b:q6_k","role":"assistant","stop_reason":"end_turn", ...}
+```
+
 `X-Gateway-Target` names the model that answered.
 The log has one line for each request, with every candidate checked, the winner, and why it won:
 
 ```
 level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 duration=3ms
+level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 duration=2ms endpoint=/v1/messages
 ```
 
 The first candidate wasn't loaded, so the pattern won with the quant llama-swap had loaded, and nothing was loaded for the request.
+The second line's request was translated from Messages to Chat Completions, since llama-swap doesn't serve Messages; see [Client APIs](#client-apis).
 
 `config.example.yaml` is a fuller starting point, with two facades for Open WebUI's background tasks and a voice assistant, and a commented-out entry for each other backend.
 
@@ -485,13 +505,40 @@ params:
 
 ### Client APIs
 
-The gateway serves OpenAI's API, which most clients and servers speak: Chat Completions at `/v1/chat/completions` and legacy completions at `/v1/completions`, so `http://<gateway>:8088/v1` is an OpenAI client's base URL.
-Every backend but the Claude API serves it, and the Claude API serves Anthropic's Messages API instead.
-A facade's `protocols` list can narrow which of them reach it; a request in a protocol it leaves out gets `404`.
+The gateway serves two families of client APIs, each under a base path of its own, because both have a `/v1/models`, with different shapes:
+
+- **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions` and legacy completions at `/v1/completions`. Most clients and servers speak it, and every backend except the Claude API serves it.
+- **Anthropic's**, under `/anthropic`: Messages at `/v1/messages`. Clients built for Claude speak it, and only the Claude API serves it.
+
+These three protocols, Chat Completions, legacy completions and Messages, with each API's model list, are everything the gateway serves.
+OpenAI's other APIs, such as Responses, embeddings, images, audio, Realtime, Batch, Files and Moderations, and Anthropic's, such as the token count, Message Batches and Files, are unsupported.
+
+The root serves the OpenAI API too, so `http://<gateway>:8088/v1` is an OpenAI client's base URL; [`api.default`](#api) can give the root to Anthropic's instead.
+A client built for Claude uses `http://<gateway>:8088/anthropic`, with the gateway's key in `x-api-key` or `Authorization`.
+A facade's `protocols` list can narrow which APIs reach it; a request in a protocol it leaves out gets `404`.
+Each API's model list holds every facade that serves it, in that API's format.
 
 A request in the API its backend serves is forwarded as it came, apart from params and the model.
-A Chat Completions request for the Claude API is translated, and the reply, streamed or not, is translated back.
+A request for a backend that serves only the other API is translated, and the reply, streamed or not, is translated back, so every facade works from both APIs.
 Legacy completions are the exception: neither the Claude API nor Open WebUI serves them, and there is no translation for them, so a candidate on either is skipped for a legacy completion.
+
+Of a client's request headers, only Anthropic's `anthropic-version` and `anthropic-beta` reach a backend, and only an `anthropic` one.
+
+#### Messages on a Chat Completions backend
+
+A Messages request that selects a candidate on any backend but the Claude API is translated to Chat Completions:
+
+- `system`, tools, tool calls and results, images, inline PDFs and text documents translate both ways.
+- `max_tokens`, `stop_sequences`, `tool_choice`, `output_config.effort` (as `reasoning_effort`), `output_config.format` (as a `json_schema` `response_format`) and `metadata.user_id` (as `user`) translate to their Chat Completions counterparts, and other unknown keys, such as `top_k`, pass on unchanged.
+- `thinking`, `cache_control`, `service_tier`, `context_management` and thinking blocks in the history are dropped, since a Chat Completions model has no use for them.
+- A model's reasoning comes back as a thinking block whose signature is the fixed marker `amf-unsigned`. Only Anthropic can sign one, so if that history later reaches the Claude API, the gateway removes the marked blocks first, and a conversation can move from a local model to Claude.
+- A failed tool call says so in its result's text, since a tool message has no error flag.
+
+A request that needs what only the Claude API provides is refused with `400`: a tool type it defines, whether Claude's servers run it (web search) or the client does (`bash`, `text_editor`), `mcp_servers`, `container`, or a document or image by file ID.
+
+Open WebUI is one of these backends, so a Messages client gets its server-side tools through a facade on `openWebUi`.
+It sees the final answer rather than those tool calls, as a Chat Completions client does.
+A client's own tools don't work through Open WebUI, which runs the tool loop itself and answers that it has no such tool, so a coding client such as Claude Code needs a facade with no `openWebUi` candidate.
 
 #### Chat Completions on the Claude API
 
@@ -509,9 +556,22 @@ A request that asks for what the Claude API can't give is refused with `400` bef
 
 A Chat Completions client can't send thinking back, since Chat Completions has no place for the signature it needs, so in a tool loop Claude continues without its earlier reasoning.
 
+#### Dropped fields
+
+A translation can't carry every field across, so the response names what it left out of the client's request:
+
+```
+X-Gateway-Dropped: thinking, context_management, cache_control
+```
+
+Each name appears once, in the order found, and the selection log line has the same list as `dropped`.
+A request forwarded without translation has no such header, and neither does a field converted to its counterpart, such as `stop_sequences` to `stop`.
+The list covers only what this gateway translated, so a field dropped by Open WebUI or by a gateway behind it isn't reported.
+
 ### Keys
 
 Clients authenticate with `Authorization: Bearer <key>`.
+Under the Anthropic API's base path, a client can send the key in `x-api-key` instead, as clients built for Claude do, and the `/amf` endpoints take either, since clients of both APIs call them.
 
 - A key listed in `server.apiKeys` is accepted, and its name appears in the log as `client=<name>`.
 - An unlisted key is rejected with `401`, unless `server.unknownKeys` is `allow`. Then it is accepted and logged as `client=unknown` with a fingerprint: the first 8 hex characters of the key's SHA-256, so different callers can be told apart. Keys themselves are never logged.
@@ -520,6 +580,7 @@ Clients authenticate with `Authorization: Bearer <key>`.
 
 By default, a client's key stays at the gateway, and each backend gets its own `apiKey`.
 With `passthroughAuth: true` on a backend, completion requests to it carry the client's own key in `Authorization` instead, so the backend makes the access decision and sees each caller as themselves.
+A key sent in `x-api-key` is forwarded as `Authorization: Bearer`.
 A client that sent no key is forwarded without one; it never borrows the backend's key.
 The backend's `apiKey` is still used for the gateway's own calls, such as checking which models exist and which are loaded.
 
@@ -660,6 +721,38 @@ models:
 A preset is an alias, so `"*:Assistant"` matches the preset of whichever family is loaded, and llama-swap applies that preset's own params, so this candidate sets none.
 The second candidate is loaded only if no family with a preset is.
 
+### Claude Code on local models
+
+Claude Code reads its API address and model names from environment variables, so it can use a facade without any change to it.
+A facade for it needs candidates that handle long contexts and tool calls, and no `openWebUi` candidate, since Open WebUI runs only its own tools:
+
+```yaml
+models:
+  coder:
+    backend: llamaSwap
+    candidates:
+      - model: qwen3.8-27b:*
+      - model: qwen3.6-35b-a3b:q8_0
+        loadIfNone: true
+```
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8088/anthropic
+export ANTHROPIC_AUTH_TOKEN=<a key from server.apiKeys>
+export ANTHROPIC_MODEL=coder
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=quick
+claude
+```
+
+`ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer`; leave it out if the gateway has no `apiKeys`.
+Claude Code runs its background work, such as summaries, on the model `ANTHROPIC_DEFAULT_HAIKU_MODEL` names, so that can be a facade on a smaller model, such as `quick` from [Getting started](#getting-started).
+Its context limit is set for Claude's models, so set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the context your local models are loaded with.
+Claude Code's own instructions and tool definitions take about 18,000 tokens (Claude Code 2.1.319, 2026-11-12), so a model loaded with a smaller context can't take any of its requests; llama-server refuses them with `400`.
+
+Each request is translated to Chat Completions, so Claude Code's thinking settings and prompt caching are dropped and named in [`X-Gateway-Dropped`](#dropped-fields).
+A tool that only the Claude API defines, such as its web search, is refused with `400`; see [Messages on a Chat Completions backend](#messages-on-a-chat-completions-backend).
+To fall back to Claude when no local model is loaded, add a candidate on an `anthropic` backend at the end of the list; a conversation can move between them, since the gateway removes local thinking blocks before the Claude API sees them.
+
 ### Evaluating models
 
 To compare models from the clients you already use, list every model under evaluation as a candidate of the facade those clients use:
@@ -765,8 +858,11 @@ The `api` section configures what the gateway presents to the clients of each [c
 
 | Key | Description |
 |-----|-------------|
+| `default` | The API served at the root, bare `/v1`: `openAi` (default) or `anthropic`. |
+| `openAi.basePath`, `anthropic.basePath` | The path in front of the API's own paths, `/v1` included. Default `/openai` and `/anthropic`. |
 | `openAi.addCurrent` | `true`: `/v1/models` and `/v1/models/{id}` include [`current`](#seeing-the-choice-before-a-request). Default `false`, so those endpoints answer from the config and read no backend's state. A gateway that is a connection of an Open WebUI which a gateway reads needs it on: see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
-| `openAi.protocols` | The protocols the gateway serves: `openAiChat` and `openAiCompletions`. Default: both. A protocol left out has no endpoint, so a request in it gets `404`. A facade whose [`protocols`](#models) are all turned off is a startup error. |
+| `anthropic.addCurrent` | `true`: the Anthropic API's `/v1/models` and `/v1/models/{id}` include `current`. Default `false`, so that listing reads no backend's state. |
+| `openAi.protocols`, `anthropic.protocols` | The API's protocols the gateway serves: `openAiChat` and `openAiCompletions` for OpenAI, `anthropicMessages` for Anthropic. Default: all of them. A protocol left out has no endpoint, so a request in it gets `404`, and `[]` turns the API off, its model list included. A facade whose [`protocols`](#models) are all turned off is a startup error. |
 
 ### `backends`
 
@@ -872,10 +968,11 @@ Model IDs are the ones its `/v1/models` lists, and it counts them as loaded exac
 It takes no keys beyond the shared ones; `apiKey` is a Claude API key.
 A key that isn't scoped to one workspace needs Anthropic's `anthropic-workspace-id` header, which the gateway doesn't send, so use a workspace key.
 
-A Chat Completions client's request is translated; see [Chat Completions on the Claude API](#chat-completions-on-the-claude-api).
-Params for a candidate on this backend patch the Messages body, after translation, so write them in Messages spelling: `thinking: {display: summarized}` to see a summary of Claude's thinking, `cache_control` to turn on prompt caching, or `output_config: {effort: low}`, whose keys win over a client's translated `reasoning_effort`.
+A Messages client's request reaches it unchanged, apart from params and the model, and a Chat Completions client's is translated; see [Chat Completions on the Claude API](#chat-completions-on-the-claude-api).
+Either way, params for a candidate on this backend patch the Messages body, so write them in Messages spelling: `thinking: {display: summarized}` to see a summary of Claude's thinking, `cache_control` to turn on prompt caching, or `output_config: {effort: low}`, whose keys win over a client's translated `reasoning_effort`.
 The gateway warns at load about `reasoning_effort`, `response_format` or `stop` in params for such a candidate, because the Claude API refuses them; use `output_config` and `stop_sequences`.
 
+Changing `system` or the tools between turns makes a Messages client's earlier thinking invalid, and the API answers `400`, so a reload, or two Claude candidates that patch them differently, can cause that for a client that did nothing wrong.
 Claude 5 models think by default, which counts towards `max_tokens`.
 The Claude API has no legacy `/v1/completions`, so a request for it skips this candidate, and fails with `502` if no other candidate can serve it.
 
@@ -904,7 +1001,7 @@ Each entry is a facade, and its name is what clients request.
 |-----|-------------|
 | `backend` | Name of a `backends` entry: the default for its candidates. Required unless every candidate names its own. |
 | `candidates` | The models to choose from, in order of preference. Required. |
-| `protocols` | The protocols this facade serves, from `openAiChat` and `openAiCompletions`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
+| `protocols` | The protocols this facade serves, from `openAiChat`, `openAiCompletions` and `anthropicMessages`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
 | `params` | Applied to every request for this facade. Optional. See [Params](#params). |
 | `description` | Shown in the model lists and `/amf/models`. Optional. |
 | `type` | Facade type. `candidates`, the default, is the only type today. |
@@ -925,15 +1022,18 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /v1/chat/completions` | Chat Completions, streamed or not. |
-| `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. |
-| `GET /v1/models` | Lists only the facades, so clients that pick from a list see only those. |
-| `GET /v1/models/{id}` | One facade, or `404`. |
+| `POST /v1/chat/completions` | Chat Completions, streamed or not. Also under `/openai`. |
+| `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. Also under `/openai`. |
+| `GET /v1/models` | Lists only the facades, so clients that pick from a list see only those. Also under `/openai`. |
+| `GET /v1/models/{id}` | One facade, or `404`. Also under `/openai`. |
+| `POST /anthropic/v1/messages` | Anthropic's Messages API, streamed or not. |
+| `GET /anthropic/v1/models` | The facades in Anthropic's list format, on one page. A facade's `max_tokens` is the smallest output limit among the models it can select, as their backends list them, so a request that asks for it is refused by none; a facade on no backend that lists limits has none. |
+| `GET /anthropic/v1/models/{id}` | One facade in Anthropic's format, or `404`. |
 | `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state; see [Seeing the choice before a request](#seeing-the-choice-before-a-request). |
 | `GET /amf/models/{id}` | One entry of that list, or `404`. |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
-Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api).
+Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api); `api.anthropic.addCurrent` does the same for Anthropic's list.
 The `/amf` endpoints belong to the gateway rather than to a client API, so they report what a model object has no place for.
 
 ### Replies and headers
@@ -948,6 +1048,7 @@ The gateway adds its own headers:
 | Header | Meaning |
 |--------|---------|
 | `X-Gateway-Target` | The model that was chosen, on every response where one was. Renamed by `server.targetHeader`. |
+| `X-Gateway-Dropped` | The client's fields a translation left out; see [Dropped fields](#dropped-fields). |
 
 ### Status codes
 
@@ -964,11 +1065,12 @@ The gateway's own errors use these codes:
 | `503` | No candidate is eligible. |
 | `508` | Routing loop: the request has already passed through this facade of this gateway, e.g. via Open WebUI back to itself. |
 
-Each error is in OpenAI's shape; a wrong path or method gets a plain-text answer.
+Each error is in the shape of the client's API.
+Under the Anthropic API's paths, a wrong path or method gets a JSON error in Anthropic's shape and needs no key, as Anthropic's own API answers one; everywhere else it gets a plain-text answer.
 
 Once a stream has started, its status can't change.
 If the backend fails mid-stream, the gateway sends a final error event and closes, so clients show an error instead of a silently cut-off reply.
-That is a `data: {"error": {...}}` event with no `[DONE]`.
+For Chat Completions and completions that is a `data: {"error": {...}}` event with no `[DONE]`; for Messages it is an `error` event, the backend's own if it sent one.
 
 ## Commands
 

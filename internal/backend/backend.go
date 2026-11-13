@@ -4,6 +4,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +33,9 @@ type ModelInfo struct {
 	// PlainAliases is set in ListModels for a model whose aliases are only
 	// other names for it, with no params of their own: llama-server's.
 	PlainAliases bool
+	// OutputCap is set in ListModels for a model whose listing gives the
+	// most max_tokens may be, as the Claude API's does; 0 if unknown.
+	OutputCap int64
 }
 
 // Catalog indexes a backend's model list for validation and display.
@@ -116,6 +120,10 @@ type Client struct {
 	// Authorization is the client's Authorization header, as sent. Only
 	// backends with passthroughAuth forward it; never log it.
 	Authorization string
+	// MessagesHeader holds the client's anthropic-version and anthropic-beta
+	// headers, which only a backend speaking Messages forwards. No other
+	// request header reaches a backend.
+	MessagesHeader http.Header
 	// Route lists the hops the request has made, "<gateway ID>/<virtual
 	// model>", ending with this one. Only adapters that forward to something
 	// that may be a gateway (Open WebUI) send it on, as RouteField in the body.
@@ -231,6 +239,12 @@ const (
 	OpenAICompletions Protocol = "openAiCompletions" // legacy text completions
 	AnthropicMessages Protocol = "anthropicMessages"
 )
+
+// UnsignedThinking is the signature of a thinking block the gateway made from
+// a Chat Completions model's reasoning. Messages clients send thinking blocks
+// back, but only Anthropic can sign one, so this marks a block that has to come
+// out before Claude sees it.
+const UnsignedThinking = "amf-unsigned"
 
 // ChatRequest is a completion request in either protocol; both share the
 // same body shape (`model`, `stream`) and response framing.

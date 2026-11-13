@@ -62,6 +62,10 @@ func TestErrorEvent_IsInTheProtocolsShape(t *testing.T) {
 			return e.Get("error.type").String() == "backend_error" && e.Get("error.message").String() == "not json"
 		}},
 		{backend.OpenAIChat, failed, func(e gjson.Result) bool { return e.Get("error.type").String() == "gateway_error" }},
+		{backend.AnthropicMessages, &backend.StreamError{Data: []byte(`{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)}, func(e gjson.Result) bool { return e.Get("error.type").String() == "overloaded_error" }},
+		{backend.AnthropicMessages, failed, func(e gjson.Result) bool {
+			return e.Get("type").String() == "error" && e.Get("error.type").String() == "api_error"
+		}},
 	}
 	for _, c := range cases {
 		if event := gjson.ParseBytes(Of(c.protocol).ErrorEvent(c.err)); !c.check(event) {

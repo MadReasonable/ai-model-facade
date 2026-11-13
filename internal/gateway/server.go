@@ -39,7 +39,8 @@ type server struct {
 	started int64
 }
 
-// Handler returns the OpenAI API front end: HTTP and SSE framing only.
+// Handler returns the front end for every client API: HTTP and SSE framing
+// only.
 func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	s := &server{gateway: g, models: map[string]virtualmodel.Handler{}, log: log, started: time.Now().Unix()}
 	for _, m := range g.Models {
@@ -47,14 +48,15 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
-	mux.HandleFunc("GET /v1/models", s.authenticated(s.listModels))
-	mux.HandleFunc("GET /v1/models/{id...}", s.authenticated(s.getModel))
-	mux.HandleFunc("GET /amf/models", s.authenticated(s.listFacades))
-	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(s.getFacade))
-	for _, d := range protocols.All {
-		if g.served[d.Protocol] {
-			mux.HandleFunc("POST "+d.Path, s.authenticated(s.completions(d.Protocol)))
-		}
+	mux.HandleFunc("GET /amf/models", s.authenticated(amfFamily, s.listFacades))
+	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(amfFamily, s.getFacade))
+	api := g.Config.API
+	s.routeOpenAI(mux, api.OpenAI.BasePath)
+	s.routeAnthropic(mux, api.Anthropic.BasePath)
+	if api.Default == config.FamilyOpenAI {
+		s.routeOpenAI(mux, "")
+	} else {
+		s.routeAnthropic(mux, "")
 	}
 	// Every request carries its arrival time, so its state reads reuse any
 	// state fetched since then (backend.WithRequestStart).
@@ -77,10 +79,10 @@ type clientHandler func(w http.ResponseWriter, r *http.Request, client backend.C
 // unknownKeys: allow, the request is accepted: an unlisted key is named
 // "unknown" with a fingerprint, and no key leaves the name empty. With keys
 // listed and unknownKeys: reject, anything else is a 401.
-func (s *server) authenticated(next clientHandler) http.HandlerFunc {
+func (s *server) authenticated(family *apiFamily, next clientHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.gateway.Config.Server
-		header := r.Header.Get("Authorization")
+		header := family.credential(r)
 		client := backend.Client{Authorization: header}
 		token, hasToken := strings.CutPrefix(header, "Bearer ")
 		if hasToken {
@@ -97,7 +99,7 @@ func (s *server) authenticated(next clientHandler) http.HandlerFunc {
 			client.Fingerprint = hex.EncodeToString(sum[:4])
 		}
 		if len(cfg.APIKeys) > 0 && cfg.UnknownKeys != "allow" {
-			s.reject(w, r, client, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")
+			s.reject(family, w, r, client, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")
 			return
 		}
 		if hasToken {
@@ -169,7 +171,9 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 	}{Object: "list", Data: []modelObject{}}
 	ctx := listingContext(backend.WithStateSnapshot(r.Context()))
 	for _, m := range s.gateway.Models {
-		list.Data = append(list.Data, s.modelObject(ctx, m))
+		if s.lists(openAIFamily, m) {
+			list.Data = append(list.Data, s.modelObject(ctx, m))
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
@@ -178,13 +182,13 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 func (s *server) getModel(w http.ResponseWriter, r *http.Request, client backend.Client) {
 	id := r.PathValue("id")
 	for _, m := range s.gateway.Models {
-		if m.Name == id {
+		if m.Name == id && s.lists(openAIFamily, m) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(s.modelObject(listingContext(r.Context()), m))
 			return
 		}
 	}
-	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
+	writeOpenAIError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
 }
 
 // facadeObject is a facade in the gateway's own /amf shape, the same in the
@@ -233,7 +237,7 @@ func (s *server) getFacade(w http.ResponseWriter, r *http.Request, client backen
 			return
 		}
 	}
-	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
+	writeOpenAIError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
 }
 
 func (s *server) facadeObject(ctx context.Context, m Model) facadeObject {
@@ -262,6 +266,7 @@ func (s *server) completions(protocol backend.Protocol) clientHandler {
 
 func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend.Client, protocol backend.Protocol) {
 	start := time.Now()
+	family := familyOf(protocol)
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
@@ -269,23 +274,23 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			s.reject(w, r, client, http.StatusRequestEntityTooLarge, "invalid_request_error", fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+			s.reject(family, w, r, client, http.StatusRequestEntityTooLarge, "invalid_request_error", fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
 			return
 		}
-		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "reading request body: "+err.Error())
+		s.reject(family, w, r, client, http.StatusBadRequest, "invalid_request_error", "reading request body: "+err.Error())
 		return
 	}
 	if !gjson.ValidBytes(body) {
-		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
+		s.reject(family, w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
 		return
 	}
 	parsed := gjson.ParseBytes(body)
 	if !parsed.IsObject() {
-		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
+		s.reject(family, w, r, client, http.StatusBadRequest, "invalid_request_error", "request body must be a JSON object")
 		return
 	}
 	if key := duplicateKey(parsed); key != "" {
-		s.reject(w, r, client, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key '%s'", key))
+		s.reject(family, w, r, client, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request body contains duplicate key '%s'", key))
 		return
 	}
 	name := gjson.GetBytes(body, "model").String()
@@ -293,25 +298,29 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	route, looped := takeRoute(parsed, hop)
 	if looped {
 		s.log.Warn("routing loop", "model", name, "route", route, "status", http.StatusLoopDetected)
-		writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for '%s' has already passed through this virtual model", name))
+		family.writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for '%s' has already passed through this virtual model", name))
 		return
 	}
 	if parsed.Get(backend.RouteField).Exists() {
 		// Only an adapter that forwards to another gateway puts it back.
 		if body, err = sjson.DeleteBytes(body, backend.RouteField); err != nil {
-			writeError(w, http.StatusInternalServerError, "gateway_error", err.Error())
+			family.writeError(w, http.StatusInternalServerError, "gateway_error", err.Error())
 			return
 		}
 	}
 	client.Route = append(route, hop)
+	client.MessagesHeader = messagesHeader(r)
 	handler := s.models[name]
 	if handler == nil {
 		s.log.Warn("unknown model", "model", name, "status", http.StatusNotFound)
-		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
+		family.writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
 		return
 	}
 
 	res, err := handler.Chat(r.Context(), protocol, body, client)
+	if len(res.Dropped) > 0 {
+		w.Header().Set(droppedHeader, strings.Join(res.Dropped, ", "))
+	}
 	if res.Target != "" {
 		w.Header().Set(s.gateway.Config.Server.TargetHeader, res.Target)
 	}
@@ -324,7 +333,7 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 			verr = &pipeline.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
 		}
 		status = verr.Status
-		writeError(w, verr.Status, verr.Type, verr.Message)
+		family.writeError(w, verr.Status, verr.Type, verr.Message)
 	case res.Chat.Stream != nil:
 		streamErr = s.stream(w, r, res.Chat.Stream, protocol)
 	default:
@@ -345,6 +354,9 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	}
 	if res.Backend != "" {
 		attrs = append(attrs, "backend", res.Backend)
+	}
+	if len(res.Dropped) > 0 {
+		attrs = append(attrs, "dropped", res.Dropped)
 	}
 	if client.Name != "" {
 		attrs = append(attrs, "client", client.Name)
@@ -408,6 +420,26 @@ func flush(f http.Flusher) {
 	if f != nil {
 		f.Flush()
 	}
+}
+
+// droppedHeader names the client's fields a translation left out. A client
+// relies on the gateway forwarding what it doesn't patch, so where it can't, it
+// says so; a log line alone would be silent to the client.
+const droppedHeader = "X-Gateway-Dropped"
+
+// messagesHeader returns the request's headers that reach a backend speaking
+// Messages, or nil if it has none.
+func messagesHeader(r *http.Request) http.Header {
+	var header http.Header
+	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
+		if values, ok := r.Header[name]; ok {
+			if header == nil {
+				header = http.Header{}
+			}
+			header[name] = values
+		}
+	}
+	return header
 }
 
 // instanceID identifies this gateway process in backend.RouteField, where
@@ -474,7 +506,7 @@ func errorBody(errType, message string) map[string]errorDetail {
 // reject answers a request refused before selection and logs it, since no
 // selection line follows. The client's key is never logged, only its name or
 // fingerprint.
-func (s *server) reject(w http.ResponseWriter, r *http.Request, client backend.Client, status int, errType, message string) {
+func (s *server) reject(family *apiFamily, w http.ResponseWriter, r *http.Request, client backend.Client, status int, errType, message string) {
 	attrs := []any{"path", r.URL.Path, "status", status}
 	if client.Name != "" {
 		attrs = append(attrs, "client", client.Name)
@@ -483,11 +515,5 @@ func (s *server) reject(w http.ResponseWriter, r *http.Request, client backend.C
 		attrs = append(attrs, "fingerprint", client.Fingerprint)
 	}
 	s.log.Warn("request rejected", append(attrs, "error", message)...)
-	writeError(w, status, errType, message)
-}
-
-func writeError(w http.ResponseWriter, status int, errType, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(errorBody(errType, message))
+	family.writeError(w, status, errType, message)
 }

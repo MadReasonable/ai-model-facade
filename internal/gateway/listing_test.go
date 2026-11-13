@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -234,6 +235,40 @@ func TestAmf_ListEntryMatchesTheFacadeAlone(t *testing.T) {
 	if alone := strings.TrimSpace(gw.get(t, "/amf/models/task").body); entry != alone {
 		t.Errorf("list entry:\n %s\nalone:\n %s", entry, alone)
 	}
+}
+
+// /amf is the gateway's own, called by clients of either API, so it takes the
+// key from x-api-key as Claude's clients send it, or from Authorization; a
+// wrong key in either is refused.
+func TestAmf_TakesTheKeyFromEitherHeader(t *testing.T) {
+	gw := startTask(t, newSwap(t))
+	for name, header := range map[string]map[string]string{
+		"x-api-key":     {"x-api-key": "secret"},
+		"Authorization": {"Authorization": "Bearer secret"},
+	} {
+		if r := headerRequest(t, gw, http.MethodGet, "/amf/models", header); r.StatusCode != http.StatusOK {
+			t.Errorf("%s: got %d %s", name, r.StatusCode, r.body)
+		}
+	}
+	if r := headerRequest(t, gw, http.MethodGet, "/amf/models", map[string]string{"x-api-key": "wrong"}); r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a wrong key: got %d", r.StatusCode)
+	}
+}
+
+// headerRequest sends a request with these headers and no other key.
+func headerRequest(t *testing.T, gw *gateway, method, path string, header map[string]string) response {
+	t.Helper()
+	req, _ := http.NewRequest(method, gw.URL+path, nil)
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return response{resp, string(body)}
 }
 
 // An alias candidate names its base model as aliasOf, in `current` and in the

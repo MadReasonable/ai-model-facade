@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 
@@ -41,11 +42,15 @@ type Logging struct {
 
 // API configures what the gateway presents to clients of each API family.
 type API struct {
-	OpenAI APIFamily `yaml:"openAi"`
+	// Default is the family served at the root, bare /v1, so that clients
+	// and configs written before families keep working. Default "openAi".
+	Default   string    `yaml:"default"`
+	OpenAI    APIFamily `yaml:"openAi"`
+	Anthropic APIFamily `yaml:"anthropic"`
 }
 
-// The API families. A family holds one or more protocols; Messages belongs to
-// Anthropic's, which the gateway sends to the Claude API but doesn't serve.
+// The API families. A family owns a base path and a model-list format, and
+// holds one or more protocols.
 const (
 	FamilyOpenAI    = "openAi"
 	FamilyAnthropic = "anthropic"
@@ -53,12 +58,57 @@ const (
 
 // APIFamily configures one API family's endpoints.
 type APIFamily struct {
+	// BasePath is the path in front of the family's own paths, /v1 included.
+	// Families overlap under /v1 (both have /v1/models, with different
+	// shapes), so each needs its own. Default "/openai" and "/anthropic".
+	BasePath string `yaml:"basePath"`
 	// AddCurrent adds `current` to the family's model objects. Off by default,
 	// since it makes a listing read backend state.
 	AddCurrent bool `yaml:"addCurrent"`
 	// Protocols are the family's protocols the gateway serves; nil means
 	// every one, and an empty list turns the family off.
 	Protocols []string `yaml:"protocols"`
+}
+
+// applyDefaults fills in the defaults and checks what clients would reach.
+func (a *API) applyDefaults() error {
+	switch a.Default {
+	case "":
+		a.Default = FamilyOpenAI
+	case FamilyOpenAI, FamilyAnthropic:
+	default:
+		return fmt.Errorf("api.default: unknown family '%s'; use '%s' or '%s'", a.Default, FamilyOpenAI, FamilyAnthropic)
+	}
+	if a.OpenAI.BasePath == "" {
+		a.OpenAI.BasePath = "/openai"
+	}
+	if a.Anthropic.BasePath == "" {
+		a.Anthropic.BasePath = "/anthropic"
+	}
+	if err := checkBasePath(FamilyOpenAI, a.OpenAI.BasePath); err != nil {
+		return err
+	}
+	if err := checkBasePath(FamilyAnthropic, a.Anthropic.BasePath); err != nil {
+		return err
+	}
+	if a.OpenAI.BasePath == a.Anthropic.BasePath {
+		return fmt.Errorf("api: families '%s' and '%s' both have basePath '%s'", FamilyOpenAI, FamilyAnthropic, a.OpenAI.BasePath)
+	}
+	return nil
+}
+
+// checkBasePath refuses a base path that can't be a route, or that would
+// shadow the root's /v1 or the gateway's own endpoints.
+func checkBasePath(family, basePath string) error {
+	if !strings.HasPrefix(basePath, "/") || basePath == "/" || path.Clean(basePath) != basePath || strings.ContainsAny(basePath, "{} ") {
+		return fmt.Errorf("api.%s.basePath: '%s' is not a path such as '/%s'", family, basePath, strings.ToLower(family))
+	}
+	for _, reserved := range []string{"/v1", "/amf", "/health"} {
+		if basePath == reserved || strings.HasPrefix(basePath, reserved+"/") {
+			return fmt.Errorf("api.%s.basePath: '%s' is under '%s', which the gateway serves itself", family, basePath, reserved)
+		}
+	}
+	return nil
 }
 
 // UnknownClient is the client name logged for a key not in server.apiKeys.
@@ -106,6 +156,9 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 	}
 	if cfg.Server.TargetHeader == "" {
 		cfg.Server.TargetHeader = "X-Gateway-Target"
+	}
+	if err := cfg.API.applyDefaults(); err != nil {
+		return nil, err
 	}
 	for i, k := range cfg.Server.APIKeys {
 		if k.Name == "" || k.Key == "" {

@@ -42,7 +42,7 @@ func patches(t *testing.T, src string) []mergepatch.Patch {
 
 // A request runs in the pipeline's order: the translator runs, params apply
 // in the protocol the backend receives, the model is rewritten last, and the
-// reply is translated back.
+// reply is translated back, with every dropped field reported once.
 func TestServe_RunsTheStepsInOrder(t *testing.T) {
 	claude := &fakeBackend{protocols: []backend.Protocol{backend.AnthropicMessages}, reply: `{"id":"m","model":"claude","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`}
 	params := patches(t, `{thinking: {type: adaptive}, model: overridden}`)
@@ -67,8 +67,11 @@ func TestServe_RunsTheStepsInOrder(t *testing.T) {
 	if claude.sent.Protocol != backend.AnthropicMessages || sent.Get("model").String() != "claude-a" || sent.Get("thinking.type").String() != "adaptive" || sent.Get("messages.0.content.0.text").String() != "hi" {
 		t.Errorf("backend sent %s %s", claude.sent.Protocol, claude.sent.Body)
 	}
-	if gjson.GetBytes(reply.Response.Body, "choices.0.message.content").String() != "ok" {
-		t.Errorf("replied %s", reply.Response.Body)
+	if gjson.GetBytes(reply.Chat.Response.Body, "choices.0.message.content").String() != "ok" {
+		t.Errorf("replied %s", reply.Chat.Response.Body)
+	}
+	if len(reply.Dropped) != 1 || reply.Dropped[0] != "seed" {
+		t.Errorf("dropped %v", reply.Dropped)
 	}
 }
 
@@ -77,7 +80,7 @@ func TestServe_PassesANativeRequestOn(t *testing.T) {
 	openAI := &fakeBackend{protocols: []backend.Protocol{backend.OpenAIChat}, reply: `{"x":1}`}
 	sel := Selected{Backend: openAI, BackendName: "openAi", Model: "gpt", Accepted: openAI.protocols, Params: func(backend.Protocol) []mergepatch.Patch { return nil }}
 	reply, err := Serve(context.Background(), backend.OpenAIChat, []byte(`{"model":"f","temperature":0.50}`), backend.Client{}, sel)
-	if err != nil || string(openAI.sent.Body) != `{"model":"gpt","temperature":0.50}` || string(reply.Response.Body) != `{"x":1}` {
+	if err != nil || string(openAI.sent.Body) != `{"model":"gpt","temperature":0.50}` || string(reply.Chat.Response.Body) != `{"x":1}` {
 		t.Errorf("sent %s, replied %+v, %v", openAI.sent.Body, reply, err)
 	}
 }

@@ -22,11 +22,11 @@ import (
 type chatToMessages struct{}
 
 func (chatToMessages) Request(body []byte) ([]byte, Reply, error) {
-	out, includeUsage, err := toMessages(body)
+	out, includeUsage, gone, err := toMessages(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	return out, &messagesReply{includeUsage: includeUsage, legacy: legacyFunctions(gjson.ParseBytes(body))}, nil
+	return out, &messagesReply{includeUsage: includeUsage, legacy: legacyFunctions(gjson.ParseBytes(body)), dropped: gone}, nil
 }
 
 // dropped are Chat Completions fields with no Messages counterpart that tune
@@ -60,33 +60,34 @@ var dropped = map[string]bool{
 // reasoning_effort, the native value's own keys win. A missing max_tokens
 // stays missing: filling it takes the winning model's output cap, after
 // params, which the adapter does for every client of Messages.
-func toMessages(body []byte) ([]byte, bool, error) {
+func toMessages(body []byte) ([]byte, bool, droppedFields, error) {
 	req := gjson.ParseBytes(body)
 	if err := checkUnsupported(req); err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
+	var gone droppedFields
 	messages, err := readChatMessages(req)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
-	system, turns, err := messagesTurnsFromChat(messages)
+	system, turns, err := messagesTurnsFromChat(messages, &gone)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	if system != "" && req.Get("system").Exists() {
-		return nil, false, refuse("the request has both system messages and a Messages 'system' field; use one")
+		return nil, false, nil, refuse("the request has both system messages and a Messages 'system' field; use one")
 	}
 	choice, err := readChatToolChoice(req)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	tools, err := messagesToolsFromChat(req, choice)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	toolChoice, err := messagesChoiceFromChat(req, choice)
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 
 	var out members
@@ -118,7 +119,7 @@ func toMessages(body []byte) ([]byte, bool, error) {
 			// checked by checkUnsupported, so only a harmless value gets here,
 			// and stream_options is read for include_usage
 		case dropped[k]:
-			// left out
+			gone.add(k)
 		default:
 			if !placed[k] {
 				placed[k] = true
@@ -128,7 +129,7 @@ func toMessages(body []byte) ([]byte, bool, error) {
 		return true
 	})
 	place("tool_choice", toolChoice) // a legacy request may set no tool_choice key
-	return out.bytes(), req.Get("stream_options.include_usage").Bool(), nil
+	return out.bytes(), req.Get("stream_options.include_usage").Bool(), gone, nil
 }
 
 // checkUnsupported refuses the fields that ask for something Messages can't
@@ -293,11 +294,14 @@ func messagesToolsFromChat(req gjson.Result, choice chatChoice) (string, error) 
 // becomes a tool_result block of a user turn, and consecutive turns of one
 // role become one, so the results of parallel tool calls share a turn, as the
 // API asks.
-func messagesTurnsFromChat(messages []chatMessage) (system, turns string, err error) {
+func messagesTurnsFromChat(messages []chatMessage, gone *droppedFields) (system, turns string, err error) {
 	systemBlocks := "[]"
 	turns = "[]"
 	lastRole := ""
 	for _, m := range messages {
+		if m.named {
+			gone.add("name")
+		}
 		role := m.role
 		var blocks []string
 		switch role {
@@ -311,9 +315,9 @@ func messagesTurnsFromChat(messages []chatMessage) (system, turns string, err er
 			}
 			continue
 		case "user":
-			blocks, err = messagesUserBlocksFromChat(m.content, m.where)
+			blocks, err = messagesUserBlocksFromChat(m.content, m.where, gone)
 		case "assistant":
-			blocks, err = messagesAssistantBlocksFromChat(m)
+			blocks, err = messagesAssistantBlocksFromChat(m, gone)
 		case "tool":
 			blocks, err = messagesToolResultFromChat(m)
 			role = "user"
@@ -363,7 +367,7 @@ func messagesTextBlocks(content gjson.Result, where string) ([]string, error) {
 
 // messagesUserBlocksFromChat turns a user message's content into text, image and PDF
 // document blocks. An image's detail has no Claude counterpart.
-func messagesUserBlocksFromChat(content gjson.Result, where string) ([]string, error) {
+func messagesUserBlocksFromChat(content gjson.Result, where string, gone *droppedFields) ([]string, error) {
 	parts, err := readChatParts(content, where)
 	if err != nil {
 		return nil, err
@@ -376,6 +380,9 @@ func messagesUserBlocksFromChat(content gjson.Result, where string) ([]string, e
 				blocks = append(blocks, set(`{"type":"text"}`, "text", part.text))
 			}
 		case "image":
+			if part.detail != "" {
+				gone.add("image_url.detail")
+			}
 			block, err := imageBlock(part.url, where)
 			if err != nil {
 				return nil, err
@@ -398,13 +405,16 @@ func messagesUserBlocksFromChat(content gjson.Result, where string) ([]string, e
 // calls into text and tool_use blocks. Its reasoning_content is left out: the
 // API takes thinking back only with the signature it was sent with, which
 // Chat Completions has no place for.
-func messagesAssistantBlocksFromChat(m chatMessage) ([]string, error) {
+func messagesAssistantBlocksFromChat(m chatMessage, gone *droppedFields) ([]string, error) {
 	blocks, err := messagesTextBlocks(m.content, m.where)
 	if err != nil {
 		return nil, err
 	}
 	if len(blocks) == 0 && m.refusal != "" {
 		blocks = append(blocks, set(`{"type":"text"}`, "text", m.refusal))
+	}
+	if m.reasoning {
+		gone.add("reasoning_content")
 	}
 	for j, call := range m.calls {
 		if call.kind == "custom" {
@@ -515,7 +525,10 @@ func openAIError(body []byte) []byte {
 type messagesReply struct {
 	includeUsage bool
 	legacy       bool // the client called with the deprecated functions
+	dropped      droppedFields
 }
+
+func (r *messagesReply) Dropped() []string { return r.dropped }
 
 func (r *messagesReply) Result(result backend.ChatResult) backend.ChatResult {
 	created := time.Now().Unix()
@@ -634,4 +647,540 @@ func (s *chunkStream) usage(path string) gjson.Result {
 
 func (s *chunkStream) Close() error {
 	return s.events.Close()
+}
+
+// messagesToChat is the direct translator from Messages to Chat Completions.
+type messagesToChat struct{}
+
+func (messagesToChat) Request(body []byte) ([]byte, Reply, error) {
+	out, gone, err := toChat(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, &chatReply{dropped: gone}, nil
+}
+
+// refusedMessagesFields ask for what only Claude's servers can do.
+var refusedMessagesFields = map[string]bool{
+	"container":   true,
+	"mcp_servers": true,
+}
+
+// toChat translates a Messages body into a Chat Completions body. Top-level
+// keys keep the client's order, each translated in place, and a key with no
+// translation, such as top_k, passes on unchanged. A stream asks for usage,
+// since Messages always reports it. thinking has no Chat Completions
+// counterpart, and thinking blocks go the same way: a Chat Completions model
+// can't use them.
+func toChat(body []byte) ([]byte, droppedFields, error) {
+	req := gjson.ParseBytes(body)
+	turns, err := readMessagesTurns(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	var gone droppedFields
+	messages, err := chatMessages(req, turns, &gone)
+	if err != nil {
+		return nil, nil, err
+	}
+	var out members
+	placedMessages := false
+	var failed error
+	req.ForEach(func(key, value gjson.Result) bool {
+		switch k := key.String(); {
+		case k == "system":
+			// joined with messages, where it is placed
+		case k == "messages":
+			out.add(`"messages"`, messages)
+			placedMessages = true
+		case k == "stop_sequences":
+			out.add(`"stop"`, value.Raw)
+		case k == "tools":
+			var tools string
+			if tools, failed = chatTools(value); tools != "" {
+				out.add(`"tools"`, tools)
+			}
+		case k == "tool_choice":
+			var choice, parallel string
+			if choice, parallel, failed = chatToolChoice(value); choice != "" {
+				out.add(`"tool_choice"`, choice)
+			}
+			if parallel != "" {
+				out.add(`"parallel_tool_calls"`, parallel)
+			}
+		case k == "output_config":
+			if effort := value.Get("effort"); effort.Type == gjson.String {
+				out.add(`"reasoning_effort"`, strconv.Quote(openAIEffort(effort.String())))
+			}
+			value.ForEach(func(setting, _ gjson.Result) bool {
+				if s := setting.String(); s != "effort" && s != "format" {
+					gone.add("output_config." + s)
+				}
+				return true
+			})
+			if format := value.Get("format"); format.Exists() {
+				var chatFormat string
+				if chatFormat, failed = chatResponseFormat(format); chatFormat != "" {
+					out.add(`"response_format"`, chatFormat)
+				}
+			}
+		case k == "metadata":
+			if user := value.Get("user_id"); user.Exists() {
+				out.add(`"user"`, user.Raw)
+			}
+			value.ForEach(func(setting, _ gjson.Result) bool {
+				if s := setting.String(); s != "user_id" {
+					gone.add("metadata." + s)
+				}
+				return true
+			})
+		case refusedMessagesFields[k]:
+			failed = refuseMessages("'%s' needs the Claude API, and this model is served through Chat Completions", k)
+		case k == "thinking" || droppedMessagesFieldsEverywhere[k]:
+			gone.add(k)
+		default:
+			out.add(key.Raw, value.Raw)
+		}
+		return failed == nil
+	})
+	if failed != nil {
+		return nil, nil, failed
+	}
+	reportDroppedBlocks(body, turns, &gone)
+	if !placedMessages {
+		out.add(`"messages"`, messages)
+	}
+	if req.Get("stream").Bool() {
+		out.add(`"stream_options"`, `{"include_usage":true}`)
+	}
+	return out.bytes(), gone, nil
+}
+
+// chatMessages returns the conversation as a Chat Completions messages array.
+// The system prompt comes first, joined with any system message in the
+// conversation, as Claude Code sends one (seen on 2.1.319), since not every
+// model takes a system message mid-conversation.
+func chatMessages(req gjson.Result, turns []messagesTurn, gone *droppedFields) (string, error) {
+	var system, messages []string
+	text, ok, err := readMessagesSystem(req)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		system = append(system, text)
+	}
+	for _, t := range turns {
+		switch t.role {
+		case "user":
+			turn, err := chatUserMessages(t)
+			if err != nil {
+				return "", err
+			}
+			messages = append(messages, turn...)
+		case "assistant":
+			assistant, err := chatAssistantMessage(t, gone)
+			if err != nil {
+				return "", err
+			}
+			messages = append(messages, assistant)
+		case "system":
+			text, err := blocksText(t.blocks, t.where)
+			if err != nil {
+				return "", err
+			}
+			system = append(system, text)
+		}
+	}
+	if len(system) > 0 {
+		messages = append([]string{set(`{"role":"system"}`, "content", strings.Join(system, "\n\n"))}, messages...)
+	}
+	return "[" + strings.Join(messages, ",") + "]", nil
+}
+
+// chatUserMessages turns a user turn into Chat Completions messages. Each tool
+// result becomes a tool message of its own, ahead of the rest, since a tool
+// message must directly follow the assistant message that made the call. A
+// search result becomes text, its title and source with its content.
+func chatUserMessages(t messagesTurn) ([]string, error) {
+	var results, parts []string
+	onlyText := true
+	for _, b := range t.blocks {
+		switch b.kind {
+		case "text", "search_result":
+			parts = append(parts, set(`{"type":"text"}`, "text", b.text))
+		case "image":
+			part, err := chatImagePart(b.source, t.where)
+			if err != nil {
+				return nil, err
+			}
+			parts, onlyText = append(parts, part), false
+		case "document":
+			part, err := chatDocumentPart(b.source, t.where)
+			if err != nil {
+				return nil, err
+			}
+			parts, onlyText = append(parts, part), onlyText && gjson.Get(part, "type").String() == "text"
+		case "tool_result":
+			result, err := chatToolResult(b)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, result)
+		default:
+			return nil, refuseMessages("%s: a Chat Completions model can't take a '%s' block", t.where, b.kind)
+		}
+	}
+	if len(parts) == 0 {
+		return results, nil
+	}
+	if !onlyText {
+		return append(results, setRaw(`{"role":"user"}`, "content", "["+strings.Join(parts, ",")+"]")), nil
+	}
+	var text []string
+	for _, part := range parts {
+		text = append(text, gjson.Get(part, "text").String())
+	}
+	return append(results, set(`{"role":"user"}`, "content", strings.Join(text, "\n\n"))), nil
+}
+
+// chatToolResult turns a tool result into a tool message. A tool message has no
+// error flag, so a failed call says so in its text for the model to read.
+func chatToolResult(b messagesBlock) (string, error) {
+	text, err := blocksText(b.content, b.where)
+	if err != nil {
+		return "", err
+	}
+	if b.isError {
+		text = "Error: " + text
+	}
+	return set(set(`{"role":"tool"}`, "tool_call_id", b.toolUseID), "content", text), nil
+}
+
+// chatAssistantMessage turns an assistant turn into one message. Thinking
+// blocks are left out, since a Chat Completions model has no use for them, and
+// a server tool's call or result, which only the Claude API reads, becomes
+// text the model can read.
+func chatAssistantMessage(t messagesTurn, gone *droppedFields) (string, error) {
+	var text, calls []string
+	for _, b := range t.blocks {
+		switch {
+		case b.kind == "text":
+			text = append(text, b.text)
+		case b.kind == "tool_use":
+			call := set(`{"type":"function","function":{}}`, "id", b.id)
+			call = set(call, "function.name", b.name)
+			arguments := b.input
+			if arguments == "" {
+				arguments = "{}"
+			}
+			calls = append(calls, set(call, "function.arguments", arguments))
+		case b.kind == "thinking" || b.kind == "redacted_thinking":
+			gone.add("thinking")
+		default:
+			return "", refuseMessages("%s: a Chat Completions model can't take a '%s' block", t.where, b.kind)
+		}
+	}
+	message := `{"role":"assistant"}`
+	if len(text) > 0 {
+		message = set(message, "content", strings.Join(text, ""))
+	} else {
+		message = setRaw(message, "content", "null")
+	}
+	if len(calls) > 0 {
+		message = setRaw(message, "tool_calls", "["+strings.Join(calls, ",")+"]")
+	}
+	return message, nil
+}
+
+// chatTools turns client tools into function tools. The others are tool types
+// only the Claude API defines. Claude's servers run some, such as web search,
+// and the client runs others, such as bash, but none has a schema to send on.
+func chatTools(tools gjson.Result) (string, error) {
+	var out []string
+	for i, tool := range tools.Array() {
+		if kind := tool.Get("type").String(); kind != "" && kind != "custom" {
+			return "", refuseMessages("tools[%d]: only the Claude API defines tool type '%s', and this model is served through Chat Completions; a tool sent to it needs its own 'input_schema'", i, kind)
+		}
+		function := set(`{}`, "name", tool.Get("name").String())
+		if description := tool.Get("description"); description.Exists() {
+			function = set(function, "description", description.String())
+		}
+		if schema := tool.Get("input_schema"); schema.Exists() {
+			function = setRaw(function, "parameters", schema.Raw)
+		}
+		if strict := tool.Get("strict"); strict.Exists() {
+			function = setRaw(function, "strict", strict.Raw)
+		}
+		out = append(out, setRaw(`{"type":"function"}`, "function", function))
+	}
+	return "[" + strings.Join(out, ",") + "]", nil
+}
+
+// chatToolChoice returns the Chat Completions tool_choice and
+// parallel_tool_calls for a Messages tool_choice.
+func chatToolChoice(choice gjson.Result) (toolChoice, parallel string, err error) {
+	if choice.Get("disable_parallel_tool_use").Bool() {
+		parallel = "false"
+	}
+	switch kind := choice.Get("type").String(); kind {
+	case "auto":
+		return strconv.Quote("auto"), parallel, nil
+	case "any":
+		return strconv.Quote("required"), parallel, nil
+	case "none":
+		return strconv.Quote("none"), parallel, nil
+	case "tool":
+		return set(`{"type":"function","function":{}}`, "function.name", choice.Get("name").String()), parallel, nil
+	default:
+		return "", "", refuseMessages("tool_choice: '%s' has no Chat Completions equivalent", kind)
+	}
+}
+
+// chatResponseFormat turns output_config.format into response_format.
+func chatResponseFormat(format gjson.Result) (string, error) {
+	if kind := format.Get("type").String(); kind != "json_schema" {
+		return "", refuseMessages("output_config.format: '%s' has no Chat Completions equivalent", kind)
+	}
+	schema := set(`{"name":"response"}`, "strict", true)
+	schema = setRaw(schema, "schema", format.Get("schema").Raw)
+	return setRaw(`{"type":"json_schema"}`, "json_schema", schema), nil
+}
+
+// anthropicError turns a Chat Completions error body into Anthropic's shape.
+// A body that isn't one becomes the message.
+func anthropicError(status int, body []byte) []byte {
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	return anthropicErrorBody(anthropicErrorType(status), message)
+}
+
+// stopReason maps a Chat Completions finish_reason to Messages'.
+func stopReason(finish string) string {
+	switch finish {
+	case "length":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	case "content_filter":
+		return "refusal"
+	}
+	return "end_turn"
+}
+
+// messagesUsage reports usage as Messages does, with cache reads apart from
+// input_tokens, where Chat Completions counts them in prompt_tokens.
+func messagesUsage(usage gjson.Result) map[string]any {
+	cached := usage.Get("prompt_tokens_details.cached_tokens").Int()
+	return map[string]any{
+		"input_tokens":            usage.Get("prompt_tokens").Int() - cached,
+		"output_tokens":           usage.Get("completion_tokens").Int(),
+		"cache_read_input_tokens": cached,
+	}
+}
+
+// chatReply converts what a Chat Completions backend answered back to Messages:
+// a response or a stream, or an error in Anthropic's shape with the backend's
+// status.
+type chatReply struct {
+	dropped droppedFields
+}
+
+func (r *chatReply) Dropped() []string { return r.dropped }
+
+func (*chatReply) Result(result backend.ChatResult) backend.ChatResult {
+	if result.Stream != nil {
+		return backend.ChatResult{Stream: newEventStream(result.Stream)}
+	}
+	resp := *result.Response
+	resp.ContentType = "application/json"
+	if resp.Status/100 == 2 {
+		resp.Body = messageOf(gjson.ParseBytes(resp.Body))
+		resp.RetryAfter = ""
+	} else {
+		resp.Body = anthropicError(resp.Status, resp.Body)
+	}
+	return backend.ChatResult{Response: &resp}
+}
+
+// messageOf turns a chat completion into a Messages response. Reasoning becomes
+// a thinking block marked as unsigned, ahead of the text and tool calls.
+func messageOf(completion gjson.Result) []byte {
+	choice := completion.Get("choices.0")
+	message := choice.Get("message")
+	b := newMessagesWriter(false)
+	b.start("msg_"+completion.Get("id").String(), completion.Get("model").String(), nil)
+	if reasoning := reasoningOf(message); reasoning != "" {
+		b.think(reasoning)
+		b.sign(backend.UnsignedThinking)
+	}
+	b.text(message.Get("content").String())
+	for _, call := range message.Get("tool_calls").Array() {
+		b.useTool(call.Get("id").String(), call.Get("function.name").String())
+		b.input(call.Get("function.arguments").String())
+	}
+	b.finish(stopReason(choice.Get("finish_reason").String()), messagesUsage(completion.Get("usage")))
+	return b.body()
+}
+
+// eventStream turns Chat Completions chunks into Messages events, as messageOf
+// does a complete response. Chunks have no blocks, so a delta of another kind
+// than the open block opens one of its own:
+//
+//   - the first chunk, message_start;
+//   - a reasoning delta, a thinking block, closed with the unsigned marker as
+//     its signature;
+//   - a content delta, a text block;
+//   - a tool call's first delta, a tool_use block. Messages sends one block at
+//     a time and chunks may interleave calls, so only the first call streams
+//     its arguments, and the others are sent whole at the end. A block can't
+//     be reopened, so reasoning and content that come while the first call's
+//     block is open are held until the end too, sent after the call, since a
+//     Chat stream never says that a call's arguments are complete.
+//
+// The stream's end gives the last block's stop, then message_delta, with the
+// finish reason and usage, then message_stop.
+type eventStream struct {
+	chunks  backend.ChatStream
+	reply   *messagesWriter
+	started bool
+	done    bool
+
+	calls  []*toolCall
+	held   []gjson.Result // deltas held while the first call streams
+	finish string
+	usage  gjson.Result
+}
+
+// toolCall is one call's arguments, as far as they have been sent.
+type toolCall struct {
+	chunkIndex int64
+	id, name   string
+	arguments  string
+	opened     bool
+}
+
+func newEventStream(chunks backend.ChatStream) *eventStream {
+	return &eventStream{chunks: chunks, reply: newMessagesWriter(true)}
+}
+
+func (s *eventStream) Next() ([]byte, error) {
+	for {
+		if event, ok := s.reply.next(); ok {
+			return event, nil
+		}
+		if s.done {
+			return nil, io.EOF
+		}
+		data, err := s.chunks.Next()
+		var streamErr *backend.StreamError
+		if errors.As(err, &streamErr) {
+			return nil, &backend.StreamError{Data: anthropicError(0, streamErr.Data)}
+		}
+		if err == io.EOF {
+			s.end()
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		s.translate(gjson.ParseBytes(data))
+	}
+}
+
+func (s *eventStream) Close() error {
+	return s.chunks.Close()
+}
+
+func (s *eventStream) start(chunk gjson.Result) {
+	s.started = true
+	s.reply.start("msg_"+chunk.Get("id").String(), chunk.Get("model").String(), map[string]any{"input_tokens": 0, "output_tokens": 0})
+}
+
+func (s *eventStream) translate(chunk gjson.Result) {
+	if !s.started {
+		s.start(chunk)
+	}
+	if usage := chunk.Get("usage"); usage.IsObject() {
+		s.usage = usage
+	}
+	choice := chunk.Get("choices.0")
+	delta := choice.Get("delta")
+	if len(s.calls) > 0 && s.calls[0].opened && s.reply.isOpen("tool_use") {
+		s.held = append(s.held, delta)
+	} else {
+		s.write(delta)
+	}
+	for _, call := range delta.Get("tool_calls").Array() {
+		s.addToToolCall(call)
+	}
+	if finish := choice.Get("finish_reason").String(); finish != "" {
+		s.finish = finish
+	}
+}
+
+// write sends a delta's reasoning and content.
+func (s *eventStream) write(delta gjson.Result) {
+	if reasoning := reasoningOf(delta); reasoning != "" {
+		s.reply.think(reasoning)
+		s.reply.sign(backend.UnsignedThinking)
+	}
+	s.reply.text(delta.Get("content").String())
+}
+
+// addToToolCall sends the first call's arguments as they come, and keeps the
+// others' for the end.
+func (s *eventStream) addToToolCall(delta gjson.Result) {
+	index := delta.Get("index").Int()
+	var call *toolCall
+	for _, c := range s.calls {
+		if c.chunkIndex == index {
+			call = c
+		}
+	}
+	if call == nil {
+		call = &toolCall{chunkIndex: index}
+		s.calls = append(s.calls, call)
+	}
+	if id := delta.Get("id").String(); id != "" {
+		call.id = id
+	}
+	if name := delta.Get("function.name").String(); name != "" {
+		call.name = name
+	}
+	arguments := delta.Get("function.arguments").String()
+	if call == s.calls[0] && call.name != "" && (!call.opened || s.reply.isOpen("tool_use")) {
+		s.openToolCall(call)
+		s.reply.input(arguments)
+		return
+	}
+	call.arguments += arguments
+}
+
+func (s *eventStream) openToolCall(call *toolCall) {
+	if call.opened {
+		return
+	}
+	call.opened = true
+	s.reply.useTool(call.id, call.name)
+	s.reply.input(call.arguments)
+	call.arguments = ""
+}
+
+// end sends what was held while the first call streamed, then the calls
+// still waiting, and ends the message.
+func (s *eventStream) end() {
+	s.done = true
+	if !s.started {
+		s.start(gjson.Result{})
+	}
+	for _, delta := range s.held {
+		s.write(delta)
+	}
+	for _, call := range s.calls {
+		s.openToolCall(call)
+		s.reply.input(call.arguments)
+	}
+	s.reply.finish(stopReason(s.finish), messagesUsage(s.usage))
 }

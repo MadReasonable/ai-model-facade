@@ -20,12 +20,14 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"mime"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/tidwall/gjson"
@@ -73,8 +75,11 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		message := fmt.Sprintf("the Claude API needs max_tokens, and its model list gives no output cap for '%s' to use instead; set max_tokens", gjson.GetBytes(req.Body, "model").String())
 		return backend.ChatResult{Response: &backend.ChatResponse{Status: http.StatusBadRequest, ContentType: "application/json", Body: errorBody("invalid_request_error", message)}}, nil
 	}
+	if body, err = withoutUnsignedThinking(body); err != nil {
+		return backend.ChatResult{}, err
+	}
 	req.Body = body
-	resp, err := b.Send(ctx, req, "/v1/messages", apiVersion)
+	resp, err := b.Send(ctx, req, "/v1/messages", messagesHeader(req.Client))
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -88,6 +93,57 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		return backend.ChatResult{}, err
 	}
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: data, RetryAfter: resp.Header.Get("Retry-After")}}, nil
+}
+
+// messagesHeader is the adapter's API version, with what the client asked for
+// over it: a client's beta features and version are its own to choose.
+func messagesHeader(client backend.Client) http.Header {
+	header := apiVersion.Clone()
+	for name, values := range client.MessagesHeader {
+		header[name] = values
+	}
+	return header
+}
+
+// withoutUnsignedThinking removes the thinking blocks the gateway made from a
+// Chat Completions model's reasoning, which the API refuses (verified: a
+// made-up signature is a 400 in any turn), and any assistant turn they leave
+// empty. What remains is a history it accepts, real signed blocks included
+// (verified). A body without the marker passes on unchanged, with nothing
+// parsed.
+func withoutUnsignedThinking(body []byte) ([]byte, error) {
+	if !bytes.Contains(body, []byte(backend.UnsignedThinking)) {
+		return body, nil
+	}
+	var messages []string
+	removed := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.IsArray() {
+			messages = append(messages, message.Raw)
+			return true
+		}
+		var kept []string
+		for _, block := range content.Array() {
+			if block.Get("type").String() != "thinking" || block.Get("signature").String() != backend.UnsignedThinking {
+				kept = append(kept, block.Raw)
+			}
+		}
+		if len(kept) == len(content.Array()) {
+			messages = append(messages, message.Raw)
+			return true
+		}
+		removed = true
+		if len(kept) > 0 {
+			edited, _ := sjson.SetRaw(message.Raw, "content", "["+strings.Join(kept, ",")+"]")
+			messages = append(messages, edited)
+		}
+		return true
+	})
+	if !removed {
+		return body, nil
+	}
+	return sjson.SetRawBytes(body, "messages", []byte("["+strings.Join(messages, ",")+"]"))
 }
 
 // withMaxTokens adds the model's output cap to a body with no max_tokens. ok
@@ -151,7 +207,7 @@ func (b *Backend) list(ctx context.Context) ([]backend.ModelInfo, error) {
 			return nil, err
 		}
 		for _, m := range page.Data {
-			models = append(models, backend.ModelInfo{ID: m.ID})
+			models = append(models, backend.ModelInfo{ID: m.ID, OutputCap: m.MaxTokens})
 			caps[m.ID] = m.MaxTokens
 		}
 		if !page.HasMore || page.LastID == "" {

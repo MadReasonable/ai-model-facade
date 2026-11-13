@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -87,6 +88,32 @@ models:
 	}
 }
 
+// The OpenAI family answers under its base path and, as the default family,
+// at the root.
+func TestRequests_ServeTheOpenAIFamilyUnderItsBasePathAndTheRoot(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+api: {openAi: {basePath: /oa}}
+backends:
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  task: {backend: swap, candidates: [{model: "qwen3.6-35b-a3b:q8_0"}]}
+`, nil)
+	for _, base := range []string{"", "/oa"} {
+		if r := gw.do(t, http.MethodPost, base+"/v1/chat/completions", "", `{"model":"task"}`); r.StatusCode != http.StatusOK {
+			t.Errorf("%s chat: got %d %s", base, r.StatusCode, r.body)
+		}
+		if r := gw.get(t, base+"/v1/models/task"); r.StatusCode != http.StatusOK {
+			t.Errorf("%s model: got %d %s", base, r.StatusCode, r.body)
+		}
+	}
+	if r := gw.get(t, "/openai/v1/models"); r.StatusCode != http.StatusNotFound {
+		t.Errorf("the default base path, renamed: got %d", r.StatusCode)
+	}
+}
+
 // A Chat Completions client reaches a Claude candidate through the direct
 // translator, and the params for it are in Messages spelling, patching the
 // translated body: thinking stays as written, and a Chat Completions-only key
@@ -115,6 +142,251 @@ models:
 	req, ok := claude.Last("POST /v1/messages")
 	if want := `{"model":"claude-a","max_tokens":5,"system":[{"type":"text","text":"s"}],"messages":[{"role":"user","content":[{"type":"text","text":"u"}]}],"thinking":{"type":"adaptive"},"stop":["x"]}`; !ok || req.Body != want {
 		t.Errorf("sent %+v, want %s", req, want)
+	}
+}
+
+// claudeGateway serves a facade on a fake Claude API, with this api block.
+func claudeGateway(t *testing.T, api string) (*gateway, *testkit.Anthropic) {
+	t.Helper()
+	claude := testkit.NewAnthropic(t, "claude-a")
+	return startGateway(t, `
+server:
+  listen: "127.0.0.1:0"
+  apiKeys: [{name: alice, key: secret}]
+api: `+api+`
+backends:
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
+models:
+  ask:
+    backend: claude
+    params: {anthropicMessages: {thinking: {type: adaptive}}}
+    candidates: [{model: claude-a}]
+  chatOnly: {backend: claude, protocols: [openAiChat], candidates: [{model: claude-a}]}
+`, nil), claude
+}
+
+// messagesRequest posts to the Messages endpoint as Claude's clients do, with
+// the key in x-api-key.
+func messagesRequest(t *testing.T, gw *gateway, path, key, body string, header map[string]string) response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+path, strings.NewReader(body))
+	req.Header.Set("x-api-key", key)
+	for name, value := range header {
+		req.Header.Set(name, value)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return response{resp, string(data)}
+}
+
+// A Messages client reaches a Messages backend with nothing parsed: its keys
+// and numbers stay as sent, only params and the model change, its version and
+// beta headers go with it, and the response comes back unchanged.
+func TestMessages_ForwardsARequestAndItsHeaders(t *testing.T) {
+	gw, claude := claudeGateway(t, "{}")
+	body := `{"max_tokens":5,"temperature":0.50,"model":"ask","messages":[{"role":"user","content":"hi"}]}`
+	r := messagesRequest(t, gw, "/anthropic/v1/messages", "secret", body, map[string]string{"anthropic-version": "2099-01-01", "anthropic-beta": "some-beta", "x-other": "dropped"})
+	if r.StatusCode != http.StatusOK || gjson.Get(r.body, "type").String() != "message" {
+		t.Fatalf("got %d %s", r.StatusCode, r.body)
+	}
+	req, ok := claude.Last("POST /v1/messages")
+	if want := `{"max_tokens":5,"temperature":0.50,"model":"claude-a","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`; !ok || req.Body != want {
+		t.Errorf("sent %+v, want %s", req, want)
+	}
+	if h := req.Header; h.Get("Anthropic-Version") != "2099-01-01" || h.Get("Anthropic-Beta") != "some-beta" || h.Get("X-Other") != "" || h.Get("X-Api-Key") != "" {
+		t.Errorf("headers %v", h)
+	}
+}
+
+// A stream keeps Messages' framing: each event with its event line, and no
+// [DONE] after message_stop.
+func TestMessages_StreamsInItsOwnFraming(t *testing.T) {
+	gw, _ := claudeGateway(t, "{}")
+	r := messagesRequest(t, gw, "/anthropic/v1/messages", "secret", `{"model":"ask","stream":true,"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if r.StatusCode != http.StatusOK || r.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("got %d %s", r.StatusCode, r.body)
+	}
+	if !strings.HasPrefix(r.body, "event: message_start\ndata: {") || !strings.HasSuffix(r.body, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n") || strings.Contains(r.body, "[DONE]") {
+		t.Errorf("got %s", r.body)
+	}
+}
+
+// A stream that breaks ends with a Messages error event, the API's own.
+func TestMessages_EndsABrokenStreamWithAnErrorEvent(t *testing.T) {
+	gw, claude := claudeGateway(t, "{}")
+	claude.SetStreamError(`{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+	r := messagesRequest(t, gw, "/anthropic/v1/messages", "secret", `{"model":"ask","stream":true,"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if !strings.HasSuffix(r.body, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n") {
+		t.Errorf("got %s", r.body)
+	}
+}
+
+// The gateway's own errors reach a Messages client in Anthropic's shape.
+func TestMessages_ErrorsAreInAnthropicsShape(t *testing.T) {
+	gw, _ := claudeGateway(t, "{}")
+	cases := []struct {
+		name, key, body string
+		status          int
+		errType         string
+	}{
+		{"wrong key", "wrong", `{"model":"ask"}`, http.StatusUnauthorized, "authentication_error"},
+		{"unknown facade", "secret", `{"model":"nope"}`, http.StatusNotFound, "not_found_error"},
+		{"facade narrowed away", "secret", `{"model":"chatOnly"}`, http.StatusNotFound, "not_found_error"},
+		{"malformed body", "secret", `[1]`, http.StatusBadRequest, "invalid_request_error"},
+	}
+	for _, c := range cases {
+		r := messagesRequest(t, gw, "/anthropic/v1/messages", c.key, c.body, nil)
+		if r.StatusCode != c.status || gjson.Get(r.body, "type").String() != "error" || gjson.Get(r.body, "error.type").String() != c.errType {
+			t.Errorf("%s: got %d %s", c.name, r.StatusCode, r.body)
+		}
+	}
+}
+
+// A wrong path or method gets Anthropic's error shape with no key, as its API
+// does, and the family's routes still work beside those answers.
+func TestMessages_WrongPathsAndMethodsAreInAnthropicsShape(t *testing.T) {
+	cases := []struct {
+		config, method, path string
+		status               int
+		errType, allow       string
+	}{
+		{"{}", http.MethodGet, "/anthropic/v1/nothing", http.StatusNotFound, "not_found_error", ""},
+		{"{}", http.MethodPost, "/anthropic/v1/chat/completions", http.StatusNotFound, "not_found_error", ""},
+		{"{}", http.MethodPost, "/anthropic/messages", http.StatusNotFound, "not_found_error", ""},
+		{"{}", http.MethodGet, "/anthropic", http.StatusNotFound, "not_found_error", ""},
+		{"{}", http.MethodGet, "/anthropic/v1/messages", http.StatusMethodNotAllowed, "invalid_request_error", "POST"},
+		{"{}", http.MethodPost, "/anthropic/v1/models", http.StatusMethodNotAllowed, "invalid_request_error", "GET, HEAD"},
+		{"{}", http.MethodDelete, "/anthropic/v1/models/ask", http.StatusMethodNotAllowed, "invalid_request_error", "GET, HEAD"},
+		{"{default: anthropic}", http.MethodPost, "/v1/chat/completions", http.StatusNotFound, "not_found_error", ""},
+		{"{default: anthropic}", http.MethodGet, "/v1/messages", http.StatusMethodNotAllowed, "invalid_request_error", "POST"},
+	}
+	for _, c := range cases {
+		gw, _ := claudeGateway(t, c.config)
+		r := gw.do(t, c.method, c.path, "", "")
+		if r.StatusCode != c.status || gjson.Get(r.body, "type").String() != "error" || gjson.Get(r.body, "error.type").String() != c.errType || r.Header.Get("Allow") != c.allow {
+			t.Errorf("%s %s with %s: got %d, Allow '%s', %s", c.method, c.path, c.config, r.StatusCode, r.Header.Get("Allow"), r.body)
+		}
+	}
+	gw, _ := claudeGateway(t, "{default: anthropic}")
+	if r := gw.do(t, http.MethodGet, "/nothing", "", ""); r.StatusCode != http.StatusNotFound || gjson.Get(r.body, "type").Exists() {
+		t.Errorf("path outside /v1 at the root: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodGet, "/health", "", ""); r.StatusCode != http.StatusOK {
+		t.Errorf("health: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodGet, "/anthropic/v1/models", "secret", ""); r.StatusCode != http.StatusOK {
+		t.Errorf("listing: got %d %s", r.StatusCode, r.body)
+	}
+}
+
+// Anthropic's listing has its own shape: every facade the family serves, on one
+// page, with the facade's name for its ID and display name, and its
+// candidate's output cap as max_tokens.
+func TestMessages_ListsFacadesInAnthropicsShape(t *testing.T) {
+	gw, _ := claudeGateway(t, "{}")
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/anthropic/v1/models", nil)
+	req.Header.Set("x-api-key", "secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	list := gjson.ParseBytes(data)
+	if list.Get("has_more").Bool() || list.Get("first_id").String() != "ask" || list.Get("last_id").String() != "ask" || list.Get("data.#").Int() != 1 {
+		t.Fatalf("got %s", data)
+	}
+	one := list.Get("data.0")
+	if one.Get("type").String() != "model" || one.Get("display_name").String() != "ask" || !one.Get("created_at").Exists() || one.Get("max_tokens").Int() != testkit.OutputCap || one.Get("current").Exists() {
+		t.Errorf("got %s", one.Raw)
+	}
+}
+
+// With anthropic as the default family, the root serves it instead of OpenAI's.
+func TestMessages_ServesTheRootAsTheDefaultFamily(t *testing.T) {
+	gw, _ := claudeGateway(t, "{default: anthropic}")
+	body := `{"model":"ask","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
+	if r := messagesRequest(t, gw, "/v1/messages", "secret", body, nil); r.StatusCode != http.StatusOK {
+		t.Errorf("root messages: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "secret", body); r.StatusCode != http.StatusNotFound {
+		t.Errorf("root chat: got %d", r.StatusCode)
+	}
+	if r := gw.do(t, http.MethodPost, "/openai/v1/chat/completions", "secret", body); r.StatusCode != http.StatusOK {
+		t.Errorf("based chat: got %d %s", r.StatusCode, r.body)
+	}
+}
+
+// A Messages client reaches a Chat Completions backend through the translator:
+// params for that candidate patch the chat body, in their Chat Completions
+// spelling, and the reply comes back as a message, whole or streamed.
+func TestMessages_ReachesAChatCompletionsBackend(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  ask:
+    backend: swap
+    params: {openAiChat: {chat_template_kwargs: {enable_thinking: false}}, anthropicMessages: {ignored: true}}
+    candidates: [{model: "qwen3.6-35b-a3b:q8_0"}]
+`, nil)
+	body := `{"model":"ask","max_tokens":5,"system":"s","messages":[{"role":"user","content":"hi"}]}`
+	r := messagesRequest(t, gw, "/anthropic/v1/messages", "", body, nil)
+	if r.StatusCode != http.StatusOK || gjson.Get(r.body, "type").String() != "message" || r.target() != "qwen3.6-35b-a3b:q8_0" {
+		t.Fatalf("whole: got %d %s", r.StatusCode, r.body)
+	}
+	req, ok := swap.Last("POST /v1/chat/completions")
+	if want := `{"model":"qwen3.6-35b-a3b:q8_0","max_tokens":5,"messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":false}}`; !ok || req.Body != want {
+		t.Errorf("sent %+v, want %s", req, want)
+	}
+	swap.SetReply(testkit.Reply{Stream: []string{`{"id":"c","model":"m","choices":[{"delta":{"content":"hi"}}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`}})
+	r = messagesRequest(t, gw, "/anthropic/v1/messages", "", `{"model":"ask","stream":true,"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if r.StatusCode != http.StatusOK || !strings.HasPrefix(r.body, "event: message_start\n") || !strings.Contains(r.body, "event: message_stop\n") || strings.Contains(r.body, "[DONE]") {
+		t.Errorf("stream: got %d %s", r.StatusCode, r.body)
+	}
+}
+
+// A translation names the client's fields it left out, in a header and in the
+// log. A route with no translation leaves nothing out, so it has no header, and
+// a field converted to a counterpart isn't reported.
+func TestRequests_ReportWhatATranslationDropped(t *testing.T) {
+	claude := testkit.NewAnthropic(t, "claude-a")
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+logging: {logSelection: true}
+backends:
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  onClaude: {backend: claude, candidates: [{model: claude-a}]}
+  onSwap: {backend: swap, candidates: [{model: "qwen3.6-35b-a3b:q8_0"}]}
+`, nil)
+	const header = "X-Gateway-Dropped"
+	r := messagesRequest(t, gw, "/anthropic/v1/messages", "", `{"model":"onSwap","max_tokens":5,"thinking":{"type":"adaptive"},"output_config":{"effort":"low","task_budget":1},"metadata":{"user_id":"u","other":1},"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if got := r.Header.Get(header); r.StatusCode != http.StatusOK || got != "thinking, output_config.task_budget, metadata.other, cache_control" {
+		t.Errorf("Messages to Chat Completions: got %d, %q", r.StatusCode, got)
+	}
+	gw.logs.waitFor(t, "dropped=")
+	r = gw.chat(t, `{"model":"onClaude","max_tokens":5,"seed":1,"presence_penalty":0.5,"stop":["x"],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning_content":"r"},{"role":"user","content":"more"}]}`)
+	if got := r.Header.Get(header); r.StatusCode != http.StatusOK || got != "reasoning_content, seed, presence_penalty" {
+		t.Errorf("Chat Completions to Messages: got %d, %q: %s", r.StatusCode, got, r.body)
+	}
+	r = gw.chat(t, `{"model":"onSwap","seed":1,"messages":[]}`)
+	if got := r.Header.Get(header); r.StatusCode != http.StatusOK || got != "" {
+		t.Errorf("no translation: got %d, %q", r.StatusCode, got)
+	}
+	r = messagesRequest(t, gw, "/anthropic/v1/messages", "", `{"model":"onClaude","max_tokens":5,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if got := r.Header.Get(header); r.StatusCode != http.StatusOK || got != "" {
+		t.Errorf("Messages to Claude: got %d, %q", r.StatusCode, got)
 	}
 }
 
@@ -285,26 +557,34 @@ func limitBody(t *testing.T, n int64) {
 	t.Cleanup(func() { maxBodyBytes = old })
 }
 
-// api.openAi.protocols turns protocols off gateway-wide: a protocol left out
-// has no route, and the others are served as before.
+// api.<family>.protocols turns protocols off gateway-wide: a protocol left
+// out has no route, a facade is listed by a family only for a protocol still
+// served, and a family with none is not served at all.
 func TestAPI_ServesOnlyTheProtocolsTurnedOn(t *testing.T) {
-	openAI := testkit.NewOpenAI(t, "gpt-a")
+	claude := testkit.NewAnthropic(t, "claude-a")
 	gw := startGateway(t, `
 server: {listen: "127.0.0.1:0"}
-api: {openAi: {protocols: [openAiChat]}}
+api: {openAi: {protocols: [openAiChat]}, anthropic: {protocols: []}}
 backends:
-  openAi: {type: openAi, baseUrl: "`+openAI.URL+`", apiKey: k}
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
 models:
-  ask: {backend: openAi, protocols: [openAiChat, openAiCompletions], candidates: [{model: gpt-a}]}
+  ask: {backend: claude, candidates: [{model: claude-a}]}
+  chatOrClaude: {backend: claude, protocols: [anthropicMessages, openAiChat], candidates: [{model: claude-a}]}
 `, nil)
-	if r := gw.do(t, http.MethodPost, "/v1/completions", "", `{"model":"ask","prompt":"hi"}`); r.StatusCode != http.StatusNotFound {
-		t.Errorf("completions: got %d %s", r.StatusCode, r.body)
+	body := `{"model":"ask","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
+	for _, path := range []string{"/v1/completions", "/openai/v1/completions", "/anthropic/v1/messages"} {
+		if r := gw.do(t, http.MethodPost, path, "", body); r.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: got %d %s", path, r.StatusCode, r.body)
+		}
 	}
-	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"ask","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != http.StatusOK {
+	if r := gw.do(t, http.MethodGet, "/anthropic/v1/models", "", ""); r.StatusCode != http.StatusNotFound {
+		t.Errorf("Anthropic listing: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", body); r.StatusCode != http.StatusOK {
 		t.Errorf("chat: got %d %s", r.StatusCode, r.body)
 	}
-	if got := gjson.Get(gw.get(t, "/v1/models").body, "data.#.id").Raw; got != `["ask"]` {
-		t.Errorf("listing: %s", got)
+	if got := gjson.Get(gw.get(t, "/v1/models").body, "data.#.id").Raw; got != `["ask","chatOrClaude"]` {
+		t.Errorf("OpenAI listing: %s", got)
 	}
 }
 
@@ -313,7 +593,7 @@ models:
 func TestAPI_RefusesProtocolsItCantServe(t *testing.T) {
 	cases := map[string]string{
 		"{openAi: {protocols: [anthropicMessages]}}": "api.openAi.protocols: 'anthropicMessages' is not one of the family's protocols",
-		"{openAi: {protocols: [openAiCompletions]}}": "models.chatOnly: line 8: it serves only openAiChat, which api.openAi.protocols turns off",
+		"{openAi: {protocols: [openAiCompletions]}}": "models.chatOnly: line 8: it serves only openAiChat, which api.<family>.protocols turns off",
 	}
 	for api, want := range cases {
 		cfg := parseConfig(t, `

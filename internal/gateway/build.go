@@ -1,5 +1,5 @@
 // Package gateway wires config into backends and virtual models, and serves
-// the OpenAI API front end.
+// the front end for every client API.
 package gateway
 
 import (
@@ -38,7 +38,7 @@ type Gateway struct {
 	// see runPending.
 	pending []backend.ListingCheck
 	stop    context.CancelFunc
-	// served are the protocols the gateway serves, by api.openAi.protocols.
+	// served are the protocols the gateway serves, by api.<family>.protocols.
 	served map[backend.Protocol]bool
 }
 
@@ -133,31 +133,7 @@ func (g *Gateway) checkServed(h virtualmodel.Handler) error {
 			own = append(own, string(p))
 		}
 	}
-	return fmt.Errorf("it serves only %s, which api.openAi.protocols turns off; add one of them there, or a protocol the gateway serves to its protocols", strings.Join(own, ", "))
-}
-
-// servedProtocols returns the protocols the gateway serves: the OpenAI
-// family's that api.openAi.protocols names, or all of them when it is left
-// out.
-func servedProtocols(api config.API) (map[backend.Protocol]bool, error) {
-	var own []string
-	for _, d := range protocols.All {
-		if d.Family == config.FamilyOpenAI {
-			own = append(own, string(d.Protocol))
-		}
-	}
-	names := api.OpenAI.Protocols
-	if names == nil {
-		names = own
-	}
-	served := map[backend.Protocol]bool{}
-	for _, name := range names {
-		if !slices.Contains(own, name) {
-			return nil, fmt.Errorf("api.openAi.protocols: '%s' is not one of the family's protocols; use %s", name, strings.Join(own, ", "))
-		}
-		served[backend.Protocol(name)] = true
-	}
-	return served, nil
+	return fmt.Errorf("it serves only %s, which api.<family>.protocols turns off; add one of them there, or a protocol the gateway serves to its protocols", strings.Join(own, ", "))
 }
 
 // linker is a backend that refers to other backends. Link resolves those

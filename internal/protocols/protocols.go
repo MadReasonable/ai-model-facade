@@ -20,8 +20,8 @@ import (
 // Descriptor is what the gateway knows about one protocol.
 type Descriptor struct {
 	Protocol backend.Protocol
-	// Path is where the protocol is served, on the gateway, and on a backend
-	// that forwards it.
+	// Path is where the protocol is served, on the gateway under its family's
+	// base path, and on a backend that forwards it.
 	Path string
 	// Family is the API family whose key header, error shape and model list
 	// the protocol's clients use.
@@ -34,7 +34,7 @@ type Descriptor struct {
 	LastEvents []string
 	// ErrorEvent is a broken stream as the protocol's error event: a
 	// backend's own error event where it already is one, else the failure in
-	// the protocol's shape. A protocol the gateway only sends has none.
+	// the protocol's shape.
 	ErrorEvent func(err error) []byte
 }
 
@@ -43,7 +43,7 @@ type Descriptor struct {
 var All = []Descriptor{
 	{Protocol: backend.OpenAIChat, Path: "/v1/chat/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
 	{Protocol: backend.OpenAICompletions, Path: "/v1/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
-	{Protocol: backend.AnthropicMessages, Path: "/v1/messages", Family: config.FamilyAnthropic, Named: true, LastEvents: []string{"message_stop"}},
+	{Protocol: backend.AnthropicMessages, Path: "/v1/messages", Family: config.FamilyAnthropic, Named: true, LastEvents: []string{"message_stop"}, ErrorEvent: messagesErrorEvent},
 }
 
 // Of returns protocol p's descriptor. Every protocol a config can name has
@@ -108,5 +108,14 @@ func openAIErrorEvent(err error) []byte {
 		return event
 	}
 	event, _ := json.Marshal(map[string]any{"error": errorObject("gateway_error", "backend stream failed: "+err.Error())})
+	return event
+}
+
+// messagesErrorEvent is a broken stream as a Messages error event.
+func messagesErrorEvent(err error) []byte {
+	if data, ok := backendEvent(err, func(e gjson.Result) bool { return e.Get("error").Exists() }); ok {
+		return data
+	}
+	event, _ := json.Marshal(map[string]any{"type": "error", "error": errorObject("api_error", "backend stream failed: "+err.Error())})
 	return event
 }

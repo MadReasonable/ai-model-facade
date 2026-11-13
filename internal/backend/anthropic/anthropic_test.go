@@ -82,3 +82,29 @@ func TestAnthropic_ForwardsMessagesUnchanged(t *testing.T) {
 		t.Errorf("got %+v", res.Response)
 	}
 }
+
+// A thinking block the gateway made is removed before the API sees it, along
+// with a turn it leaves empty; a real signed block stays, and a body without
+// the marker is forwarded byte for byte.
+func TestAnthropic_RemovesOnlyUnsignedThinking(t *testing.T) {
+	f := testkit.NewAnthropic(t, "claude-a")
+	b := newBackend(t, f, "")
+	body := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"local","signature":"` + backend.UnsignedThinking + `"},{"type":"text","text":"b"}]},` +
+		`{"role":"user","content":"c"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"only","signature":"` + backend.UnsignedThinking + `"}]},` +
+		`{"role":"user","content":"d"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"real","signature":"signed"},{"type":"text","text":"e"}]},` +
+		`{"role":"user","content":"f"}]}`
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"b"}]},` +
+		`{"role":"user","content":"c"},{"role":"user","content":"d"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"real","signature":"signed"},{"type":"text","text":"e"}]},` +
+		`{"role":"user","content":"f"}]}`
+	if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
+		t.Errorf("sent %+v\nwant %s", req, want)
+	}
+}

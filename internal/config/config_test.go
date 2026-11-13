@@ -218,6 +218,31 @@ func TestParse_APIKeysNeedANameAndAKey(t *testing.T) {
 	}
 }
 
+// Each family has a base path of its own, and the root serves the OpenAI
+// family unless the config says otherwise.
+func TestParse_APIDefaultsAndChecksBasePaths(t *testing.T) {
+	cfg, err := Parse([]byte("server: {listen: x}\n"), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := cfg.API; a.Default != FamilyOpenAI || a.OpenAI.BasePath != "/openai" || a.Anthropic.BasePath != "/anthropic" {
+		t.Errorf("got %+v", a)
+	}
+	for api, want := range map[string]string{
+		"{default: gemini}":                                   "unknown family 'gemini'",
+		"{openAi: {basePath: openai}}":                        "is not a path",
+		"{openAi: {basePath: /}}":                             "is not a path",
+		"{openAi: {basePath: /openai/}}":                      "is not a path",
+		"{anthropic: {basePath: /v1/claude}}":                 "is under '/v1'",
+		"{anthropic: {basePath: /amf}}":                       "is under '/amf'",
+		"{openAi: {basePath: /x}, anthropic: {basePath: /x}}": "both have basePath '/x'",
+	} {
+		if _, err := Parse([]byte("server: {listen: x}\napi: "+api+"\n"), env(nil)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want %q", api, err, want)
+		}
+	}
+}
+
 func TestParse_ExampleConfig(t *testing.T) {
 	if _, err := Load("../../config.example.yaml"); err != nil {
 		t.Fatal(err)
