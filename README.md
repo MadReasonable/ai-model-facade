@@ -17,7 +17,7 @@ An Open WebUI backend gives a facade Open WebUI's tools, such as web search, mem
 *Requires a model server to point it at. Runs on Linux, macOS and Windows, or in Docker.*
 
 > [!NOTE]
-> **Early releases (0.x).** Config keys may still change from one 0.x release to the next; the release notes list each change.
+> **Early releases (0.x).** Config keys may still change from one 0.x release to the next; [CHANGELOG.md](CHANGELOG.md) lists each change and what a config has to change.
 
 ## What it's for
 
@@ -40,7 +40,7 @@ It relays chat and completions only, so embeddings, images and audio go straight
 
 The gateway is one executable that reads one YAML config file.
 Each release publishes it as a Docker image for amd64 and arm64, and on the [releases page](https://github.com/MadReasonable/ai-model-facade/releases) as an archive for Linux (amd64, arm64), macOS (amd64, arm64) and Windows (amd64).
-Each archive holds the binary, `LICENSE`, this README and `config.example.yaml`, a complete config to start from.
+Each archive holds the binary, `LICENSE`, this README, `CHANGELOG.md` and `config.example.yaml`, a complete config to start from.
 Every install below ends with the gateway running `serve` on a config; [Getting started](#getting-started) says what to put in it.
 
 ### Docker
@@ -982,3 +982,7 @@ Requests already in flight, including streams, finish on the config that accepte
 Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
 Run `check` first to see what a reload would load.
 Windows has no `SIGHUP`, so there a changed config needs a restart.
+
+## Upgrading
+
+[CHANGELOG.md](CHANGELOG.md) lists every release's changes, and, under **Changed** and **Removed**, what a config written for the release before it has to change.
