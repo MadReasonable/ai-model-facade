@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -21,6 +20,8 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/pipeline"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
 )
 
@@ -50,8 +51,9 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/models/{id...}", s.authenticated(s.getModel))
 	mux.HandleFunc("GET /amf/models", s.authenticated(s.listFacades))
 	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(s.getFacade))
-	mux.HandleFunc("POST /v1/chat/completions", s.authenticated(s.completions(backend.ChatCompletions)))
-	mux.HandleFunc("POST /v1/completions", s.authenticated(s.completions(backend.Completions)))
+	for _, p := range []backend.Protocol{backend.OpenAIChat, backend.OpenAICompletions} {
+		mux.HandleFunc("POST "+protocols.Of(p).Path, s.authenticated(s.completions(p)))
+	}
 	// Every request carries its arrival time, so its state reads reuse any
 	// state fetched since then (backend.WithRequestStart).
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -247,16 +249,16 @@ func (s *server) facadeObject(ctx context.Context, m Model) facadeObject {
 	return obj
 }
 
-// completions serves one completion endpoint. Chat and legacy completions
+// completions serves one completion protocol. Chat and legacy completions
 // share the body shape, selection, params and response framing; only the
-// endpoint the backend is called on differs.
-func (s *server) completions(endpoint backend.Endpoint) clientHandler {
+// path the backend is called on differs.
+func (s *server) completions(protocol backend.Protocol) clientHandler {
 	return func(w http.ResponseWriter, r *http.Request, client backend.Client) {
-		s.complete(w, r, client, endpoint)
+		s.complete(w, r, client, protocol)
 	}
 }
 
-func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend.Client, endpoint backend.Endpoint) {
+func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend.Client, protocol backend.Protocol) {
 	start := time.Now()
 	rc := http.NewResponseController(w)
 	rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
@@ -307,7 +309,7 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		return
 	}
 
-	res, err := handler.Chat(r.Context(), endpoint, body, client)
+	res, err := handler.Chat(r.Context(), protocol, body, client)
 	if res.Target != "" {
 		w.Header().Set(s.gateway.Config.Server.TargetHeader, res.Target)
 	}
@@ -315,14 +317,14 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	var streamErr error
 	switch {
 	case err != nil:
-		var verr *virtualmodel.Error
+		var verr *pipeline.Error
 		if !errors.As(err, &verr) {
-			verr = &virtualmodel.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
+			verr = &pipeline.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
 		}
 		status = verr.Status
 		writeError(w, verr.Status, verr.Type, verr.Message)
 	case res.Chat.Stream != nil:
-		streamErr = s.stream(w, r, res.Chat.Stream)
+		streamErr = s.stream(w, r, res.Chat.Stream, protocol)
 	default:
 		status = res.Chat.Response.Status
 		if res.Chat.Response.ContentType != "" {
@@ -336,8 +338,8 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	}
 
 	attrs := []any{"model", name, "checked", res.Checked, "winner", res.Target, "reason", res.Reason, "status", status, "duration", time.Since(start).Round(time.Millisecond)}
-	if endpoint != backend.ChatCompletions {
-		attrs = append(attrs, "endpoint", endpoint)
+	if protocol != backend.OpenAIChat {
+		attrs = append(attrs, "endpoint", protocols.Of(protocol).Path)
 	}
 	if res.Backend != "" {
 		attrs = append(attrs, "backend", res.Backend)
@@ -358,10 +360,11 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	}
 }
 
-// stream relays a backend stream as SSE. Once the 200 is sent the status
-// can't change, so a backend failure ends the stream with an error event and
-// no [DONE].
-func (s *server) stream(w http.ResponseWriter, r *http.Request, stream backend.ChatStream) error {
+// stream relays a backend stream as SSE in the protocol's framing. Once the
+// 200 is sent the status can't change, so a backend failure ends the stream
+// with the protocol's error event, and a stream framed with [DONE] gets none.
+func (s *server) stream(w http.ResponseWriter, r *http.Request, stream backend.ChatStream, protocol backend.Protocol) error {
+	d := protocols.Of(protocol)
 	defer stream.Close()
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -370,44 +373,39 @@ func (s *server) stream(w http.ResponseWriter, r *http.Request, stream backend.C
 	for {
 		data, err := stream.Next()
 		if err == io.EOF {
-			io.WriteString(w, "data: [DONE]\n\n")
-			flush(flusher)
+			if !d.Named {
+				io.WriteString(w, "data: [DONE]\n\n")
+				flush(flusher)
+			}
 			return nil
 		}
 		if err != nil {
 			if r.Context().Err() != nil {
 				return fmt.Errorf("client went away: %w", err)
 			}
-			fmt.Fprintf(w, "data: %s\n\n", streamErrorEvent(err))
+			writeEvent(w, d, d.ErrorEvent(err))
 			flush(flusher)
 			return err
 		}
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		writeEvent(w, d, data)
 		flush(flusher)
 	}
+}
+
+// writeEvent frames one event: with an event line repeating its type, for a
+// protocol whose clients dispatch on it, else as a data line alone.
+func writeEvent(w io.Writer, d protocols.Descriptor, data []byte) {
+	if d.Named {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", gjson.GetBytes(data, "type").String(), data)
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
 func flush(f http.Flusher) {
 	if f != nil {
 		f.Flush()
 	}
-}
-
-// streamErrorEvent renders a mid-stream failure as one SSE data payload. A
-// backend `event: error` whose payload is already an OpenAI-style error object
-// is relayed as-is; anything else is wrapped.
-func streamErrorEvent(err error) []byte {
-	var backendErr *backend.StreamError
-	if !errors.As(err, &backendErr) {
-		event, _ := json.Marshal(errorBody("gateway_error", "backend stream failed: "+err.Error()))
-		return event
-	}
-	data := backendErr.Data
-	if gjson.ValidBytes(data) && gjson.GetBytes(data, "error").Exists() && !bytes.ContainsAny(data, "\r\n") {
-		return data
-	}
-	event, _ := json.Marshal(errorBody("backend_error", string(data)))
-	return event
 }
 
 // instanceID identifies this gateway process in backend.RouteField, where

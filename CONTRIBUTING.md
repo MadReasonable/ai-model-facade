@@ -53,6 +53,9 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | `internal/backend/openaihttp` | The shared HTTP client and state cache: auth, timeouts, caching, single-flight fetches, pending counts. Adapters build on these and don't test them again. |
 | `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and its links. |
 | `internal/selector` | The selection order and how patterns and aliases match. |
+| `internal/protocols` | Each protocol's descriptor: how its stream is framed and ended, and its stream error event. |
+| `internal/pipeline` | The run after selection, the same for every facade type: route, translation, params, model and the backend call. |
+| `internal/translate` | Each pair's translators, request and reply, streamed and not, and each protocol's module. |
 | `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |
 

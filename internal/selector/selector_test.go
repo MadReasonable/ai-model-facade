@@ -30,6 +30,10 @@ func (f *fakeBackend) Chat(ctx context.Context, req backend.ChatRequest) (backen
 	return backend.ChatResult{}, nil
 }
 
+func (f *fakeBackend) Protocols() []backend.Protocol {
+	return nil
+}
+
 func (f *fakeBackend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	f.calls++
 	var models []backend.ModelInfo

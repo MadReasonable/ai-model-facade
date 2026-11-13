@@ -678,13 +678,16 @@ func (l *link) states(ctx context.Context, log *slog.Logger) map[string]modelSta
 	return states
 }
 
-// Chat runs Open WebUI's chat flow for a chat completion. Open WebUI has no
-// legacy completions endpoint. The chat is cleaned up in the background once
-// the result is known, so the response doesn't wait on that call.
+// Protocols returns what Chat accepts: Open WebUI has no legacy completions
+// endpoint.
+func (b *Backend) Protocols() []backend.Protocol {
+	return []backend.Protocol{backend.OpenAIChat}
+}
+
+// Chat runs Open WebUI's chat flow for a chat completion. The chat is cleaned
+// up in the background once the result is known, so the response doesn't wait
+// on that call.
 func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	if req.Endpoint != backend.ChatCompletions {
-		return backend.ChatResult{}, fmt.Errorf("Open WebUI serves only %s, not %s", backend.ChatCompletions, req.Endpoint)
-	}
 	r := &run{
 		b:         b,
 		client:    req.Client,

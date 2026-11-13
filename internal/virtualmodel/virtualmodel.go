@@ -12,17 +12,6 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
-// Error is a request failure with the HTTP status and OpenAI error type to report.
-type Error struct {
-	Status  int
-	Type    string
-	Message string
-}
-
-func (e *Error) Error() string {
-	return e.Message
-}
-
 // Result describes a handled request. Target, Checked and Reason are filled
 // as far as the request got, including when Chat returns an error.
 type Result struct {
@@ -69,7 +58,7 @@ type Handler interface {
 	// Inspect is Current with the state of every candidate. A non-nil error
 	// means Current is nil; Candidates are still filled.
 	Inspect(ctx context.Context) (Inspection, error)
-	Chat(ctx context.Context, endpoint backend.Endpoint, body []byte, client backend.Client) (Result, error)
+	Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error)
 	// Describe prints the entry's resolved configuration for the check command.
 	Describe(w io.Writer)
 }

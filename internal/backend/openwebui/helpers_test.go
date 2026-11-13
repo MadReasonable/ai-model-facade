@@ -81,7 +81,7 @@ const chatBody = `{"model":"qwen3:1.7b","messages":[{"role":"system","content":"
 func chat(t *testing.T, b *Backend, body string, stream bool) (backend.ChatResult, error) {
 	t.Helper()
 	return b.Chat(context.Background(), backend.ChatRequest{
-		Endpoint: backend.ChatCompletions,
+		Protocol: backend.OpenAIChat,
 		Body:     []byte(body),
 		Stream:   stream,
 		Client:   backend.Client{Route: []string{"gw1", "gw2"}},

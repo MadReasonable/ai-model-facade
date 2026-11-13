@@ -45,7 +45,7 @@ func TestOllama_ShowsItsChatsLoadAsStarting(t *testing.T) {
 	load := f.HoldLoads()
 	done := make(chan error)
 	go func() {
-		_, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"a:1"}`)})
+		_, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"a:1"}`)})
 		done <- err
 	}()
 	f.WaitFor(t, "POST /v1/chat/completions", 1)

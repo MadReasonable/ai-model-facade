@@ -222,18 +222,20 @@ func LoadedModels(ctx context.Context, p ModelStateProvider) ([]ModelInfo, error
 	return slices.Clone(r.models), r.err
 }
 
-// Endpoint is the OpenAI API endpoint a request was made to.
-type Endpoint string
+// Protocol is the request, response and stream format of one API. Its value
+// is the name a config uses for it.
+type Protocol string
 
 const (
-	ChatCompletions Endpoint = "/v1/chat/completions"
-	Completions     Endpoint = "/v1/completions" // legacy text completions
+	OpenAIChat        Protocol = "openAiChat"
+	OpenAICompletions Protocol = "openAiCompletions" // legacy text completions
+	AnthropicMessages Protocol = "anthropicMessages"
 )
 
-// ChatRequest is a completion request for either endpoint; both share the
+// ChatRequest is a completion request in either protocol; both share the
 // same body shape (`model`, `stream`) and response framing.
 type ChatRequest struct {
-	Endpoint Endpoint
+	Protocol Protocol
 	Body     []byte // raw JSON, params applied and model rewritten
 	Stream   bool
 	Client   Client
@@ -279,6 +281,9 @@ type ChatResult struct {
 type Backend interface {
 	ListModels(ctx context.Context) ([]ModelInfo, error)
 	Chat(ctx context.Context, req ChatRequest) (ChatResult, error)
+	// Protocols returns the protocols Chat accepts. The gateway sends no
+	// others, so Chat doesn't check.
+	Protocols() []Protocol
 }
 
 // ModelStateProvider is an optional backend capability.

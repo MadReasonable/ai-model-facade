@@ -23,6 +23,7 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 )
 
 // maxResponseBytes caps how much of a backend response body is read into
@@ -176,16 +177,22 @@ func (b *Backend) Pending(model string) (release func()) {
 	return b.State.Pending(model)
 }
 
-// Chat posts the request to its OpenAI endpoint path on the backend.
+// Protocols returns what Chat forwards. An adapter that shadows Chat shadows
+// this too, since what it accepts is no longer what the backend serves.
+func (c *Client) Protocols() []backend.Protocol {
+	return []backend.Protocol{backend.OpenAIChat, backend.OpenAICompletions}
+}
+
+// Chat posts the request to its protocol's path on the backend.
 func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	resp, err := c.Send(ctx, req, string(req.Endpoint), nil)
+	resp, err := c.Send(ctx, req, protocols.Of(req.Protocol).Path, nil)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
 	contentType := resp.Header.Get("Content-Type")
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	if req.Stream && resp.StatusCode/100 == 2 && mediaType == "text/event-stream" {
-		return backend.ChatResult{Stream: backend.NewSSEStream(resp.Body)}, nil
+		return backend.ChatResult{Stream: protocols.Stream(req.Protocol, resp.Body)}, nil
 	}
 	body, err := ReadBody(resp)
 	if err != nil {

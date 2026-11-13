@@ -43,6 +43,35 @@ func TestRequests_ForwardLegacyCompletionsToTheirEndpoint(t *testing.T) {
 	}
 }
 
+// A Chat Completions client reaches a Claude candidate through the direct
+// translator, and the params for it are in Messages spelling, patching the
+// translated body: thinking stays as written, and a Chat Completions-only key
+// in params would reach the API raw, so it is warned about at load.
+func TestRequests_TranslateForABackendOnAnotherProtocol(t *testing.T) {
+	claude := testkit.NewAnthropic(t, "claude-a")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
+models:
+  ask:
+    backend: claude
+    params: {thinking: {type: adaptive}, stop: [x]}
+    candidates: [{model: claude-a}]
+`, nil)
+	r := gw.chat(t, `{"model":"ask","max_tokens":5,"messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}]}`)
+	if r.StatusCode == http.StatusOK || !strings.Contains(r.body, "stop") {
+		t.Errorf("a Chat Completions key in Messages params: got %d %s", r.StatusCode, r.body)
+	}
+	if !strings.Contains(gw.logs.String(), "params set a Chat Completions key on a candidate that receives Messages") {
+		t.Errorf("no warning at load: %s", gw.logs.String())
+	}
+	req, ok := claude.Last("POST /v1/messages")
+	if want := `{"model":"claude-a","max_tokens":5,"system":[{"type":"text","text":"s"}],"messages":[{"role":"user","content":[{"type":"text","text":"u"}]}],"thinking":{"type":"adaptive"},"stop":["x"]}`; !ok || req.Body != want {
+		t.Errorf("sent %+v, want %s", req, want)
+	}
+}
+
 // A body that isn't a JSON object, or that repeats a key, gets 400: the
 // gateway patches the first occurrence of a key while backends read the
 // last, so a duplicate could slip values past the params.

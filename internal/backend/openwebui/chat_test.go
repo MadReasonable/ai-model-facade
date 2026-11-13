@@ -217,7 +217,7 @@ func TestChat_ClientLeavingARequestStopsTheTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan error, 1)
 	go func() {
-		_, err := b.Chat(ctx, backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(chatBody)})
+		_, err := b.Chat(ctx, backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(chatBody)})
 		returned <- err
 	}()
 	f.WaitFor(t, "GET /api/v1/chats/chat-1", 1) // a poll is waiting
@@ -275,15 +275,6 @@ func TestChat_LogsAStartWithoutABackgroundTask(t *testing.T) {
 	}
 }
 
-// Open WebUI has no legacy completions, so nothing is sent.
-func TestChat_RefusesLegacyCompletions(t *testing.T) {
-	f := testkit.NewOpenWebUI(t)
-	_, err := newBackend(t, f, "").Chat(context.Background(), backend.ChatRequest{Endpoint: backend.Completions, Body: []byte(`{"model":"m","prompt":"x"}`)})
-	if err == nil || !strings.Contains(err.Error(), "only /v1/chat/completions") || len(f.Requests()) != 0 {
-		t.Errorf("got %v after %v", err, f.Keys())
-	}
-}
-
 // The chat is deleted, archived or kept after each request, as configured.
 func TestChat_CleansUpAsConfigured(t *testing.T) {
 	cases := []struct{ setting, last string }{
@@ -311,7 +302,7 @@ func TestChat_PassthroughAuthActsAsTheClient(t *testing.T) {
 	f := testkit.NewOpenWebUI(t, testkit.OllamaEntry("m", true))
 	b := newBackend(t, f, ", passthroughAuth: true")
 	b.LoadedModels(context.Background())
-	if _, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(chatBody), Client: backend.Client{Authorization: "Bearer user"}}); err != nil {
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(chatBody), Client: backend.Client{Authorization: "Bearer user"}}); err != nil {
 		t.Fatal(err)
 	}
 	deleted(t, f)

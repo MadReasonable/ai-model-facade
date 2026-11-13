@@ -93,7 +93,7 @@ func TestLlamaServer_CountsItsChatsAsPending(t *testing.T) {
 	load := f.HoldLoads()
 	done := make(chan error)
 	go func() {
-		_, err := b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"a"}`)})
+		_, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"a"}`)})
 		done <- err
 	}()
 	f.WaitFor(t, "POST /v1/chat/completions", 1)

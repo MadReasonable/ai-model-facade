@@ -10,17 +10,20 @@ Read it too before changing a part whose reasons this file doesn't give.
 ## Bird's-eye view
 
 The gateway is an OpenAI-compatible HTTP server whose model names are facades: entries in its config, each with an ordered list of candidate models on one or more backends.
-A request for a facade passes through five stages, each in its own package:
+A facade decides which candidate answers; everything after that choice is the same for every facade, and runs in one pipeline:
 
 ```
-client -> front end -> facade -> selector -> params -> backend adapter -> backend
-          gateway    virtualmodel selector  mergepatch  backend/...
+client -> front end -> facade -> selector -> pipeline -> backend adapter -> backend
+          gateway    virtualmodel selector  pipeline    backend/...
+                                            translate, mergepatch
 ```
 
-The front end parses nothing but what it must, the facade decides the policy, the selector picks one model from the backends' current state, the params are patched into the request as byte edits, and the adapter forwards it and hands back a response or a stream.
+The front end parses nothing but what it must, the facade decides the policy, and the selector picks one model from the backends' current state.
+The pipeline then finds the route to that model's backend, translates the request when the backend serves another protocol, patches in the params as byte edits, calls the adapter, and translates the reply back.
+The adapter forwards the request and hands back a response or a stream.
 
 Two rules shape every package.
-Request bodies stay raw bytes from end to end: values are read with gjson and edited with sjson, never decoded into Go types, so whatever the gateway doesn't patch reaches the backend unchanged.
+Request bodies stay raw bytes from end to end on a request the backend serves as it came: values are read with gjson and edited with sjson, never decoded into Go types, so whatever the gateway doesn't patch reaches the backend unchanged; only a translated request is rebuilt.
 And a facade never causes a model load its candidate list didn't ask for, which is why selection reads backend state before it chooses.
 
 ## Code map
@@ -37,20 +40,40 @@ Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME
 `DecodeStrict` rejects unknown keys, which yaml.v3 doesn't do for node trees.
 Backend and facade entries stay as nodes, because each type decodes its own schema.
 
+### `internal/protocols`
+
+What the gateway knows about each protocol it serves and forwards, as a `Descriptor`: its endpoint path, how its stream is framed and ended, and its stream error event.
+Code that needs one of these reads the descriptor (`protocols.Of`) instead of switching on the protocol, so a new protocol is a new descriptor.
+`protocols.Stream` reads a backend's stream by its protocol's framing, so no adapter special-cases a stream's end.
+
 ### `internal/gateway`
 
 Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds.
-`server.go` is the front end: the OpenAI endpoints, auth, the routing-loop check, the selection log line, and SSE relay. It does framing only; anything about choosing or rewriting belongs to the facade.
+`server.go` is the front end: the OpenAI endpoints, at their descriptors' paths, auth, the routing-loop check, the selection log line, and SSE relay.
+It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.
 
 ### `internal/virtualmodel`
 
 Facade types, each with its own schema, validator and `Handler`.
-`candidates`, the only type and the default, compiles the facade's and each candidate's params, checks candidate IDs against their backends, and on each request runs the selector, applies params and calls the winner's backend.
-`Handler.Current` predicts the selection without making a request, for `current` in `/v1/models` with `api.openAi.addCurrent` on.
-`Handler.Inspect` adds the state of every candidate, for `/amf/models`.
+`candidates`, the only type and the default, compiles the facade's and each candidate's params, checks candidate IDs against their backends, and on each request runs the selector and hands the winner to the pipeline as a `pipeline.Selected`.
+`Handler.Current` predicts the selection without making a request, for `current` in `/v1/models` with `api.openAi.addCurrent` on; `Handler.Inspect` adds the state of every candidate, for `/amf/models`.
 A new behaviour is a new type here, so existing config entries never change meaning.
+
+### `internal/pipeline`
+
+Runs a request after selection, the same way for every facade type: the route to the backend (`translate.Route`), translation, params in the protocol the backend receives, the model rewritten to the candidate's ID, the backend call, and the reply translated back.
+`pipeline.Error` is the one error type a request fails with.
+
+### `internal/translate`
+
+Converts a request and its reply between protocols, for a request whose protocol the selected backend doesn't accept.
+`Route` picks the identity route when the backend accepts the protocol, otherwise a direct translator for the pair.
+The code is in two layers.
+Each protocol has a module: `chat.go` reads Chat Completions requests into small values and writes their replies through one writer used streamed and not (`chatWriter`), so every translator answering a Chat Completions client produces the same shapes, and `messages.go` builds a Messages request's blocks.
+The pair has a file, `chat_messages.go`, holding the translator from Chat Completions to Messages, built on the two modules, and `effort.go` maps effort levels to Claude's.
+It runs before params, which are written in the protocol the adapter receives.
 
 ### `internal/selector`
 
@@ -66,8 +89,8 @@ It walks the patch, not the body, so keys the config doesn't mention are never t
 ### `internal/backend`
 
 The contracts between the gateway and its adapters.
-`Backend` (`ListModels`, `Chat`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
-`ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream.
+`Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
+`ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages, which sends no `[DONE]`.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 
 ### `internal/backend/openaihttp`
@@ -80,7 +103,7 @@ Rules about backend state are implemented here once, not in each adapter.
 
 One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged.
-`anthropic` translates each request into a Claude API Messages request and each response, whole or streamed, back into a chat completion.
+`anthropic` forwards Messages to the Claude API, and fills a missing `max_tokens` from the model's output cap.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
 
@@ -95,4 +118,7 @@ Fake llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI an
 - A new rule about which model wins: the selector, or a new facade type if it isn't load-aware selection.
 - A new rule about how backend state is read or reused: `openaihttp.StateCache`.
 - A new endpoint or response header: `internal/gateway/server.go`.
+- A new protocol: a descriptor in `internal/protocols`, a module in `internal/translate`, and a translator for each pair it joins.
+- A field that crosses a translation differently: the pair's file, or the protocol's module if every pair from or to it shares the change.
+- A new step every request takes after selection: `internal/pipeline`.
 - A new kind of backend: a package under `internal/backend`, and a fake in `internal/testkit` for its tests.

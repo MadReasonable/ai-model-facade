@@ -444,12 +444,12 @@ Every `params` value is applied to the request body as a JSON Merge Patch ([RFC 
 The steps run in this order, with later ones overriding earlier ones:
 
 ```
-client body → facade params → winning candidate params → model set to the concrete ID
+client body → translation, if the backend takes another API → facade params → winning candidate params → model set to the concrete ID
 ```
 
 Gateway params override the client: they are patches, not defaults.
 The rest of the request passes through byte for byte, including messages, tools, `response_format` and vendor fields, in their original order.
-A request for the Claude API is the exception: its adapter translates the patched request to Messages; see [Chat Completions on the Claude API](#chat-completions-on-the-claude-api).
+A translated request is the exception: it is rebuilt in the backend's API, and params patch it in that API's spelling; see [Client APIs](#client-apis).
 
 Some params only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, which applies no chat template.
 
@@ -855,7 +855,8 @@ It takes no keys beyond the shared ones; `apiKey` is a Claude API key.
 A key that isn't scoped to one workspace needs Anthropic's `anthropic-workspace-id` header, which the gateway doesn't send, so use a workspace key.
 
 A Chat Completions client's request is translated; see [Chat Completions on the Claude API](#chat-completions-on-the-claude-api).
-Any key the translation doesn't cover passes on unchanged, so a facade's params can set Messages fields, such as `thinking: {display: summarized}` to see a summary of Claude's thinking, `cache_control` to turn on prompt caching, or `output_config`, whose keys win over a translated `reasoning_effort`.
+Params for a candidate on this backend patch the Messages body, after translation, so write them in Messages spelling: `thinking: {display: summarized}` to see a summary of Claude's thinking, `cache_control` to turn on prompt caching, or `output_config: {effort: low}`, whose keys win over a client's translated `reasoning_effort`.
+The gateway warns at load about `reasoning_effort`, `response_format` or `stop` in params for such a candidate, because the Claude API refuses them; use `output_config` and `stop_sequences`.
 
 Claude 5 models think by default, which counts towards `max_tokens`.
 The Claude API has no legacy `/v1/completions`; such a request fails with `502`.

@@ -41,24 +41,27 @@ A request goes to exactly one model and is never retried on another, because a r
 
 ## Architecture
 
-A request passes through five stages, each a separate package:
+A request passes through these stages, each a separate package:
 
 ```
-client -> front end -> facade -> selector -> params -> backend adapter -> backend
-          (gateway)  (virtualmodel) (selector) (mergepatch) (backend/...)
+client -> front end -> facade -> selector -> pipeline -> backend adapter -> backend
+          (gateway)  (virtualmodel) (selector) (pipeline)  (backend/...)
+                                              translate, mergepatch
 ```
 
-The front end (`internal/gateway`) speaks the OpenAI API and does HTTP and SSE framing only.
+The front end (`internal/gateway`) serves the OpenAI API at the paths in the protocols' descriptors (`internal/protocols`), and does HTTP and SSE framing only.
 A facade (`internal/virtualmodel`) owns its policy: which selector, which params, which backends.
 The selector (`internal/selector`) turns backend state into one chosen model.
-Params (`internal/mergepatch`) are applied to the body as byte edits.
+The pipeline (`internal/pipeline`) runs everything after the choice, the same for every facade type: the route to the backend, translation (`internal/translate`), params as byte edits (`internal/mergepatch`), the model rewritten, the backend call, and the reply translated back.
 An adapter (`internal/backend/...`) forwards the request and returns either a complete response or a stream of SSE payloads; the front end relays both.
+
+Decided: the pipeline is a package of its own, not part of the facade type, so a new facade type decides only which candidate answers and inherits translation and params unchanged.
 
 ### Interfaces
 
 Three interfaces separate the stages, and each one is where a kind of extension goes.
 
-- `backend.Backend` is the adapter: `ListModels` and `Chat`. A new kind of backend is a new package implementing it, usually on the shared `openaihttp` client and state cache, plus one case in `gateway.newBackend`.
+- `backend.Backend` is the adapter: `ListModels`, `Chat` and `Protocols`, the formats its `Chat` accepts, from which the pipeline finds the route to it. A new kind of backend is a new package implementing it, usually on the shared `openaihttp` client and state cache, plus one case in `gateway.newBackend`.
 - `backend.ModelStateProvider` is an optional capability: `LoadedModels` reports ready, starting and unknown models. It is optional because a backend that can't report state can still serve a facade whose selector doesn't need it.
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
@@ -76,8 +79,8 @@ A new behaviour is a new type, so existing entries never change meaning.
 Request and response bodies are never decoded into Go structs or maps.
 Decoding would reorder keys, could change number precision, and would drop or mangle fields the gateway doesn't model, such as tools, `response_format` and vendor extensions.
 The gateway reads the few values it needs (`model`, `stream`) with gjson, edits with sjson, and forwards the bytes, so the forwarded body equals the client's except for the keys the config patches.
-Two adapters are exceptions, because their backend speaks something other than an OpenAI response: the Open WebUI adapter synthesizes its response from a chat it ran, and the Anthropic adapter translates both ways to and from the Messages API.
-Each still carries over, unchanged, the request keys it has no translation for.
+There are two exceptions: the Open WebUI adapter synthesizes its response from a chat it ran, and a translator (`internal/translate`) rebuilds a request whose protocol the backend doesn't accept, and its reply.
+Both still carry over, unchanged, the request keys they have no translation for.
 
 ### Params as merge patches
 
@@ -85,7 +88,7 @@ Every `params` value is a JSON Merge Patch (RFC 7386): objects merge key by key,
 Merging is the point of the project: a patch that sets `chat_template_kwargs.enable_thinking` keeps the client's other kwargs, which is what llama-swap's top-level replacement can't do.
 `params` may also be a list of patches applied in order, because YAML's `<<:` merge is shallow and would replace nested objects when combining anchors.
 
-The order is fixed: client body, then the facade's params, then the winning candidate's params, then `model` rewritten to the chosen ID.
+The order is fixed: client body, then any translation to the protocol the backend receives, then the facade's params, then the winning candidate's params, then `model` rewritten to the chosen ID.
 Gateway params come after the client because they are the policy, not defaults.
 
 ### The walker
@@ -239,7 +242,7 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer`, `lmStudio`, `localAi`, `ollama` and `openAi` forward requests unchanged through `openaihttp.Client`; `anthropic` translates requests and responses to and from the Claude API's Messages API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+`llamaSwap`, `llamaServer`, `lmStudio`, `localAi`, `ollama` and `openAi` forward requests unchanged through `openaihttp.Client`; `anthropic` forwards Messages to the Claude API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
 Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
 
 ### llama-swap
@@ -370,38 +373,20 @@ The list holds embedding, image and audio models too, since `/v1/models` doesn't
 
 ### Anthropic
 
-The adapter reaches Anthropic's Claude API through its Messages API: it translates each Chat Completions request into a Messages request, and each response, whole or streamed, back into a chat completion.
+The adapter forwards Messages to Anthropic's Claude API; a client of another protocol reaches it through a translator (Translation).
 Everything here is from Anthropic's API documentation (read 2026-11-01) unless marked verified, which means checked against the API, by the testkit's live claims, run with `ANTHROPIC_API_KEY` set, or by hand.
 
-Decided: the Messages API with a translating adapter, not Anthropic's OpenAI-compatible endpoint.
+Decided: the Messages API, which other protocols reach through a translator, not Anthropic's OpenAI-compatible endpoint.
 The compatible endpoint takes the gateway's bodies unchanged, but with Anthropic's limits: responses carry no thinking, prompt caching isn't supported, and many fields are ignored; Anthropic calls it mainly for testing and comparison.
 Through Messages a facade gets what that endpoint can't give: thinking in the response, and prompt caching, thinking settings and effort set through its params.
-The cost is a second exception to bodies passing through as bytes, beside the Open WebUI adapter's response; the protocols work is expected to replace this translator with shared ones.
+The cost is a second exception to bodies passing through as bytes, beside the Open WebUI adapter's response, on translated routes only.
 Decided against: Anthropic's Go SDK. Its typed params would drop or hide the Messages fields that params pass on, and its own HTTP client would bypass `openaihttp`'s failure hook, timeouts and `Retry-After`, and retry by itself the failures the gateway must notice.
-
-A request is translated by `toMessages` (`request.go`), which keeps the client's top-level keys in their order and translates each in place:
-
-- `messages`: system and developer messages are gathered into `system`, wherever they stand, since not every model takes a system message mid-conversation. A tool message becomes a `tool_result` block of a user turn, and consecutive turns of one role merge, so the results of parallel tool calls share a turn, as the API asks. Images go by URL or base64 data URL, a PDF file part as a document block, and empty text is left out, since the API refuses it.
-- `max_completion_tokens`, else `max_tokens`, becomes `max_tokens`. Messages requires one and Chat Completions doesn't, so a request without it gets the model's `max_tokens` from the latest model list, its output cap (verified: a non-streamed request at the full cap is accepted).
-- `stop` becomes `stop_sequences`; function tools become tools with an `input_schema`; `tool_choice` maps `required` to `any` and a named function to `tool`; `parallel_tool_calls: false` becomes `disable_parallel_tool_use`; `reasoning_effort` becomes `output_config.effort`, and a `json_schema` `response_format` becomes `output_config.format`; `user` or `safety_identifier` becomes `metadata.user_id`.
-- Fields that only tune sampling or configure OpenAI's own services, such as `seed`, the penalties, `logit_bias`, `store`, `service_tier` and OpenAI's `metadata`, are dropped, since the API refuses any field it doesn't know (verified: "seed: Extra inputs are not permitted").
-- Any other key passes on unchanged, so a facade's params can set Messages fields such as `thinking`, `cache_control` or `top_k`; where a native `output_config` meets a translated one, its own keys win.
-- A request that asks for what Messages can't give is refused with 400 before anything is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, a tool that isn't a function, or a role or content part Messages has no counterpart for. Refused rather than dropped, because the client would otherwise go without what it asked for and not know.
-
-A response becomes a chat completion (`response.go`): text blocks joined as `content`, thinking as `reasoning_content`, as llama-server reports reasoning, and `tool_use` blocks as tool calls, each input as its arguments string; other blocks, such as server tool results, are left out.
-`stop_reason` maps to `finish_reason`: `max_tokens` to `length`, `tool_use` to `tool_calls`, `refusal` to `content_filter`, anything else to `stop`.
-OpenAI's `prompt_tokens` includes the cache reads and writes that Messages counts apart from `input_tokens`, with the reads again as `cached_tokens`.
-A stream becomes chunks the same way (`stream.go`), one event at a time: tool calls numbered in the order they arrive, a usage chunk last when the client set `stream_options.include_usage`, from `message_delta`'s usage, which is cumulative and repeats the input counts (verified).
-It ends at `message_stop`, since Messages sends no `[DONE]`; an error event ends it with a stream error in OpenAI's shape, and a body that ends before `message_stop` is an unexpected end.
-An API error keeps its status and `Retry-After`, with its message and type in OpenAI's error shape.
-
-Limit: Chat Completions has no place for a thinking block's signature, without which the API won't take thinking back, so an assistant turn's `reasoning_content` isn't sent back. The API accepts a tool loop without it (verified, with thinking on), and the model continues without its earlier reasoning.
 
 Both endpoints need an `anthropic-version` header, which the documentation lists as optional (verified: the API refuses either call without one, with 400 "anthropic-version: header is required"), and both take the key as a bearer token (verified).
 The adapter sends `2023-06-01`, through `Client.GetJSONWith` for the model list and `Client.Send` for chats: `2026-10-21` refuses `temperature`, `top_p` and `top_k` on every model, which Chat Completions clients send routinely.
 Models come from `GET /v1/models`, a page at a time, up to 1000 a page, following `last_id` while `has_more` is set; by default it lists active and deprecated models, not retired ones.
 As for OpenAI, every listed model is ready while the API answers, and the list is read again after a failed request or once older than `stateCacheSeconds` (`openaihttp.ListedState`); `Client.Send` reports a failed chat to it as `Client.Chat` does.
-The API has no legacy Completions, so the adapter refuses that endpoint in `Chat`, keyed on `ChatRequest.Endpoint`, as the Open WebUI adapter does.
+The adapter declares only `anthropicMessages`, so a legacy completion can't reach it, and params for it are always in Messages spelling.
 Limit: a key that isn't scoped to one workspace needs `anthropic-workspace-id` on every request, which the gateway doesn't send.
 
 ### Open WebUI
@@ -430,7 +415,7 @@ Streaming works by polling: the chat GET overlays the running task's output onto
 Verified: polling every ~130 ms saw the content grow in 30-60 character steps.
 Without Redis, Open WebUI keeps the in-progress snapshot in process memory, so polling still streams with a single Open WebUI process (source; not run).
 
-The response is synthesized from the finished message (`content`, `output` items, `usage`), an exception to responses passing through unchanged, as the Anthropic adapter's translated ones are.
+The response is synthesized from the finished message (`content`, `output` items, `usage`), an exception to responses passing through unchanged, as a translated one is.
 The request side is still edited as bytes, so unknown client fields reach Open WebUI.
 
 The client's `messages` are what the model sees.
@@ -441,7 +426,7 @@ Tools are `params`, not backend keys: `features` and `tool_ids` are request-body
 Tools attached to an Open WebUI workspace model are added by the browser, not the server, so `tool_ids` must be sent explicitly.
 Open WebUI calls Ollama-connection models through Ollama's native API, so thinking is turned off there with `params: {think: false}`; `reasoning_effort: none` and a top-level `think: false` are ignored (both verified).
 
-Open WebUI has no legacy `/v1/completions`, so the adapter refuses that endpoint in `Chat`, keyed on `ChatRequest.Endpoint`.
+Open WebUI has no legacy `/v1/completions`, so the adapter declares only `openAiChat`.
 An API key limited by `API_KEYS_ALLOWED_ENDPOINTS` needs `/api/v1/chats/new`, `/api/chat/completions`, `/api/tasks/chat/{id}` and its `/stop`, `GET` and `DELETE /api/v1/chats/{id}` (`POST .../archive` with `chats: archive`), and `/api/models`.
 With `passthroughAuth`, each caller acts as their own Open WebUI user; otherwise every caller acts as the `apiKey` account, whose permissions decide the tools.
 
@@ -500,11 +485,56 @@ Only the `openWebUi` adapter writes it back into the body, because a strict Open
 Open WebUI's OpenAI-connection path forwards unknown body fields (source), so the field reaches the next gateway.
 A loop is caught on its first repeat, with no hop limit to choose, and a chain of different facades passes.
 
+## Translation
+
+A request whose protocol the selected backend doesn't accept is translated to one it does, and the reply translated back, streamed or not (`internal/translate`).
+Translation is the one place request bodies are rebuilt rather than patched, so it keeps two rules: what crosses keeps its meaning, and what can't cross is either dropped or refused with 400 before anything is sent.
+A field is dropped when the request still means what the client asked without it, such as a sampling setting the target lacks, and refused when the client would otherwise go without what it asked for and not know, such as `n` above 1.
+
+### Routes and pairs
+
+Decided: a direct translator from Chat Completions to Messages, for the Claude API, held in the pair's file (`chat_messages.go`).
+`translate.Route` picks the identity route when the backend accepts the request's protocol, else the direct translator to the first protocol it accepts.
+Decided against, for now: an intermediate form that every protocol translates to and from, a hub.
+A direct pair carries what both of its protocols have, where a hub carries only what its form has, so the pair stays a valid route beside a hub when one is built.
+
+Each protocol has a module: `chat.go` reads Chat Completions requests into small values (messages and parts, tools, tool choice, format, effort) and writes their replies through one writer used streamed and not, `chatWriter`, and `messages.go` builds a Messages request's blocks.
+Decided: a writer per protocol, so every translator answering a client of that protocol writes the same shapes and events, and a fix to a reply's shape is made once.
+A translator runs before params, since params are written in the protocol the adapter receives.
+
+### Chat Completions and Messages
+
+A Chat Completions request is translated by `toMessages` (`chat_messages.go`), which keeps the client's top-level keys in their order and translates each in place:
+
+- `messages`: system and developer messages are gathered into `system`, wherever they stand, since not every model takes a system message mid-conversation. A tool message becomes a `tool_result` block of a user turn, and consecutive turns of one role merge, so the results of parallel tool calls share a turn, as the API asks. Images go by URL or base64 data URL, a PDF file part as a document block, and empty text is left out, since the API refuses it.
+- `max_completion_tokens`, else `max_tokens`, becomes `max_tokens`. Messages requires one and Chat Completions doesn't, so the adapter, after params, gives a request without it the model's `max_tokens` from the latest model list, its output cap (verified: a non-streamed request at the full cap is accepted).
+- `stop` becomes `stop_sequences`; function tools become tools with an `input_schema`; `tool_choice` maps `required` to `any` and a named function to `tool`; `parallel_tool_calls: false` becomes `disable_parallel_tool_use`; `reasoning_effort` becomes `output_config.effort`, and a `json_schema` `response_format` becomes `output_config.format`; `user` or `safety_identifier` becomes `metadata.user_id`.
+- Fields that only tune sampling or configure OpenAI's own services, such as `seed`, the penalties, `logit_bias`, `store`, `service_tier` and OpenAI's `metadata`, are dropped, since the API refuses any field it doesn't know (verified: "seed: Extra inputs are not permitted").
+- Any other key passes on unchanged, so a facade's params can set Messages fields such as `thinking`, `cache_control` or `top_k`; where a native `output_config` meets a translated one, its own keys win.
+- A request that asks for what Messages can't give is refused with 400 before anything is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, a custom tool, or a role or content part Messages has no counterpart for. Refused rather than dropped, because the client would otherwise go without what it asked for and not know.
+
+A response becomes a chat completion through `chatWriter`: text blocks joined as `content`, thinking as `reasoning_content`, as llama-server reports reasoning, and `tool_use` blocks as tool calls, each input as its arguments string; other blocks, such as server tool results, are left out.
+`stop_reason` maps to `finish_reason`: `max_tokens` to `length`, `tool_use` to `tool_calls`, `refusal` to `content_filter`, anything else to `stop`.
+OpenAI's `prompt_tokens` includes the cache reads and writes that Messages counts apart from `input_tokens`, with the reads again as `cached_tokens`.
+A stream becomes chunks the same way, through the same writer, one event at a time: tool calls numbered in the order they arrive, a usage chunk last when the client set `stream_options.include_usage`, from `message_delta`'s usage, which is cumulative and repeats the input counts (verified).
+It ends at `message_stop`, since Messages sends no `[DONE]`; an error event ends it with a stream error in OpenAI's shape, and a body that ends before `message_stop` is an unexpected end.
+An API error keeps its status and `Retry-After`, with its message and type in OpenAI's error shape.
+
+Limit: Chat Completions has no place for a thinking block's signature, without which the API won't take thinking back, so an assistant turn's `reasoning_content` isn't sent back. The API accepts a tool loop without it (verified, with thinking on), and the model continues without its earlier reasoning.
+
+### Effort
+
+Reasoning effort levels differ between vendors (verified 2026-11-10): Claude takes `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI `none`, `low`, `medium`, `high` and `xhigh`, and `minimal` on some models.
+A level crosses as itself where Claude has it, else as the nearest Claude has (`effort.go`): `none` and `minimal` reach Claude as `low`.
+A level neither knows passes on as sent, for the backend to accept or refuse.
+
 ## Errors
 
 Before the response starts, an error is an OpenAI-style error body with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read.
-After a stream's 200 is sent, the status can't change, so a failure ends the stream with a final `data: {"error": ...}` event and no `[DONE]`, and clients show an error instead of a silently cut reply.
-A backend `event: error` whose payload is already an OpenAI-style error is relayed as is.
+A request fails with one error type, `pipeline.Error`, holding the status, an OpenAI error type and the message.
+After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]`.
+Clients then show an error instead of a silently cut reply.
+A backend's error event already in the protocol's shape is relayed as is.
 
 A backend's complete response is passed on with its status, content type and body, plus one header, `Retry-After`, which tells a client refused with 429 or 503 when to try again.
 Every other backend header is dropped on purpose: it describes the backend or the gateway's connection to it, which the client doesn't talk to.
@@ -530,4 +560,5 @@ Stock nginx can't rewrite a body by its JSON content; njs or OpenResty could, bu
 
 ## Open decisions
 
+- **To do: a hub form.** An intermediate form every protocol translates to and from, so a new protocol needs one translator pair instead of one per existing protocol. The direct pairs stay as routes beside it (Translation).
 - **Not decided: finishing Open WebUI cleanup on shutdown.** The adapter stops abandoned tasks and deletes chats in the background after the response ends. `serve` waits up to 10 seconds for handlers and then exits, which can cut those calls off, leaving the task running to its end and the chat in Open WebUI. Waiting for them needs a lifecycle step that `Backend` doesn't have.

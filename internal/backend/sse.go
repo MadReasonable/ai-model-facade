@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
+
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -146,4 +149,32 @@ func (s *SSEStream) remember(line []byte) {
 
 func (s *SSEStream) Close() error {
 	return s.body.Close()
+}
+
+// EndingStream ends a stream at an event of one of the last types, for a
+// protocol that sends no [DONE], as Messages sends none. A stream
+// that ends before one is broken, as SSEStream reports.
+type EndingStream struct {
+	events *SSEStream
+	last   []string
+	done   bool
+}
+
+func NewEndingStream(events *SSEStream, last ...string) *EndingStream {
+	return &EndingStream{events: events, last: last}
+}
+
+func (s *EndingStream) Next() ([]byte, error) {
+	if s.done {
+		return nil, io.EOF
+	}
+	data, err := s.events.Next()
+	if err == nil && slices.Contains(s.last, gjson.GetBytes(data, "type").String()) {
+		s.done = true
+	}
+	return data, err
+}
+
+func (s *EndingStream) Close() error {
+	return s.events.Close()
 }

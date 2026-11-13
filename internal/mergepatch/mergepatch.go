@@ -149,6 +149,11 @@ func applyObject(body []byte, prefix string, obj *value) ([]byte, error) {
 	return body, nil
 }
 
+// Has reports whether the patch sets the top-level key.
+func (p Patch) Has(key string) bool {
+	return p.root != nil && indexOf(p.root.members, key) >= 0
+}
+
 // String renders the patch as compact JSON in config order, nulls included.
 func (p Patch) String() string {
 	return string(appendPatch(nil, p.root))

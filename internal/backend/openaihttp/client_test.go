@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
 
@@ -23,16 +24,16 @@ func newClient(t *testing.T, c Config) *Client {
 	return client
 }
 
-func TestClient_ChatPostsToTheEndpointPath(t *testing.T) {
+func TestClient_ChatPostsToTheProtocolPath(t *testing.T) {
 	f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
 	f.SetState("m", "ready")
 	c := newClient(t, Config{BaseURL: f.URL})
-	for _, endpoint := range []backend.Endpoint{backend.ChatCompletions, backend.Completions} {
-		if _, err := c.Chat(context.Background(), backend.ChatRequest{Endpoint: endpoint, Body: []byte(`{"model":"m"}`)}); err != nil {
+	for _, protocol := range c.Protocols() {
+		if _, err := c.Chat(context.Background(), backend.ChatRequest{Protocol: protocol, Body: []byte(`{"model":"m"}`)}); err != nil {
 			t.Fatal(err)
 		}
-		if req, ok := f.Last("POST " + string(endpoint)); !ok || req.Body != `{"model":"m"}` {
-			t.Errorf("%s: got %+v", endpoint, req)
+		if req, ok := f.Last("POST " + protocols.Of(protocol).Path); !ok || req.Body != `{"model":"m"}` {
+			t.Errorf("%s: got %+v", protocol, req)
 		}
 	}
 }
@@ -52,7 +53,7 @@ func TestClient_ChatPassesTheResponseOn(t *testing.T) {
 	f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
 	f.SetState("m", "ready")
 	f.SetReply(testkit.Reply{Status: http.StatusTooManyRequests, Header: map[string]string{"Retry-After": "7", "Server": "llama-swap"}, Body: `{"error":"busy"}`})
-	res, err := newClient(t, Config{BaseURL: f.URL}).Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"m"}`)})
+	res, err := newClient(t, Config{BaseURL: f.URL}).Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestClient_ChatRelaysAStream(t *testing.T) {
 	f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
 	f.SetState("m", "ready")
 	f.SetReply(testkit.Reply{Stream: []string{`{"n":1}`}})
-	res, err := newClient(t, Config{BaseURL: f.URL}).Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"m"}`), Stream: true})
+	res, err := newClient(t, Config{BaseURL: f.URL}).Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`), Stream: true})
 	if err != nil || res.Stream == nil {
 		t.Fatalf("got %+v, %v", res, err)
 	}
@@ -92,7 +93,7 @@ func TestClient_ChatCountsAsPendingUntilHeaders(t *testing.T) {
 	s.LoadedModels(context.Background())
 	done := make(chan error)
 	go func() {
-		_, err := c.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"base:alias"}`), AliasOf: "base"})
+		_, err := c.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"base:alias"}`), AliasOf: "base"})
 		done <- err
 	}()
 	f.WaitFor(t, "POST /v1/chat/completions", 1)
@@ -153,7 +154,7 @@ func TestClient_Auth(t *testing.T) {
 			f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
 			f.SetState("m", "ready")
 			client := newClient(t, Config{BaseURL: f.URL, APIKey: "svc", PassthroughAuth: c.passthrough})
-			client.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"m"}`), Client: backend.Client{Authorization: c.client}})
+			client.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`), Client: backend.Client{Authorization: c.client}})
 			client.GetJSON(context.Background(), "/running", &struct{}{})
 			chat, _ := f.Last("POST /v1/chat/completions")
 			state, _ := f.Last("GET /running")

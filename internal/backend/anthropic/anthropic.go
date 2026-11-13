@@ -1,12 +1,7 @@
 // Package anthropic is the backend adapter for Anthropic's Claude API,
-// through its Messages API. Clients speak Chat Completions, so the adapter
-// translates each request into a Messages request and each response, whole
-// or streamed, back into a chat completion; the translations are in
-// request.go, response.go and stream.go. Bodies are rebuilt, not patched,
-// so this adapter, like the Open WebUI one, is an exception to bodies
-// passing through as raw bytes; a key with no translation still passes on
-// unchanged, so a facade's params can set Messages fields such as thinking,
-// output_config or cache_control.
+// through its Messages API. It accepts Messages and forwards it; a Chat
+// Completions client reaches it through package translate, so params for it
+// are always in Messages spelling.
 //
 // Model IDs come from GET /v1/models, read a page at a time, which needs an
 // anthropic-version header, as /v1/messages does (verified: the API refuses
@@ -14,10 +9,9 @@
 // The adapter sends 2023-06-01; 2026-10-21 refuses temperature, top_p and
 // top_k on every model, which Chat Completions clients send routinely. Each
 // listed model's max_tokens is its output cap, which a request without
-// max_tokens is given, since Messages requires one and Chat Completions
-// doesn't (verified: a non-streamed request at the full cap is accepted).
-// The Claude API has no legacy Completions, so the adapter refuses that
-// endpoint.
+// max_tokens is given, since Messages requires one and a client on another
+// protocol may not send it (verified: a non-streamed request at the full cap
+// is accepted).
 //
 // A hosted model needs no load, so every listed model is ready while the API
 // answers, and a state read answers from the latest list without calling the
@@ -28,19 +22,19 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"mime"
 	"net/http"
 	"net/url"
 	"sync/atomic"
-	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 )
 
 // Backend sends chats to the Messages API through the embedded client's
@@ -62,48 +56,56 @@ func New(entry config.Entry) (*Backend, error) {
 	return b, nil
 }
 
-// Chat translates a chat completion into a Messages request and sends it,
-// and translates what comes back: a response or a stream, or an error in
-// OpenAI's shape with the API's status. A request the Messages API can't
-// serve as meant gets a 400 without being sent.
+// Protocols returns the one protocol the Claude API serves here.
+func (b *Backend) Protocols() []backend.Protocol {
+	return []backend.Protocol{backend.AnthropicMessages}
+}
+
+// Chat sends a Messages request, giving it the model's output cap if it has no
+// max_tokens, and returns what the API answered, unchanged: a response, an
+// error or a stream. A request with neither gets a 400 without being sent.
 func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
-	if req.Endpoint != backend.ChatCompletions {
-		return backend.ChatResult{}, fmt.Errorf("the Claude API serves only %s, not %s", backend.ChatCompletions, req.Endpoint)
-	}
-	body, includeUsage, err := toMessages(req.Body, b.outputCap)
-	var refused *requestError
-	if errors.As(err, &refused) {
-		return jsonResponse(http.StatusBadRequest, errorBody("invalid_request_error", refused.msg), ""), nil
-	}
+	body, ok, err := withMaxTokens(req.Body, b.outputCap)
 	if err != nil {
 		return backend.ChatResult{}, err
+	}
+	if !ok {
+		message := fmt.Sprintf("the Claude API needs max_tokens, and its model list gives no output cap for '%s' to use instead; set max_tokens", gjson.GetBytes(req.Body, "model").String())
+		return backend.ChatResult{Response: &backend.ChatResponse{Status: http.StatusBadRequest, ContentType: "application/json", Body: errorBody("invalid_request_error", message)}}, nil
 	}
 	req.Body = body
 	resp, err := b.Send(ctx, req, "/v1/messages", apiVersion)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
-	created := time.Now().Unix()
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, _ := mime.ParseMediaType(contentType)
 	if req.Stream && resp.StatusCode/100 == 2 && mediaType == "text/event-stream" {
-		return backend.ChatResult{Stream: newChunkStream(backend.NewSSEStream(resp.Body), includeUsage, created)}, nil
+		return backend.ChatResult{Stream: protocols.Stream(backend.AnthropicMessages, resp.Body)}, nil
 	}
 	data, err := openaihttp.ReadBody(resp)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
-	if resp.StatusCode/100 != 2 {
-		return jsonResponse(resp.StatusCode, openAIError(data), resp.Header.Get("Retry-After")), nil
-	}
-	return jsonResponse(resp.StatusCode, completion(gjson.ParseBytes(data), created), ""), nil
+	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: data, RetryAfter: resp.Header.Get("Retry-After")}}, nil
 }
 
-func jsonResponse(status int, body []byte, retryAfter string) backend.ChatResult {
-	return backend.ChatResult{Response: &backend.ChatResponse{Status: status, ContentType: "application/json", Body: body, RetryAfter: retryAfter}}
+// withMaxTokens adds the model's output cap to a body with no max_tokens. ok
+// is false if the model list gives no cap.
+func withMaxTokens(body []byte, outputCap func(model string) (int64, bool)) (out []byte, ok bool, err error) {
+	if v := gjson.GetBytes(body, "max_tokens"); v.Exists() && v.Type != gjson.Null {
+		return body, true, nil
+	}
+	limit, ok := outputCap(gjson.GetBytes(body, "model").String())
+	if !ok {
+		return nil, false, nil
+	}
+	out, err = sjson.SetBytes(body, "max_tokens", limit)
+	return out, err == nil, err
 }
 
 func errorBody(errType, message string) []byte {
-	data, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType}})
+	data, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]any{"type": errType, "message": message}})
 	return data
 }
 

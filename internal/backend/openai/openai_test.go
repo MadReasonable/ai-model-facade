@@ -60,7 +60,7 @@ func TestOpenAI_AFailedRequestMakesTheStateCheckTheAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	chat := func() {
-		b.Chat(context.Background(), backend.ChatRequest{Endpoint: backend.ChatCompletions, Body: []byte(`{"model":"gpt-a"}`)})
+		b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"gpt-a"}`)})
 	}
 	f.SetReply(testkit.Reply{Status: http.StatusBadRequest})
 	chat()

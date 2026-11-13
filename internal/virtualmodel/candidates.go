@@ -9,13 +9,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"gopkg.in/yaml.v3"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/mergepatch"
+	"github.com/MadReasonable/ai-model-facade/internal/pipeline"
 	"github.com/MadReasonable/ai-model-facade/internal/selector"
 )
 
@@ -42,7 +41,8 @@ type candidates struct {
 	backend      backend.Backend // nil likewise
 	backendNames []string        // per candidate
 	backends     []backend.Backend
-	catalogs     []*backend.Catalog // per candidate: its backend's model list at startup
+	accepted     [][]backend.Protocol // per candidate: the protocols its backend accepts
+	catalogs     []*backend.Catalog   // per candidate: its backend's model list at startup
 	description  string
 	params       []mergepatch.Patch
 	selector     *selector.FirstLoaded
@@ -105,6 +105,10 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		if err != nil {
 			return nil, err
 		}
+		accepted := b.Protocols()
+		if slices.Contains(accepted, backend.AnthropicMessages) {
+			m.warnChatOnlyKeys(entry.Name, cc.Model, name, env.Log, patches)
+		}
 		hasParams := len(m.params)+len(patches) > 0
 		env.Check(backend.ListingCheck{Backends: []string{name}, Run: func(catalogs map[string]*backend.Catalog, warn func(error)) {
 			catalog := catalogs[name]
@@ -119,11 +123,30 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		m.selector.Candidates = append(m.selector.Candidates, candidate)
 		m.backendNames = append(m.backendNames, name)
 		m.backends = append(m.backends, b)
+		m.accepted = append(m.accepted, accepted)
 		m.catalogs = append(m.catalogs, env.Catalogs[name])
 		m.patches = append(m.patches, patches)
 	}
 	m.notePassthrough(env.Log, entry.Name)
 	return m, nil
+}
+
+// chatOnlyKeys exist only in Chat Completions. The Messages API refuses a field
+// it doesn't know, and the anthropic adapter used to translate these.
+var chatOnlyKeys = []string{"reasoning_effort", "response_format", "stop"}
+
+// warnChatOnlyKeys warns about a Chat Completions key that params send to a
+// backend receiving Messages, which would refuse it. It is a narrow exception
+// to nothing checking that a key suits the backend, for configs written when
+// the anthropic adapter translated params.
+func (m *candidates) warnChatOnlyKeys(facade, model, backendName string, log *slog.Logger, candidate []mergepatch.Patch) {
+	for _, patch := range append(append([]mergepatch.Patch(nil), m.params...), candidate...) {
+		for _, key := range chatOnlyKeys {
+			if patch.Has(key) {
+				log.Warn("params set a Chat Completions key on a candidate that receives Messages, which refuses it; use its Messages spelling", "model", facade, "candidate", model, "backend", backendName, "key", key)
+			}
+		}
+	}
 }
 
 // notePassthrough warns when candidates span several backends that forward
@@ -224,29 +247,31 @@ func (m *candidates) Inspect(ctx context.Context) (Inspection, error) {
 	return inspection, err
 }
 
-func (m *candidates) Chat(ctx context.Context, endpoint backend.Endpoint, body []byte, client backend.Client) (Result, error) {
+func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error) {
 	sel, err := m.selector.Select(ctx, body, m.backend)
 	res := Result{Target: sel.Target, AliasOf: sel.AliasOf, Checked: sel.Checked, Reason: sel.Reason}
 	if err != nil {
-		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
+		return res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
 	}
 	if sel.Index < 0 {
-		return res, &Error{Status: http.StatusServiceUnavailable, Type: "no_candidate_loaded", Message: "no candidate model is loaded"}
+		return res, &pipeline.Error{Status: http.StatusServiceUnavailable, Type: "no_candidate_loaded", Message: "no candidate model is loaded"}
 	}
 	res.Backend = m.selector.Candidates[sel.Index].BackendName
-	for _, p := range append(append([]mergepatch.Patch(nil), m.params...), m.patches[sel.Index]...) {
-		if body, err = p.Apply(body); err != nil {
-			return res, &Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
-		}
+	res.Chat, err = pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
+	return res, err
+}
+
+// selected is the winning candidate as the pipeline takes it.
+func (m *candidates) selected(sel selector.Selection) pipeline.Selected {
+	i := sel.Index
+	return pipeline.Selected{
+		Backend:     m.backends[i],
+		BackendName: m.backendNames[i],
+		Model:       sel.Target,
+		AliasOf:     sel.AliasOf,
+		Accepted:    m.accepted[i],
+		Params:      append(append([]mergepatch.Patch(nil), m.params...), m.patches[i]...),
 	}
-	if body, err = sjson.SetBytes(body, "model", sel.Target); err != nil {
-		return res, &Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
-	}
-	req := backend.ChatRequest{Endpoint: endpoint, Body: body, Stream: gjson.GetBytes(body, "stream").Bool(), Client: client, AliasOf: sel.AliasOf}
-	if res.Chat, err = m.backends[sel.Index].Chat(ctx, req); err != nil {
-		return res, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", m.backendNames[sel.Index], err)}
-	}
-	return res, nil
 }
 
 // stateError reports that no candidate's backend state could be read.
