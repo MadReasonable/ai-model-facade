@@ -278,7 +278,7 @@ LM Studio's settings are set when it starts, so there is nothing to reload.
 
 ### LocalAI
 
-The `localAI` backend runs LocalAI v4.11.0, built from `localai/Dockerfile`: LocalAI's image, `localai/localai:v4.11.0`, with the llama.cpp engine of the same release copied in, `quay.io/go-skynet/local-ai-backends:v4.11.0-cpu-llama-cpp`.
+The `localAi` backend runs LocalAI v4.11.0, built from `localai/Dockerfile`: LocalAI's image, `localai/localai:v4.11.0`, with the llama.cpp engine of the same release copied in, `quay.io/go-skynet/local-ai-backends:v4.11.0-cpu-llama-cpp`.
 LocalAI's own image carries no inference engines and installs them from its gallery on first use, whose llama.cpp entry follows the latest release; copying the engine in pins it, and nothing is downloaded at run time.
 `control` builds the image before the first start, which pulls about 1 GB.
 

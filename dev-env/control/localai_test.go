@@ -13,7 +13,7 @@ func TestLocalAI_RejectsAWrongAlias(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := writeConfig(t, "  localAI: {models: [{id: m, file: a.gguf}], aliases: "+c.aliases+"}\n")
+			_, err := writeConfig(t, "  localAi: {models: [{id: m, file: a.gguf}], aliases: "+c.aliases+"}\n")
 			wantError(t, err, c.want)
 		})
 	}

@@ -74,7 +74,7 @@ backends:
   # LocalAI, with the llama.cpp engine built into its image. Two models loaded
   # at once, so a third evicts one; an alias is another name for a model,
   # with no settings of its own.
-  localAI:
+  localAi:
     maxActiveBackends: 2
     ctxSize: 4096
     models:

@@ -752,7 +752,7 @@ The `api` section configures what the gateway presents to the clients of each [c
 
 ### `backends`
 
-Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAI`, `ollama`, `openWebUi`, `openAi` or `anthropic`.
+Each entry is a named backend; `type` selects the adapter: `llamaSwap`, `llamaServer`, `lmStudio`, `localAi`, `ollama`, `openWebUi`, `openAi` or `anthropic`.
 All take these keys:
 
 | Key | Description |
@@ -807,7 +807,7 @@ By default LM Studio holds one model loaded by a request at a time, and loading 
 
 #### LocalAI
 
-A `localAI` backend is a LocalAI server, reached through its OpenAI-compatible endpoints.
+A `localAi` backend is a LocalAI server, reached through its OpenAI-compatible endpoints.
 Model IDs are the names of LocalAI's model configs.
 A LocalAI alias, a config with only a `name` and an `alias`, is another name for its model, with no params of its own: it can be a candidate, and counts as loaded whenever its model is.
 The model list holds every model LocalAI has, embedding and image models included, because LocalAI's list doesn't say what each model does.

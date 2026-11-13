@@ -98,8 +98,8 @@ backends:
   # A LocalAI server takes them too. Its candidates are the names of its
   # model configs, aliases included. With LocalAI's API keys set, apiKey
   # must be an admin key, since its state comes from admin endpoints.
-  # localAI:
-  #   type: localAI
+  # localAi:
+  #   type: localAi
   #   baseUrl: http://localai:8080
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180

@@ -224,7 +224,7 @@ func (f *fakeLMStudio) HoldLoads(t *testing.T) (release func()) {
 var devLocalAI = []string{"localai-llm-1", "localai-llm-2", "localai-llm-3"}
 
 func forEachLocalAI(t *testing.T, claim func(t *testing.T, b Driver)) {
-	forEach(t, "localAI", "LOCALAI_PORT", "18086", func(t *testing.T) Driver {
+	forEach(t, "localAi", "LOCALAI_PORT", "18086", func(t *testing.T) Driver {
 		f := NewLocalAI(t, 2, devLocalAI...)
 		f.SetAlias("localai-llm-1:alias", "localai-llm-1")
 		return &fakeLocalAI{f}

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts LocalAI on port 8080 for the localAI backend, with the models
+# Starts LocalAI on port 8080 for the localAi backend, with the models
 # config.yaml lists; see dev-env/README.md.
 set -eu
 

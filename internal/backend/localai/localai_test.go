@@ -14,7 +14,7 @@ import (
 
 func newBackend(t *testing.T, url, extra string) *Backend {
 	t.Helper()
-	b, err := New(testkit.Entry(t, "localAI", `{type: localAI, baseUrl: "`+url+`"`+extra+`}`))
+	b, err := New(testkit.Entry(t, "localAi", `{type: localAi, baseUrl: "`+url+`"`+extra+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +129,8 @@ func withoutSettings(t *testing.T, f *testkit.LocalAI) string {
 }
 
 func TestLocalAI_RejectsAWrongConfig(t *testing.T) {
-	for _, src := range []string{"{type: localAI}", "{type: localAI, baseUrl: x, maxActiveBackends: 1}"} {
-		if _, err := New(testkit.Entry(t, "localAI", src)); err == nil {
+	for _, src := range []string{"{type: localAi}", "{type: localAi, baseUrl: x, maxActiveBackends: 1}"} {
+		if _, err := New(testkit.Entry(t, "localAi", src)); err == nil {
 			t.Errorf("%s: expected an error", src)
 		}
 	}

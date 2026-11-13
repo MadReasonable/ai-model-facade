@@ -17,7 +17,7 @@ import (
 
 func init() {
 	register(backend{
-		Name: "localAI", Service: "localai", Profile: "localai", URL: "http://localai:8080",
+		Name: "localAi", Service: "localai", Profile: "localai", URL: "http://localai:8080",
 		NeedsFiles: true, API: "openai", Health: "/readyz", Build: "localai", Image: "ai-model-facade-dev-localai",
 		kind: localAIKind{},
 	})
@@ -45,7 +45,7 @@ func (localAIKind) configure(section *yaml.Node, files fileIndex) (configured, e
 	if err := decodeSection(section, &l); err != nil {
 		return nil, err
 	}
-	found := checkModels("localAI", l.Models, files)
+	found := checkModels("localAi", l.Models, files)
 	models := map[string]bool{}
 	for _, m := range l.Models {
 		models[m.ID] = true
@@ -53,11 +53,11 @@ func (localAIKind) configure(section *yaml.Node, files fileIndex) (configured, e
 	for _, a := range l.Aliases {
 		switch {
 		case a.ID == "":
-			found = append(found, "an alias of 'localAI' has no id")
+			found = append(found, "an alias of 'localAi' has no id")
 		case models[a.ID]:
-			found = append(found, fmt.Sprintf("'localAI' has '%s' as both a model and an alias", a.ID))
+			found = append(found, fmt.Sprintf("'localAi' has '%s' as both a model and an alias", a.ID))
 		case !models[a.Model]:
-			found = append(found, fmt.Sprintf("alias '%s' of 'localAI' names model '%s', which its models don't list", a.ID, a.Model))
+			found = append(found, fmt.Sprintf("alias '%s' of 'localAi' names model '%s', which its models don't list", a.ID, a.Model))
 		}
 	}
 	return &l, problems(found)

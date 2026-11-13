@@ -28,7 +28,7 @@ var devPorts = map[string][2]string{
 	"ollama":      {"OLLAMA_PORT", "18083"},
 	"openWebUi":   {"OPEN_WEBUI_PORT", "18084"},
 	"lmStudio":    {"LM_STUDIO_PORT", "18085"},
-	"localAI":     {"LOCALAI_PORT", "18086"},
+	"localAi":     {"LOCALAI_PORT", "18086"},
 }
 
 // liveGateway is dev-env/gateway.yaml served in-process, with the backends
@@ -108,7 +108,7 @@ func TestLive_UsesTheLoadedCandidateElseLoadsTheFallback(t *testing.T) {
 		{"swap", "llamaSwap", nil, "llamaSwap-llm-1", "llamaSwap-llm-2"},
 		{"router", "llamaRouter", nil, "llamaRouter-llm-1", "llamaRouter-llm-2"},
 		{"lmstudio", "lmStudio", nil, "lmstudio-llm-1", "lmstudio-llm-2"},
-		{"localai", "localAI", nil, "localai-llm-1", "localai-llm-2"},
+		{"localai", "localAi", nil, "localai-llm-1", "localai-llm-2"},
 		{"ollama", "ollama", nil, "ollama-llm-1:latest", "ollama-llm-2:latest"},
 		{"webui", "ollama", []string{"openWebUi"}, "ollama-llm-1:latest", "ollama-llm-2:latest"},
 	}
@@ -224,12 +224,12 @@ func TestLive_LMStudioLoadIsNotAborted(t *testing.T) {
 func TestLive_LocalAILoadIsNotEvicted(t *testing.T) {
 	gw := startDevGateway(t, `
   localai-3:
-    backend: localAI
+    backend: localAi
     candidates:
       - model: localai-llm-3
         loadIfNone: true
-`, "localAI")
-	b := gw.backends["localAI"]
+`, "localAi")
+	b := gw.backends["localAi"]
 	b.Reset(t)
 	first := gw.askInBackground(t, "localai")
 	time.Sleep(300 * time.Millisecond)

@@ -13,6 +13,7 @@ Before 1.0, a minor release can change config keys.
 ### Changed
 
 - **Breaking:** the backend type `openAI` is now `openAi`, as config names treat an initialism as a word. A config with the old spelling fails to load with `unknown type 'openAI'`.
+- **Breaking:** the backend type `localAI` is now `localAi`, for the same reason. A config with the old spelling fails to load with `unknown type 'localAI'`.
 - **Breaking:** `current` on `/v1/models` is off by default, so that list reads no backend's state. A gateway that is a connection of an Open WebUI which a gateway reads needs `api.openAi.addCurrent: true`, or its facades read as unknown there; if that is the same gateway, its `openWebUi` backend also needs `loopsBack: true`.
 - **Breaking:** `alias_of` in `current` is now `aliasOf`, as the gateway's other field names are camelCase.
 

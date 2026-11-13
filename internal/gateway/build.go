@@ -243,7 +243,7 @@ func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 		return llamaserver.New(e)
 	case "lmStudio":
 		return lmstudio.New(e)
-	case "localAI":
+	case "localAi":
 		return localai.New(e)
 	case "ollama":
 		return ollama.New(e)

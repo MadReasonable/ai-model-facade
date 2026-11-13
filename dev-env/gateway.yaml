@@ -39,8 +39,8 @@ backends:
     baseUrl: http://127.0.0.1:18085
     requestTimeoutSeconds: 60
 
-  localAI:
-    type: localAI
+  localAi:
+    type: localAi
     baseUrl: http://127.0.0.1:18086
     requestTimeoutSeconds: 60
 
@@ -108,7 +108,7 @@ models:
   # up, so a request for localai-llm-3 evicts one of them, the one used least
   # recently.
   localai:
-    backend: localAI
+    backend: localAi
     candidates:
       - model: localai-llm-1
       - model: localai-llm-2
