@@ -2,6 +2,7 @@ package testkit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +95,8 @@ func (f *Anthropic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.serveModels(w, r)
 	case "/v1/messages":
 		f.serveMessages(w, body)
+	case "/v1/messages/count_tokens":
+		f.serveCount(w, body)
 	default:
 		http.NotFound(w, r)
 	}
@@ -194,4 +197,19 @@ func (f *Anthropic) serveModels(w http.ResponseWriter, r *http.Request) {
 		answer["first_id"], answer["last_id"] = page[0], page[len(page)-1]
 	}
 	json.NewEncoder(w).Encode(answer)
+}
+
+// serveCount answers as the API counts: FakeTokenCount tokens, refusing any
+// field it doesn't take when counting (verified: max_tokens, stream and
+// temperature are "Extra inputs").
+func (f *Anthropic) serveCount(w http.ResponseWriter, body []byte) {
+	req := gjson.ParseBytes(body)
+	for _, field := range []string{"max_tokens", "stream", "temperature"} {
+		if req.Get(field).Exists() {
+			anthropicError(w, http.StatusBadRequest, "invalid_request_error", field+": Extra inputs are not permitted")
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, fmt.Sprintf(`{"input_tokens":%d}`, FakeTokenCount))
 }

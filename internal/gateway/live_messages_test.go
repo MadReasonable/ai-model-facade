@@ -272,3 +272,21 @@ models:
 		t.Errorf("Chat Completions: got %d %s", r.StatusCode, r.body)
 	}
 }
+
+// The API's own count is what a real request then reports as its input, so
+// counting forwards the request it would really send.
+func TestLive_MessagesCountMatchesWhatARequestReports(t *testing.T) {
+	gw := startClaudeGateway(t)
+	body := `{"model":"ask","system":"You are a travel assistant.","tools":` + liveMessagesTools + `,"messages":[{"role":"user","content":"Say hi in two words."}]}`
+	r := messagesRequest(t, gw, liveMessagesPath+"/count_tokens", "", body, nil)
+	count := gjson.Get(r.body, "input_tokens").Int()
+	if r.StatusCode != http.StatusOK || count == 0 {
+		t.Fatalf("count: got %d %s", r.StatusCode, r.body)
+	}
+	real := messagesRequest(t, gw, liveMessagesPath, "", strings.Replace(body, `"model":"ask",`, `"model":"ask","max_tokens":200,`, 1), nil)
+	if got := gjson.Get(real.body, "usage.input_tokens").Int(); real.StatusCode != http.StatusOK || got == 0 {
+		t.Fatalf("request: got %d %s", real.StatusCode, real.body)
+	} else if difference := got - count; difference < -20 || difference > 20 {
+		t.Errorf("counted %d, the request used %d", count, got)
+	}
+}

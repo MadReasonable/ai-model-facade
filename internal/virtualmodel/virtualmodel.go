@@ -23,6 +23,9 @@ type Result struct {
 	Chat    backend.ChatResult
 	// Dropped names the client's fields a translation left out.
 	Dropped []string
+	// Estimated means the response's count is the gateway's estimate, not the
+	// backend's own.
+	Estimated bool
 }
 
 // Current is what a request would be routed to right now. Model is empty
@@ -61,6 +64,9 @@ type Handler interface {
 	// means Current is nil; Candidates are still filled.
 	Inspect(ctx context.Context) (Inspection, error)
 	Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error)
+	// CountTokens counts a Messages body's input tokens on the model a chat
+	// would use now, so it may load the same model a chat would.
+	CountTokens(ctx context.Context, body []byte, client backend.Client) (Result, error)
 	// Serves reports whether the facade takes requests in protocol, which its
 	// protocols list can narrow.
 	Serves(protocol backend.Protocol) bool

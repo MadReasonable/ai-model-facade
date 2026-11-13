@@ -85,7 +85,7 @@ func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client b
 		}
 		reply.drop(back.Dropped())
 	}
-	body, err := prepare(body, sel, to)
+	body, err := Prepare(body, sel, to)
 	if err != nil {
 		return reply, gatewayError(err)
 	}
@@ -107,9 +107,9 @@ func (r *Reply) drop(names []string) {
 	}
 }
 
-// prepare applies the selected candidate's params for a body in protocol,
+// Prepare applies the selected candidate's params for a body in protocol,
 // then rewrites model to its ID, the last step before the backend sees it.
-func prepare(body []byte, sel Selected, protocol backend.Protocol) ([]byte, error) {
+func Prepare(body []byte, sel Selected, protocol backend.Protocol) ([]byte, error) {
 	var err error
 	for _, patch := range sel.Params(protocol) {
 		if body, err = patch.Apply(body); err != nil {

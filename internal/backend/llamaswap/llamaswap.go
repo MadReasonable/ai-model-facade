@@ -16,6 +16,13 @@ type Backend struct {
 	*openaihttp.Backend
 }
 
+// CountTokens forwards to the server's own count, which matches what a chat
+// reports, template and tools included (verified on llama-swap v263 and
+// llama-server b11580). It loads the model it names, as a chat would.
+func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	return b.ForwardCountTokens(ctx, req, nil)
+}
+
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}

@@ -300,6 +300,25 @@ type Backend interface {
 	Protocols() []Protocol
 }
 
+// TokenCounter is an optional backend capability: counting a Messages request's
+// input tokens the way the backend itself would, chat template and tools
+// included. A backend without it gets an estimate from the gateway.
+type TokenCounter interface {
+	// CountTokens answers for a Messages body, with the backend's response
+	// unchanged. Like a chat, it may load the model it names.
+	CountTokens(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+}
+
+// Tokenizer is an optional backend capability: counting the tokens of raw
+// text with a model's own tokenizer, no chat template applied. A backend that
+// has it but no TokenCounter gets a count from the gateway with the text
+// exact and the template's tokens estimated.
+type Tokenizer interface {
+	// Tokenize counts text's tokens on model. Like a chat, it may load the
+	// model.
+	Tokenize(ctx context.Context, model, text string, client Client) (int, error)
+}
+
 // ModelStateProvider is an optional backend capability.
 type ModelStateProvider interface {
 	// LoadedModels returns the models that are ready, plus those still

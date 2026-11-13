@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -29,6 +30,8 @@ import (
 //     WatchDog.EnforceLRULimit), so a second request evicts a load even under
 //     a limit of two. An evicted load still finishes, and its request fails
 //     with 500, while the request that evicted it waits and loads its model.
+//   - /v1/tokenize loads the model as a completion does, and counts one
+//     token per word of content.
 type LocalAI struct {
 	*httptest.Server
 	Recorder
@@ -142,6 +145,13 @@ func (f *LocalAI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply := f.reply
 		f.mu.Unlock()
 		reply.write(w)
+	case "/v1/tokenize":
+		if !f.ensureLoaded(r, gjson.GetBytes(body, "model").String()) {
+			http.Error(w, `{"error":{"code":500,"message":"model was evicted while it loaded"}}`, http.StatusInternalServerError)
+			return
+		}
+		tokens := make([]int, len(strings.Fields(gjson.GetBytes(body, "content").String())))
+		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens})
 	default:
 		http.NotFound(w, r)
 	}

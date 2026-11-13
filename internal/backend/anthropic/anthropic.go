@@ -95,6 +95,16 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: data, RetryAfter: resp.Header.Get("Retry-After")}}, nil
 }
 
+// CountTokens asks the API, without the blocks it would refuse in a chat.
+func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*backend.ChatResponse, error) {
+	body, err := withoutUnsignedThinking(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	req.Body = body
+	return b.ForwardCountTokens(ctx, req, messagesHeader(req.Client))
+}
+
 // messagesHeader is the adapter's API version, with what the client asked for
 // over it: a client's beta features and version are its own to choose.
 func messagesHeader(client backend.Client) http.Header {

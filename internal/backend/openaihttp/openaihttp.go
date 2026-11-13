@@ -201,6 +201,22 @@ func (c *Client) Chat(ctx context.Context, req backend.ChatRequest) (backend.Cha
 	return backend.ChatResult{Response: &backend.ChatResponse{Status: resp.StatusCode, ContentType: contentType, Body: body, RetryAfter: resp.Header.Get("Retry-After")}}, nil
 }
 
+// ForwardCountTokens posts a Messages body to the backend's own
+// /v1/messages/count_tokens, for an adapter whose backend serves it. It is a
+// method adapters call, not their CountTokens, so an adapter counts only if it
+// says so.
+func (c *Client) ForwardCountTokens(ctx context.Context, req backend.ChatRequest, header http.Header) (*backend.ChatResponse, error) {
+	resp, err := c.Send(ctx, req, "/v1/messages/count_tokens", header)
+	if err != nil {
+		return nil, err
+	}
+	body, err := ReadBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &backend.ChatResponse{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: body, RetryAfter: resp.Header.Get("Retry-After")}, nil
+}
+
 // Send posts the request's body to path with these extra headers, as Chat
 // does for its own endpoint: counted as pending until the response headers
 // arrive, and reported to NewListedBackend's hook if the backend fails it. An

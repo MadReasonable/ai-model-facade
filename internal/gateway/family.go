@@ -12,6 +12,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/protocols"
+	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
 )
 
 // apiFamily is what differs between the APIs the gateway presents: where a
@@ -173,6 +174,9 @@ func (s *server) routeAnthropic(mux *http.ServeMux, base string) {
 	mux.HandleFunc("GET "+base+"/v1/models/{id...}", s.authenticated(anthropicFamily, s.getAnthropicModel))
 	messages := protocols.Of(backend.AnthropicMessages).Path
 	mux.HandleFunc("POST "+base+messages, s.authenticated(anthropicFamily, s.completions(backend.AnthropicMessages)))
+	mux.HandleFunc("POST "+base+messages+"/count_tokens", s.authenticated(anthropicFamily, func(w http.ResponseWriter, r *http.Request, client backend.Client) {
+		s.complete(w, r, client, backend.AnthropicMessages, virtualmodel.Handler.CountTokens)
+	}))
 	routeAnthropicMisses(mux, base)
 }
 
@@ -185,6 +189,7 @@ func routeAnthropicMisses(mux *http.ServeMux, base string) {
 		{base + "/v1/models", "GET, HEAD"},
 		{base + "/v1/models/{id...}", "GET, HEAD"},
 		{base + protocols.Of(backend.AnthropicMessages).Path, http.MethodPost},
+		{base + protocols.Of(backend.AnthropicMessages).Path + "/count_tokens", http.MethodPost},
 	} {
 		mux.HandleFunc(route.path, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Allow", route.allow)

@@ -2,6 +2,7 @@ package virtualmodel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/sjson"
 	"gopkg.in/yaml.v3"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
@@ -329,6 +331,56 @@ func (m *candidates) selected(sel selector.Selection) pipeline.Selected {
 		Accepted:    m.accepted[i],
 		Params:      func(protocol backend.Protocol) []mergepatch.Patch { return m.patchesFor(i, protocol) },
 	}
+}
+
+// generationFields only shape a reply, so params may set them for a chat, while
+// the Claude API refuses them when counting (verified).
+var generationFields = []string{"max_tokens", "stream", "temperature", "top_p", "top_k", "stop_sequences", "metadata", "service_tier", "context_management"}
+
+// CountTokens runs selection as a chat would, then asks the winner's backend,
+// with params in Messages spelling applied, since they change what is counted.
+// A backend that can't count gets an estimate of the client's body, in its
+// response shape, and no request.
+func (m *candidates) CountTokens(ctx context.Context, body []byte, client backend.Client) (Result, error) {
+	sel, res, err := m.choose(ctx, backend.AnthropicMessages)
+	if err != nil {
+		return res, err
+	}
+	counter, ok := m.backends[sel.Index].(backend.TokenCounter)
+	if !ok {
+		count := translate.EstimateMessagesTokens(body)
+		if tokenizer, ok := m.backends[sel.Index].(backend.Tokenizer); ok {
+			tokenize := func(text string) (int, error) { return tokenizer.Tokenize(ctx, sel.Target, text, client) }
+			if count, err = translate.CountMessagesTokens(body, tokenize); err != nil {
+				return res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", m.backendNames[sel.Index], err)}
+			}
+		}
+		data, err := json.Marshal(map[string]int{"input_tokens": count})
+		if err != nil {
+			return res, &pipeline.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
+		}
+		res.Estimated = true
+		res.Chat = backend.ChatResult{Response: &backend.ChatResponse{Status: http.StatusOK, ContentType: "application/json", Body: data}}
+		return res, nil
+	}
+	if body, err = pipeline.Prepare(body, m.selected(sel), backend.AnthropicMessages); err != nil {
+		return res, &pipeline.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
+	}
+	for _, field := range generationFields {
+		if body, err = sjson.DeleteBytes(body, field); err != nil {
+			return res, &pipeline.Error{Status: http.StatusInternalServerError, Type: "gateway_error", Message: err.Error()}
+		}
+	}
+	resp, err := counter.CountTokens(ctx, backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: body, Client: client, AliasOf: sel.AliasOf})
+	if err != nil {
+		return res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", m.backendNames[sel.Index], err)}
+	}
+	if resp.Status/100 != 2 {
+		resp.Body = translate.MessagesError(resp.Status, resp.Body)
+		resp.ContentType = "application/json"
+	}
+	res.Chat = backend.ChatResult{Response: resp}
+	return res, nil
 }
 
 // reachable says, per candidate, whether its backend can serve protocol, and

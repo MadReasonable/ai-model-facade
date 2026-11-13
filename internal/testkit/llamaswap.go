@@ -2,6 +2,7 @@ package testkit
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -128,6 +129,8 @@ func (f *LlamaSwap) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.serveModels(w)
 	case "/running":
 		f.serveRunning(w)
+	case "/v1/messages/count_tokens":
+		fmt.Fprintf(w, `{"input_tokens":%d}`, FakeTokenCount)
 	case "/v1/chat/completions", "/v1/completions":
 		f.mu.Lock()
 		base := f.baseOf(gjson.GetBytes(body, "model").String())

@@ -119,6 +119,27 @@ func (gw *liveGateway) checkTokenLimit(t *testing.T, facade, limit string, want 
 	}
 }
 
+// llama-swap and llama-server count through their own endpoint, and it matches
+// what the same request then reports, so the count is not an estimate.
+func TestLive_MessagesCountMatchesOnLlamaBackends(t *testing.T) {
+	gw := startDevGateway(t, `
+  countSwap: {backend: llamaSwap, candidates: [{model: llamaSwap-llm-1, loadIfNone: true}]}
+  countServer: {backend: llamaServer, candidates: [{model: llamaServer-llm-1, loadIfNone: true}]}
+`, "llamaSwap", "llamaServer")
+	for _, facade := range []string{"countSwap", "countServer"} {
+		body := `{"model":"` + facade + `","system":"You are brief.","messages":[{"role":"user","content":"What is the weather in Paris?"}]}`
+		r := messagesRequest(t, gw.gateway, "/anthropic/v1/messages/count_tokens", "", body, nil)
+		count := gjson.Get(r.body, "input_tokens").Int()
+		if r.StatusCode != http.StatusOK || count == 0 || r.Header.Get("X-Gateway-Estimated") != "" {
+			t.Fatalf("%s count: got %d %s", facade, r.StatusCode, r.body)
+		}
+		real := messagesRequest(t, gw.gateway, "/anthropic/v1/messages", "", strings.Replace(body, `"system"`, `"max_tokens":1,"system"`, 1), nil)
+		if got := gjson.Get(real.body, "usage.input_tokens").Int() + gjson.Get(real.body, "usage.cache_read_input_tokens").Int(); got != count {
+			t.Errorf("%s: counted %d, the request used %d: %s", facade, count, got, real.body)
+		}
+	}
+}
+
 // Ollama ignores max_completion_tokens, so a client that uses that name gets
 // no limit unless the adapter renames it, directly or through Open WebUI. With
 // both names, max_completion_tokens' value is the limit.
@@ -279,5 +300,32 @@ func TestLive_LocalAILoadIsNotEvicted(t *testing.T) {
 	<-first.done
 	if r := first.resp; r.Response == nil || r.StatusCode != http.StatusOK || r.target() != "localai-llm-2" {
 		t.Errorf("the request that started the load: %+v", r)
+	}
+}
+
+// LocalAI counts a request's text with the model's tokenizer, and the
+// gateway estimates the chat template around it, so the count is marked as
+// an estimate and comes within a few tokens of what the same request then
+// reports: the joins between its texts, which the template has in other
+// forms.
+func TestLive_MessagesCountOnLocalAI(t *testing.T) {
+	gw := startDevGateway(t, `
+  countLocal: {backend: localAi, candidates: [{model: localai-llm-1, loadIfNone: true}]}
+`, "localAi")
+	for _, body := range []string{
+		`{"model":"countLocal","system":"You are brief.","messages":[{"role":"user","content":"What is the weather in Paris?"}]}`,
+		`{"model":"countLocal","system":"You are brief.","messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello! How can I help?"},{"role":"user","content":"Name three rivers in Europe, with their lengths."}]}`,
+	} {
+		r := messagesRequest(t, gw.gateway, "/anthropic/v1/messages/count_tokens", "", body, nil)
+		count := gjson.Get(r.body, "input_tokens").Int()
+		if r.StatusCode != http.StatusOK || count == 0 || r.Header.Get("X-Gateway-Estimated") != "true" {
+			t.Fatalf("count: got %d %s", r.StatusCode, r.body)
+		}
+		real := messagesRequest(t, gw.gateway, "/anthropic/v1/messages", "", strings.Replace(body, `"system"`, `"max_tokens":1,"system"`, 1), nil)
+		used := gjson.Get(real.body, "usage.input_tokens").Int()
+		t.Logf("counted %d, the request used %d", count, used)
+		if used == 0 || count < used-3 || count > used+3 {
+			t.Errorf("counted %d, the request used %d: %s", count, used, real.body)
+		}
 	}
 }

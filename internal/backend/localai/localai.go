@@ -25,12 +25,17 @@
 // since nothing else stays loaded; under a higher one, the models still
 // loaded are held back too.
 //
+// POST /v1/tokenize counts raw text with a model's tokenizer, without its
+// chat template (v4.11.0 source, TokenizeEndpoint), so the adapter is a
+// backend.Tokenizer, not a backend.TokenCounter.
+//
 // /system, /api/aliases and /api/settings are admin endpoints, so with
 // LocalAI's API keys set, apiKey must be an admin key.
 package localai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -58,6 +63,33 @@ func New(entry config.Entry) (*Backend, error) {
 	b.Backend = base
 	b.limited.Store(true)
 	return b, nil
+}
+
+// Tokenize counts text's tokens on model through /v1/tokenize, counted as a
+// pending request while it runs, since it loads the model as a chat would.
+func (b *Backend) Tokenize(ctx context.Context, model, text string, client backend.Client) (int, error) {
+	body, err := json.Marshal(map[string]string{"model": model, "content": text})
+	if err != nil {
+		return 0, err
+	}
+	resp, err := b.Send(ctx, backend.ChatRequest{Protocol: backend.OpenAIChat, Body: body, Client: client}, "/v1/tokenize", nil)
+	if err != nil {
+		return 0, err
+	}
+	data, err := openaihttp.ReadBody(resp)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("tokenizing for '%s': status %d: %s", model, resp.StatusCode, data)
+	}
+	var tokenized struct {
+		Tokens []int32 `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &tokenized); err != nil {
+		return 0, fmt.Errorf("tokenizing for '%s': %w", model, err)
+	}
+	return len(tokenized.Tokens), nil
 }
 
 // ListModels returns every model LocalAI has, loaded or not, with its

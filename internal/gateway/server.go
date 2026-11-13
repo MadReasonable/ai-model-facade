@@ -260,11 +260,13 @@ func (s *server) facadeObject(ctx context.Context, m Model) facadeObject {
 // path the backend is called on differs.
 func (s *server) completions(protocol backend.Protocol) clientHandler {
 	return func(w http.ResponseWriter, r *http.Request, client backend.Client) {
-		s.complete(w, r, client, protocol)
+		s.complete(w, r, client, protocol, func(h virtualmodel.Handler, ctx context.Context, body []byte, client backend.Client) (virtualmodel.Result, error) {
+			return h.Chat(ctx, protocol, body, client)
+		})
 	}
 }
 
-func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend.Client, protocol backend.Protocol) {
+func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend.Client, protocol backend.Protocol, call func(virtualmodel.Handler, context.Context, []byte, backend.Client) (virtualmodel.Result, error)) {
 	start := time.Now()
 	family := familyOf(protocol)
 	rc := http.NewResponseController(w)
@@ -317,7 +319,10 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		return
 	}
 
-	res, err := handler.Chat(r.Context(), protocol, body, client)
+	res, err := call(handler, r.Context(), body, client)
+	if res.Estimated {
+		w.Header().Set(estimatedHeader, "true")
+	}
 	if len(res.Dropped) > 0 {
 		w.Header().Set(droppedHeader, strings.Join(res.Dropped, ", "))
 	}
@@ -350,7 +355,11 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 
 	attrs := []any{"model", name, "checked", res.Checked, "winner", res.Target, "reason", res.Reason, "status", status, "duration", time.Since(start).Round(time.Millisecond)}
 	if protocol != backend.OpenAIChat {
-		attrs = append(attrs, "endpoint", protocols.Of(protocol).Path)
+		endpoint := protocols.Of(protocol).Path
+		if strings.HasSuffix(r.URL.Path, "/count_tokens") {
+			endpoint += "/count_tokens"
+		}
+		attrs = append(attrs, "endpoint", endpoint)
 	}
 	if res.Backend != "" {
 		attrs = append(attrs, "backend", res.Backend)
@@ -421,6 +430,10 @@ func flush(f http.Flusher) {
 		f.Flush()
 	}
 }
+
+// estimatedHeader marks a token count as the gateway's estimate, not the
+// backend's own, since the two look alike in the body.
+const estimatedHeader = "X-Gateway-Estimated"
 
 // droppedHeader names the client's fields a translation left out. A client
 // relies on the gateway forwarding what it doesn't patch, so where it can't, it

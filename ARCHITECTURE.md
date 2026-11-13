@@ -74,7 +74,7 @@ Converts a request and its reply between protocols, for a request whose protocol
 The code is in two layers.
 Each protocol has a module, `chat.go` and `messages.go`, which reads that protocol's requests into small values and writes its replies through one writer used streamed and not (`chatWriter`, `messagesWriter`), so every translator answering a client of that protocol produces the same shapes.
 The pair has a file, `chat_messages.go`, holding the two translators between them, built on the two modules.
-`effort.go` holds the effort levels both directions share.
+`effort.go` and `estimate.go` hold the effort levels and the token estimate the pairs share.
 It runs before params, which are written in the protocol the adapter receives.
 
 ### `internal/selector`
@@ -93,6 +93,7 @@ It walks the patch, not the body, so keys the config doesn't mention are never t
 The contracts between the gateway and its adapters.
 `Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
 `ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages, which sends no `[DONE]`.
+Further optional capabilities are found by type assertion: `TokenCounter`, a backend's own Messages token count; and `Tokenizer`, counting raw text with a model's tokenizer.
 The markers the translators put on what the gateway made, such as unsigned thinking, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 
@@ -105,7 +106,7 @@ Rules about backend state are implemented here once, not in each adapter.
 ### `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`
 
 One adapter per kind of backend.
-`llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged.
+`llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged; `llamaswap` and `llamaserver` also forward a token count, and `localai` tokenizes text for one.
 `anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, and removes what the gateway made that only Claude may write.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.

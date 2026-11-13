@@ -2,6 +2,7 @@ package testkit
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -123,6 +124,8 @@ func (f *LlamaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.serveProps(w)
 	case "/v1/models", "/models":
 		f.serveModels(w)
+	case "/v1/messages/count_tokens":
+		fmt.Fprintf(w, `{"input_tokens":%d}`, FakeTokenCount)
 	case "/v1/chat/completions", "/v1/completions":
 		f.serveCompletion(w, r, gjson.GetBytes(body, "model").String())
 	default:

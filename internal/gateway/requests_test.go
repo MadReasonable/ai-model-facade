@@ -259,6 +259,7 @@ func TestMessages_WrongPathsAndMethodsAreInAnthropicsShape(t *testing.T) {
 		{"{}", http.MethodPost, "/anthropic/messages", http.StatusNotFound, "not_found_error", ""},
 		{"{}", http.MethodGet, "/anthropic", http.StatusNotFound, "not_found_error", ""},
 		{"{}", http.MethodGet, "/anthropic/v1/messages", http.StatusMethodNotAllowed, "invalid_request_error", "POST"},
+		{"{}", http.MethodGet, "/anthropic/v1/messages/count_tokens", http.StatusMethodNotAllowed, "invalid_request_error", "POST"},
 		{"{}", http.MethodPost, "/anthropic/v1/models", http.StatusMethodNotAllowed, "invalid_request_error", "GET, HEAD"},
 		{"{}", http.MethodDelete, "/anthropic/v1/models/ask", http.StatusMethodNotAllowed, "invalid_request_error", "GET, HEAD"},
 		{"{default: anthropic}", http.MethodPost, "/v1/chat/completions", http.StatusNotFound, "not_found_error", ""},
@@ -350,6 +351,68 @@ models:
 	r = messagesRequest(t, gw, "/anthropic/v1/messages", "", `{"model":"ask","stream":true,"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`, nil)
 	if r.StatusCode != http.StatusOK || !strings.HasPrefix(r.body, "event: message_start\n") || !strings.Contains(r.body, "event: message_stop\n") || strings.Contains(r.body, "[DONE]") {
 		t.Errorf("stream: got %d %s", r.StatusCode, r.body)
+	}
+}
+
+// A count goes through selection like a chat, to the backend's own count where
+// it has one, with generation-only fields out, since the Claude API refuses
+// them. A backend that can only tokenize text has the text counted there and
+// the rest estimated, and one that can't count gets an estimate; both are
+// marked as estimates.
+func TestMessages_CountsTokensOnTheSelectedBackend(t *testing.T) {
+	claude := testkit.NewAnthropic(t, "claude-a")
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	server := testkit.NewOllama(t, "a:1")
+	local := testkit.NewLocalAI(t, 0, "m")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+  ollama: {type: ollama, baseUrl: "`+server.URL+`"}
+  localAi: {type: localAi, baseUrl: "`+local.URL+`"}
+models:
+  onClaude:
+    backend: claude
+    params: {all: {max_tokens: 9}, anthropicMessages: {thinking: {type: adaptive}}}
+    candidates: [{model: claude-a}]
+  onSwap: {backend: swap, candidates: [{model: "qwen3.6-35b-a3b:q8_0"}]}
+  onOllama: {backend: ollama, candidates: [{model: "a:1", loadIfNone: true}]}
+  onLocalAi: {backend: localAi, candidates: [{model: m, loadIfNone: true}]}
+`, nil)
+	body := func(facade string) string {
+		return `{"model":"` + facade + `","system":"` + strings.Repeat("s", 400) + `","messages":[{"role":"user","content":"hi"}]}`
+	}
+	want := `{"input_tokens":42}`
+	r := messagesRequest(t, gw, "/anthropic/v1/messages/count_tokens", "", body("onClaude"), nil)
+	if r.StatusCode != http.StatusOK || r.body != want || r.Header.Get("X-Gateway-Estimated") != "" {
+		t.Errorf("Claude: got %d %s", r.StatusCode, r.body)
+	}
+	sent, ok := claude.Last("POST /v1/messages/count_tokens")
+	if !ok || gjson.Get(sent.Body, "model").String() != "claude-a" || gjson.Get(sent.Body, "thinking.type").String() != "adaptive" || gjson.Get(sent.Body, "max_tokens").Exists() {
+		t.Errorf("Claude was sent %+v", sent)
+	}
+	if n := claude.Count("POST /v1/messages"); n != 0 {
+		t.Errorf("%d chats reached the API, want none", n)
+	}
+	r = messagesRequest(t, gw, "/anthropic/v1/messages/count_tokens", "", body("onSwap"), nil)
+	if r.StatusCode != http.StatusOK || r.body != want || r.target() != "qwen3.6-35b-a3b:q8_0" {
+		t.Errorf("llama-swap: got %d %s", r.StatusCode, r.body)
+	}
+	r = messagesRequest(t, gw, "/anthropic/v1/messages/count_tokens", "", body("onOllama"), nil)
+	if r.StatusCode != http.StatusOK || gjson.Get(r.body, "input_tokens").Int() != 113 || r.Header.Get("X-Gateway-Estimated") != "true" {
+		t.Errorf("Ollama: got %d %s", r.StatusCode, r.body)
+	}
+	if n := server.Count("POST /v1/messages/count_tokens") + server.Count("POST /v1/chat/completions"); n != 0 {
+		t.Errorf("an estimate made %d requests to Ollama, want none", n)
+	}
+	r = messagesRequest(t, gw, "/anthropic/v1/messages/count_tokens", "", body("onLocalAi"), nil)
+	if r.StatusCode != http.StatusOK || gjson.Get(r.body, "input_tokens").Int() != 15 || r.Header.Get("X-Gateway-Estimated") != "true" {
+		t.Errorf("LocalAI: got %d %s", r.StatusCode, r.body)
+	}
+	if sent, ok := local.Last("POST /v1/tokenize"); !ok || gjson.Get(sent.Body, "model").String() != "m" || gjson.Get(sent.Body, "content").String() != strings.Repeat("s", 400)+"\nhi" {
+		t.Errorf("LocalAI was sent %+v", sent)
 	}
 }
 

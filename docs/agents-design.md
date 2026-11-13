@@ -66,6 +66,7 @@ Three interfaces separate the stages, and each one is where a kind of extension 
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
 Further capabilities follow the same pattern: an interface a backend may implement, found by type assertion (`backend.Has`), and required by the selectors or facade types that need it.
+`backend.TokenCounter` (the backend's own Messages count) and `backend.Tokenizer` (raw text counted with a model's tokenizer) are two of them.
 A backend that refers to other backends, as the Open WebUI adapter's `links` do, implements `Link`, which the gateway calls once every backend exists.
 
 ### Facade types
@@ -536,6 +537,16 @@ Decided (2026-11-10): reasoning and text that arrive while the first call's bloc
 Reasoning effort levels differ between vendors (verified 2026-11-10): Claude takes `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI `none`, `low`, `medium`, `high` and `xhigh`, and `minimal` on some models.
 A level crosses as itself where both have it, else as the nearest the other has (`effort.go`): `none` and `minimal` reach Claude as `low`, and `max` reaches OpenAI as `xhigh`.
 A level neither knows passes on as sent, for the backend to accept or refuse.
+
+### Token counts
+
+A Messages client's token count runs selection as a chat would, and is answered in the first way the winner's backend allows.
+A backend with its own count (`backend.TokenCounter`: the Claude API, llama-server, llama-swap) is sent the request with the facade's params and without the fields that only shape a reply.
+LocalAI's `/v1/tokenize` counts raw text with the model's tokenizer and applies no chat template (v4.11.0 source, `TokenizeEndpoint`), so for a `backend.Tokenizer` the request's text is counted there in one call and the template estimated; the call also loads the model, so it counts as a pending request (verified).
+Any other backend gets an estimate of four characters a token.
+Both estimates take the template from ChatML, which Qwen models use: 5 tokens around each message, the system prompt included, and 3 for the assistant turn it opens.
+Rendered by hand and tokenized, a request's ChatML prompt gave exactly the input tokens the request used (Qwen3-0.6B on LocalAI v4.11.0, 2026-11-10).
+Ollama 0.40.8 and LM Studio have no HTTP token count (source), so they keep the estimate; a count that is partly or wholly estimated is marked `X-Gateway-Estimated: true`.
 
 ## Errors
 

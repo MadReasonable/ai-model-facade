@@ -22,6 +22,10 @@ type Reply struct {
 	ErrorEvent string
 }
 
+// FakeTokenCount is what a fake backend that serves /v1/messages/count_tokens
+// answers.
+const FakeTokenCount = 42
+
 // DefaultBody is a minimal chat completion with a field the gateway doesn't
 // know, so tests can check that responses pass through unchanged.
 const DefaultBody = `{"choices":[{"message":{"content":"ok"}}],"x_extra":1}`
