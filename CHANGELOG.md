@@ -2,7 +2,7 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-12
 
 Clients built for Claude, or on OpenAI's Responses API, can use every facade, including those on local models.
 
@@ -135,7 +135,7 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
-[Unreleased]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.1...HEAD
+[0.3.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/MadReasonable/ai-model-facade/compare/v0.1.2...v0.1.3
