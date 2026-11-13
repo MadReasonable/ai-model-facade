@@ -40,6 +40,7 @@ logging:
 # What the gateway presents to the clients of each API family.
 # api:
 #   openAi:
+#     protocols: [openAiChat]   # left out, chat and legacy completions are both served
 #     # Adds `current`, where a request would go now, to /v1/models. Off, those
 #     # endpoints read no backend's state; /amf/models always reports it. A
 #     # gateway that is an Open WebUI connection needs it on if another gateway

@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
@@ -43,6 +46,47 @@ func TestRequests_ForwardLegacyCompletionsToTheirEndpoint(t *testing.T) {
 	}
 }
 
+// A candidate whose backend can't serve the request's protocol is skipped,
+// even if it is ready, and the skip is logged at error level. With no candidate
+// left the request gets 502 naming the protocols, and reaches no backend.
+func TestRequests_SkipACandidateThatCantServeTheProtocol(t *testing.T) {
+	claude := testkit.NewAnthropic(t, "claude-a")
+	webui := testkit.NewOpenWebUI(t, testkit.OllamaEntry("qwen3:1.7b", true))
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
+  webui: {type: openWebUi, baseUrl: "`+webui.URL+`", apiKey: k}
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  mixed:
+    candidates:
+      - {model: claude-a, backend: claude}
+      - {model: "qwen3.6-35b-a3b:q8_0", backend: swap}
+  onClaude: {backend: claude, candidates: [{model: claude-a}]}
+  onWebui: {backend: webui, candidates: [{model: "qwen3:1.7b"}]}
+`, nil)
+	r := gw.do(t, http.MethodPost, "/v1/completions", "", `{"model":"mixed","prompt":"x"}`)
+	if r.StatusCode != http.StatusOK || r.target() != "qwen3.6-35b-a3b:q8_0" {
+		t.Errorf("mixed: got %d %s", r.StatusCode, r.body)
+	}
+	gw.logs.waitFor(t, "level=ERROR msg=\"candidate skipped; its backend can't serve this protocol\" model=mixed candidate=claude-a backend=claude protocol=openAiCompletions")
+	for _, facade := range []string{"onClaude", "onWebui"} {
+		r := gw.do(t, http.MethodPost, "/v1/completions", "", `{"model":"`+facade+`","prompt":"x"}`)
+		if r.StatusCode != http.StatusBadGateway || !strings.Contains(r.body, "no candidate of this model can serve openAiCompletions") {
+			t.Errorf("%s: got %d %s", facade, r.StatusCode, r.body)
+		}
+	}
+	if n := claude.Count("POST /v1/messages"); n != 0 {
+		t.Errorf("%d requests reached the Claude API, want none", n)
+	}
+	if n := webui.Count("POST /api/v1/chats/new"); n != 0 {
+		t.Errorf("%d chats created on Open WebUI, want none", n)
+	}
+}
+
 // A Chat Completions client reaches a Claude candidate through the direct
 // translator, and the params for it are in Messages spelling, patching the
 // translated body: thinking stays as written, and a Chat Completions-only key
@@ -56,7 +100,9 @@ backends:
 models:
   ask:
     backend: claude
-    params: {thinking: {type: adaptive}, stop: [x]}
+    params:
+      openAiChat: {ignored: true}
+      anthropicMessages: {thinking: {type: adaptive}, stop: [x]}
     candidates: [{model: claude-a}]
 `, nil)
 	r := gw.chat(t, `{"model":"ask","max_tokens":5,"messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}]}`)
@@ -69,6 +115,68 @@ models:
 	req, ok := claude.Last("POST /v1/messages")
 	if want := `{"model":"claude-a","max_tokens":5,"system":[{"type":"text","text":"s"}],"messages":[{"role":"user","content":[{"type":"text","text":"u"}]}],"thinking":{"type":"adaptive"},"stop":["x"]}`; !ok || req.Body != want {
 		t.Errorf("sent %+v, want %s", req, want)
+	}
+}
+
+// A params map of protocol blocks patches each protocol in its own spelling:
+// `all` first, then the protocol's block, at both levels, then the model.
+func TestRequests_ApplyTheParamsBlockForTheProtocol(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  blocks:
+    backend: swap
+    params:
+      all: {max_tokens: 1}
+      openAiChat: {facadeChat: true}
+      openAiCompletions: {facadeLegacy: true}
+    candidates:
+      - model: qwen3.6-35b-a3b:q8_0
+        params:
+          all: {max_tokens: 2}
+          openAiChat: [{candidateChat: true}]
+`, nil)
+	for path, want := range map[string]string{
+		"/v1/chat/completions": `{"model":"qwen3.6-35b-a3b:q8_0","max_tokens":2,"facadeChat":true,"candidateChat":true}`,
+		"/v1/completions":      `{"model":"qwen3.6-35b-a3b:q8_0","max_tokens":2,"facadeLegacy":true}`,
+	} {
+		if r := gw.do(t, http.MethodPost, path, "", `{"model":"blocks"}`); r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d %s", path, r.StatusCode, r.body)
+		}
+		if req, ok := swap.Last("POST " + path); !ok || req.Body != want {
+			t.Errorf("%s: forwarded %+v", path, req)
+		}
+	}
+}
+
+// A facade's protocols list narrows what it serves; a request in another
+// protocol gets 404 naming them, and reaches no backend.
+func TestRequests_RefuseAProtocolTheFacadeDoesntList(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+backends:
+  swap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  chatOnly:
+    backend: swap
+    protocols: [openAiChat]
+    candidates: [{model: "qwen3.6-35b-a3b:q8_0"}]
+`, nil)
+	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"chatOnly"}`); r.StatusCode != http.StatusOK {
+		t.Errorf("chat: got %d %s", r.StatusCode, r.body)
+	}
+	r := gw.do(t, http.MethodPost, "/v1/completions", "", `{"model":"chatOnly","prompt":"x"}`)
+	if r.StatusCode != http.StatusNotFound || !strings.Contains(r.body, "not served over openAiCompletions; it serves openAiChat") {
+		t.Errorf("legacy: got %d %s", r.StatusCode, r.body)
+	}
+	if n := swap.Count("POST /v1/completions"); n != 0 {
+		t.Errorf("%d requests reached the backend, want none", n)
 	}
 }
 
@@ -175,4 +283,50 @@ func limitBody(t *testing.T, n int64) {
 	old := maxBodyBytes
 	maxBodyBytes = n
 	t.Cleanup(func() { maxBodyBytes = old })
+}
+
+// api.openAi.protocols turns protocols off gateway-wide: a protocol left out
+// has no route, and the others are served as before.
+func TestAPI_ServesOnlyTheProtocolsTurnedOn(t *testing.T) {
+	openAI := testkit.NewOpenAI(t, "gpt-a")
+	gw := startGateway(t, `
+server: {listen: "127.0.0.1:0"}
+api: {openAi: {protocols: [openAiChat]}}
+backends:
+  openAi: {type: openAi, baseUrl: "`+openAI.URL+`", apiKey: k}
+models:
+  ask: {backend: openAi, protocols: [openAiChat, openAiCompletions], candidates: [{model: gpt-a}]}
+`, nil)
+	if r := gw.do(t, http.MethodPost, "/v1/completions", "", `{"model":"ask","prompt":"hi"}`); r.StatusCode != http.StatusNotFound {
+		t.Errorf("completions: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"ask","messages":[{"role":"user","content":"hi"}]}`); r.StatusCode != http.StatusOK {
+		t.Errorf("chat: got %d %s", r.StatusCode, r.body)
+	}
+	if got := gjson.Get(gw.get(t, "/v1/models").body, "data.#.id").Raw; got != `["ask"]` {
+		t.Errorf("listing: %s", got)
+	}
+}
+
+// A protocol that isn't the family's, and a facade every protocol of which is
+// turned off, are config errors.
+func TestAPI_RefusesProtocolsItCantServe(t *testing.T) {
+	cases := map[string]string{
+		"{openAi: {protocols: [anthropicMessages]}}": "api.openAi.protocols: 'anthropicMessages' is not one of the family's protocols",
+		"{openAi: {protocols: [openAiCompletions]}}": "models.chatOnly: line 8: it serves only openAiChat, which api.openAi.protocols turns off",
+	}
+	for api, want := range cases {
+		cfg := parseConfig(t, `
+server: {listen: "127.0.0.1:0"}
+api: `+api+`
+backends:
+  claude: {type: anthropic, baseUrl: "http://127.0.0.1:1", apiKey: k}
+models:
+  ask: {backend: claude, candidates: [{model: claude-a}]}
+  chatOnly: {backend: claude, protocols: [openAiChat], candidates: [{model: claude-a}]}
+`, nil)
+		if _, err := Build(context.Background(), cfg, discard); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want %q", api, err, want)
+		}
+	}
 }

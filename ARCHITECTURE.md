@@ -42,7 +42,7 @@ Backend and facade entries stay as nodes, because each type decodes its own sche
 
 ### `internal/protocols`
 
-What the gateway knows about each protocol it serves and forwards, as a `Descriptor`: its endpoint path, how its stream is framed and ended, and its stream error event.
+What the gateway knows about each protocol it serves and forwards, as a `Descriptor`: its endpoint path, its API family, how its stream is framed and ended, and its stream error event.
 Code that needs one of these reads the descriptor (`protocols.Of`) instead of switching on the protocol, so a new protocol is a new descriptor.
 `protocols.Stream` reads a backend's stream by its protocol's framing, so no adapter special-cases a stream's end.
 
@@ -51,7 +51,7 @@ Code that needs one of these reads the descriptor (`protocols.Of`) instead of sw
 Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds.
-`server.go` is the front end: the OpenAI endpoints, at their descriptors' paths, auth, the routing-loop check, the selection log line, and SSE relay.
+`server.go` is the front end: the OpenAI endpoints, at their descriptors' paths, less the protocols `api.openAi.protocols` turns off, auth, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.
 
 ### `internal/virtualmodel`

@@ -59,6 +59,9 @@ type Handler interface {
 	// means Current is nil; Candidates are still filled.
 	Inspect(ctx context.Context) (Inspection, error)
 	Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error)
+	// Serves reports whether the facade takes requests in protocol, which its
+	// protocols list can narrow.
+	Serves(protocol backend.Protocol) bool
 	// Describe prints the entry's resolved configuration for the check command.
 	Describe(w io.Writer)
 }

@@ -16,12 +16,14 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/mergepatch"
 	"github.com/MadReasonable/ai-model-facade/internal/pipeline"
 	"github.com/MadReasonable/ai-model-facade/internal/selector"
+	"github.com/MadReasonable/ai-model-facade/internal/translate"
 )
 
 type candidatesConfig struct {
 	Type        string      `yaml:"type"`
 	Backend     string      `yaml:"backend"`
 	Description string      `yaml:"description"`
+	Protocols   []string    `yaml:"protocols"` // default: every protocol
 	Params      yaml.Node   `yaml:"params"`
 	Candidates  []yaml.Node `yaml:"candidates"`
 }
@@ -37,6 +39,8 @@ type candidateConfig struct {
 // candidate's params, then the model rewritten to the candidate's concrete ID.
 // Candidates may be on different backends.
 type candidates struct {
+	name         string
+	log          *slog.Logger
 	backendName  string          // the virtual model's own backend; "" if every candidate names one
 	backend      backend.Backend // nil likewise
 	backendNames []string        // per candidate
@@ -44,10 +48,11 @@ type candidates struct {
 	accepted     [][]backend.Protocol // per candidate: the protocols its backend accepts
 	catalogs     []*backend.Catalog   // per candidate: its backend's model list at startup
 	description  string
-	params       []mergepatch.Patch
+	protocols    []backend.Protocol // the protocols the facade serves; nil means all
+	params       protocolParams
 	selector     *selector.FirstLoaded
-	patches      [][]mergepatch.Patch // per candidate
-	passthrough  []string             // backends with passthroughAuth, when more than one
+	patches      []protocolParams // per candidate
+	passthrough  []string         // backends with passthroughAuth, when more than one
 }
 
 func newCandidates(entry config.Entry, env Env) (*candidates, error) {
@@ -55,14 +60,17 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 	if err := config.DecodeStrict(entry.Node, &c); err != nil {
 		return nil, err
 	}
-	m := &candidates{backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}}
+	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}}
 	if c.Backend != "" {
 		if m.backend = env.Backends[c.Backend]; m.backend == nil {
 			return nil, fmt.Errorf("line %d: backend '%s' is not defined", entry.Node.Line, c.Backend)
 		}
 	}
 	var err error
-	if m.params, err = mergepatch.Compile(&c.Params); err != nil {
+	if m.protocols, err = parseProtocols(c.Protocols, entry.Node.Line); err != nil {
+		return nil, err
+	}
+	if m.params, err = compileParams(&c.Params); err != nil {
 		return nil, err
 	}
 	if len(c.Candidates) == 0 {
@@ -101,15 +109,20 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		if err := candidate.Validate(); err != nil {
 			return nil, fmt.Errorf("line %d: %w", node.Line, err)
 		}
-		patches, err := mergepatch.Compile(&cc.Params)
+		accepted := b.Protocols()
+		for _, p := range m.protocols {
+			if !reaches(p, accepted) {
+				return nil, fmt.Errorf("line %d: facade '%s' lists protocol %s, which backend '%s' doesn't accept; it accepts %s", node.Line, entry.Name, p, name, joinProtocols(accepted))
+			}
+		}
+		patches, err := compileParams(&cc.Params)
 		if err != nil {
 			return nil, err
 		}
-		accepted := b.Protocols()
+		hasParams := !m.params.empty() || !patches.empty()
 		if slices.Contains(accepted, backend.AnthropicMessages) {
 			m.warnChatOnlyKeys(entry.Name, cc.Model, name, env.Log, patches)
 		}
-		hasParams := len(m.params)+len(patches) > 0
 		env.Check(backend.ListingCheck{Backends: []string{name}, Run: func(catalogs map[string]*backend.Catalog, warn func(error)) {
 			catalog := catalogs[name]
 			if !selector.IsGlob(candidate.Model) && !catalog.Contains(candidate.Model) {
@@ -139,8 +152,8 @@ var chatOnlyKeys = []string{"reasoning_effort", "response_format", "stop"}
 // backend receiving Messages, which would refuse it. It is a narrow exception
 // to nothing checking that a key suits the backend, for configs written when
 // the anthropic adapter translated params.
-func (m *candidates) warnChatOnlyKeys(facade, model, backendName string, log *slog.Logger, candidate []mergepatch.Patch) {
-	for _, patch := range append(append([]mergepatch.Patch(nil), m.params...), candidate...) {
+func (m *candidates) warnChatOnlyKeys(facade, model, backendName string, log *slog.Logger, candidate protocolParams) {
+	for _, patch := range append(m.params.appendFor(nil, backend.AnthropicMessages), candidate.appendFor(nil, backend.AnthropicMessages)...) {
 		for _, key := range chatOnlyKeys {
 			if patch.Has(key) {
 				log.Warn("params set a Chat Completions key on a candidate that receives Messages, which refuses it; use its Messages spelling", "model", facade, "candidate", model, "backend", backendName, "key", key)
@@ -247,18 +260,41 @@ func (m *candidates) Inspect(ctx context.Context) (Inspection, error) {
 	return inspection, err
 }
 
+func (m *candidates) Serves(protocol backend.Protocol) bool {
+	return m.protocols == nil || slices.Contains(m.protocols, protocol)
+}
+
 func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error) {
-	sel, err := m.selector.Select(ctx, body, m.backend)
+	sel, res, err := m.choose(ctx, protocol)
+	if err != nil {
+		return res, err
+	}
+	reply, err := pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
+	res.Chat = reply
+	return res, err
+}
+
+// choose runs selection for a request in protocol, among the candidates whose
+// backend it can reach, and returns the winner with the Result filled as far
+// as selection got.
+func (m *candidates) choose(ctx context.Context, protocol backend.Protocol) (selector.Selection, Result, error) {
+	if !m.Serves(protocol) {
+		return selector.Selection{}, Result{}, &pipeline.Error{Status: http.StatusNotFound, Type: "model_not_found", Message: fmt.Sprintf("this model is not served over %s; it serves %s", protocol, joinProtocols(m.protocols))}
+	}
+	reachable := m.reachable(protocol)
+	if !slices.Contains(reachable, true) {
+		return selector.Selection{}, Result{}, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("no candidate of this model can serve %s; its backends accept %s", protocol, m.acceptedProtocols())}
+	}
+	sel, err := m.selector.SelectAmong(ctx, m.backend, func(i int) bool { return reachable[i] })
 	res := Result{Target: sel.Target, AliasOf: sel.AliasOf, Checked: sel.Checked, Reason: sel.Reason}
 	if err != nil {
-		return res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
+		return sel, res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
 	}
 	if sel.Index < 0 {
-		return res, &pipeline.Error{Status: http.StatusServiceUnavailable, Type: "no_candidate_loaded", Message: "no candidate model is loaded"}
+		return sel, res, &pipeline.Error{Status: http.StatusServiceUnavailable, Type: "no_candidate_loaded", Message: "no candidate model is loaded"}
 	}
 	res.Backend = m.selector.Candidates[sel.Index].BackendName
-	res.Chat, err = pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
-	return res, err
+	return sel, res, nil
 }
 
 // selected is the winning candidate as the pipeline takes it.
@@ -270,8 +306,42 @@ func (m *candidates) selected(sel selector.Selection) pipeline.Selected {
 		Model:       sel.Target,
 		AliasOf:     sel.AliasOf,
 		Accepted:    m.accepted[i],
-		Params:      append(append([]mergepatch.Patch(nil), m.params...), m.patches[i]...),
+		Params:      func(protocol backend.Protocol) []mergepatch.Patch { return m.patchesFor(i, protocol) },
 	}
+}
+
+// reachable says, per candidate, whether its backend can serve protocol, and
+// logs each one that can't at error level: a request in that protocol can
+// never use it, which the config can't state unless the facade lists its
+// protocols.
+func (m *candidates) reachable(protocol backend.Protocol) []bool {
+	reachable := make([]bool, len(m.backends))
+	for i := range m.backends {
+		if reachable[i] = reaches(protocol, m.accepted[i]); !reachable[i] {
+			m.log.Error("candidate skipped; its backend can't serve this protocol", "model", m.name, "candidate", m.selector.Candidates[i].Model, "backend", m.backendNames[i], "protocol", protocol)
+		}
+	}
+	return reachable
+}
+
+// reaches reports whether a request in protocol can get to a backend that
+// may be sent these.
+func reaches(protocol backend.Protocol, accepted []backend.Protocol) bool {
+	_, _, ok := translate.Route(protocol, accepted)
+	return ok
+}
+
+// acceptedProtocols lists what any candidate's backend accepts, in order.
+func (m *candidates) acceptedProtocols() string {
+	var accepted []backend.Protocol
+	for _, protocols := range m.accepted {
+		for _, p := range protocols {
+			if !slices.Contains(accepted, p) {
+				accepted = append(accepted, p)
+			}
+		}
+	}
+	return joinProtocols(accepted)
 }
 
 // stateError reports that no candidate's backend state could be read.
@@ -304,18 +374,35 @@ func (m *candidates) Describe(w io.Writer) {
 			note = " (loadIfNone)"
 		}
 		fmt.Fprintf(w, "  %d. %s%s\n", i+1, c.On(c.Model), note)
-		patches := append(append([]mergepatch.Patch(nil), m.params...), m.patches[i]...)
-		for _, line := range describeAliases(c.Model, m.backendNames[i], m.catalogs[i], len(patches) > 0) {
+		hasParams := !m.params.empty() || !m.patches[i].empty()
+		for _, line := range describeAliases(c.Model, m.backendNames[i], m.catalogs[i], hasParams) {
 			fmt.Fprintf(w, "     %s\n", line)
 		}
-		if composed, ok := mergepatch.Compose(patches); ok {
-			fmt.Fprintf(w, "     params: %s\n", composed)
+		if !m.params.hasBlocks() && !m.patches[i].hasBlocks() {
+			describePatches(w, "params", m.patchesFor(i, ""))
 			continue
 		}
-		fmt.Fprintln(w, "     params (not expressible as one patch; applied in order):")
-		for _, p := range patches {
-			fmt.Fprintf(w, "       %s\n", p)
+		for _, protocol := range m.accepted[i] {
+			describePatches(w, fmt.Sprintf("params for %s", protocol), m.patchesFor(i, protocol))
 		}
+	}
+}
+
+// patchesFor returns candidate i's patches in application order, for a body
+// in protocol: the facade's for every protocol, its block, then the
+// candidate's two.
+func (m *candidates) patchesFor(i int, protocol backend.Protocol) []mergepatch.Patch {
+	return m.patches[i].appendFor(m.params.appendFor(nil, protocol), protocol)
+}
+
+func describePatches(w io.Writer, label string, patches []mergepatch.Patch) {
+	if composed, ok := mergepatch.Compose(patches); ok {
+		fmt.Fprintf(w, "     %s: %s\n", label, composed)
+		return
+	}
+	fmt.Fprintf(w, "     %s (not expressible as one patch; applied in order):\n", label)
+	for _, p := range patches {
+		fmt.Fprintf(w, "       %s\n", p)
 	}
 }
 

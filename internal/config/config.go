@@ -44,11 +44,21 @@ type API struct {
 	OpenAI APIFamily `yaml:"openAi"`
 }
 
+// The API families. A family holds one or more protocols; Messages belongs to
+// Anthropic's, which the gateway sends to the Claude API but doesn't serve.
+const (
+	FamilyOpenAI    = "openAi"
+	FamilyAnthropic = "anthropic"
+)
+
 // APIFamily configures one API family's endpoints.
 type APIFamily struct {
 	// AddCurrent adds `current` to the family's model objects. Off by default,
 	// since it makes a listing read backend state.
 	AddCurrent bool `yaml:"addCurrent"`
+	// Protocols are the family's protocols the gateway serves; nil means
+	// every one, and an empty list turns the family off.
+	Protocols []string `yaml:"protocols"`
 }
 
 // UnknownClient is the client name logged for a key not in server.apiKeys.

@@ -51,8 +51,9 @@ type Selected struct {
 	AliasOf string
 	// Accepted are the protocols the backend accepts.
 	Accepted []backend.Protocol
-	// Params are the patches for the request, in the order they apply.
-	Params []mergepatch.Patch
+	// Params returns the patches for a body in protocol, in the order they
+	// apply.
+	Params func(protocol backend.Protocol) []mergepatch.Patch
 }
 
 // Serve runs a request in protocol on the selected candidate, and returns
@@ -73,7 +74,7 @@ func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client b
 			return backend.ChatResult{}, gatewayError(err)
 		}
 	}
-	body, err := prepare(body, sel)
+	body, err := prepare(body, sel, to)
 	if err != nil {
 		return backend.ChatResult{}, gatewayError(err)
 	}
@@ -88,11 +89,11 @@ func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client b
 	return result, nil
 }
 
-// prepare applies the selected candidate's params, then rewrites model to its
-// ID, the last step before the backend sees it.
-func prepare(body []byte, sel Selected) ([]byte, error) {
+// prepare applies the selected candidate's params for a body in protocol,
+// then rewrites model to its ID, the last step before the backend sees it.
+func prepare(body []byte, sel Selected, protocol backend.Protocol) ([]byte, error) {
 	var err error
-	for _, patch := range sel.Params {
+	for _, patch := range sel.Params(protocol) {
 		if body, err = patch.Apply(body); err != nil {
 			return nil, err
 		}

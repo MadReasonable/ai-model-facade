@@ -61,7 +61,7 @@ Decided: the pipeline is a package of its own, not part of the facade type, so a
 
 Three interfaces separate the stages, and each one is where a kind of extension goes.
 
-- `backend.Backend` is the adapter: `ListModels`, `Chat` and `Protocols`, the formats its `Chat` accepts, from which the pipeline finds the route to it. A new kind of backend is a new package implementing it, usually on the shared `openaihttp` client and state cache, plus one case in `gateway.newBackend`.
+- `backend.Backend` is the adapter: `ListModels`, `Chat` and `Protocols`, the formats its `Chat` accepts. Selection runs over the candidates that can serve the request's protocol, directly or through a translator, so a ready model that can't never wins over one that can. A new kind of backend is a new package implementing it, usually on the shared `openaihttp` client and state cache, plus one case in `gateway.newBackend`.
 - `backend.ModelStateProvider` is an optional capability: `LoadedModels` reports ready, starting and unknown models. It is optional because a backend that can't report state can still serve a facade whose selector doesn't need it.
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
@@ -88,7 +88,7 @@ Every `params` value is a JSON Merge Patch (RFC 7386): objects merge key by key,
 Merging is the point of the project: a patch that sets `chat_template_kwargs.enable_thinking` keeps the client's other kwargs, which is what llama-swap's top-level replacement can't do.
 `params` may also be a list of patches applied in order, because YAML's `<<:` merge is shallow and would replace nested objects when combining anchors.
 
-The order is fixed: client body, then any translation to the protocol the backend receives, then the facade's params, then the winning candidate's params, then `model` rewritten to the chosen ID.
+The order is fixed: client body, then any translation to the protocol the backend receives, then the facade's params, then the winning candidate's params, each `all` before its protocol's block, then `model` rewritten to the chosen ID.
 Gateway params come after the client because they are the policy, not defaults.
 
 ### The walker

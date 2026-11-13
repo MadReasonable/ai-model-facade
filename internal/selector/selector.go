@@ -102,12 +102,23 @@ func (s *FirstLoaded) Requires() []backend.Capability {
 }
 
 func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend) (Selection, error) {
+	return s.SelectAmong(ctx, b, func(int) bool { return true })
+}
+
+// SelectAmong is Select over the candidates eligible says can serve this
+// request, by index. The selection order holds among them, so a ready model
+// that can't serve the request never wins over one that can.
+func (s *FirstLoaded) SelectAmong(ctx context.Context, b backend.Backend, eligible func(i int) bool) (Selection, error) {
 	sel := Selection{Index: -1}
 	states := s.states(ctx, b)
 	wait := -1     // first starting candidate, used if nothing is ready
 	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
 	var waitID, waitBase string
 	for i, c := range s.Candidates {
+		if !eligible(i) {
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": its backend can't serve this protocol")
+			continue
+		}
 		st := states[c.backendOr(b)]
 		<-st.done
 		state, id, base := st.classify(c)
@@ -149,7 +160,10 @@ func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend
 	// state was read, so only backends that couldn't be read at all fail
 	// the request.
 	var firstErr error
-	for _, c := range s.Candidates {
+	for i, c := range s.Candidates {
+		if !eligible(i) {
+			continue
+		}
 		if st := states[c.backendOr(b)]; st.err == nil || st.busy {
 			firstErr = nil
 			break

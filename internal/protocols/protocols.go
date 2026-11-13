@@ -1,6 +1,6 @@
 // Package protocols describes each protocol the gateway serves and forwards:
-// where its endpoint is, how its stream is framed and ended, and what a
-// broken stream's error event looks like. Code
+// where its endpoint is, which API family it belongs to, how its stream is
+// framed and ended, and what a broken stream's error event looks like. Code
 // that needs one of these reads the protocol's Descriptor rather than
 // switching on the protocol, so adding a protocol is adding a descriptor.
 package protocols
@@ -14,6 +14,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Descriptor is what the gateway knows about one protocol.
@@ -22,6 +23,9 @@ type Descriptor struct {
 	// Path is where the protocol is served, on the gateway, and on a backend
 	// that forwards it.
 	Path string
+	// Family is the API family whose key header, error shape and model list
+	// the protocol's clients use.
+	Family string
 	// Named means each stream event's type is on an event line ahead of its
 	// data, and the stream sends no [DONE], ending instead with an event of
 	// one of the LastEvents types, as Messages does. Otherwise
@@ -37,9 +41,9 @@ type Descriptor struct {
 // All are the protocols the gateway serves, in the order a client sees them
 // listed.
 var All = []Descriptor{
-	{Protocol: backend.OpenAIChat, Path: "/v1/chat/completions", ErrorEvent: openAIErrorEvent},
-	{Protocol: backend.OpenAICompletions, Path: "/v1/completions", ErrorEvent: openAIErrorEvent},
-	{Protocol: backend.AnthropicMessages, Path: "/v1/messages", Named: true, LastEvents: []string{"message_stop"}},
+	{Protocol: backend.OpenAIChat, Path: "/v1/chat/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
+	{Protocol: backend.OpenAICompletions, Path: "/v1/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
+	{Protocol: backend.AnthropicMessages, Path: "/v1/messages", Family: config.FamilyAnthropic, Named: true, LastEvents: []string{"message_stop"}},
 }
 
 // Of returns protocol p's descriptor. Every protocol a config can name has
@@ -51,6 +55,15 @@ func Of(p backend.Protocol) Descriptor {
 		}
 	}
 	panic("protocol '" + string(p) + "' has no descriptor")
+}
+
+// Names lists every protocol's name, for config errors.
+func Names() []backend.Protocol {
+	names := make([]backend.Protocol, len(All))
+	for i, d := range All {
+		names[i] = d.Protocol
+	}
+	return names
 }
 
 // Stream reads a backend's event stream in protocol p, ending it where p

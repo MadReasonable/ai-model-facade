@@ -7,7 +7,9 @@ Before 1.0, a minor release can change config keys.
 ### Added
 
 - `/amf/models` and `/amf/models/{id}`, the gateway's own listing: each facade with `current` and the state of every candidate, including those after the winner, so why a facade picked a model can be seen without reading the logs.
-- The `api` section, whose `api.openAi.addCurrent` adds `current` to the model list.
+- The `api` section: `api.openAi.addCurrent` adds `current` to the model list, and `api.openAi.protocols` turns a protocol off gateway-wide.
+- A facade's `protocols` list, which narrows the protocols that reach it.
+- Params blocks: `params` can hold a block per protocol, `openAiChat`, `openAiCompletions` or `anthropicMessages`, plus `all`, for a setting spelled differently in each API. A `params` without them applies to every protocol, as before.
 - `loopsBack` on a backend, for one whose state read can lead back to this gateway, such as an Open WebUI that has this gateway as a connection.
 
 ### Changed
@@ -17,6 +19,7 @@ Before 1.0, a minor release can change config keys.
 - **Breaking:** `current` on `/v1/models` is off by default, so that list reads no backend's state. A gateway that is a connection of an Open WebUI which a gateway reads needs `api.openAi.addCurrent: true`, or its facades read as unknown there; if that is the same gateway, its `openWebUi` backend also needs `loopsBack: true`.
 - **Breaking:** params for a candidate on an `anthropic` backend now patch the Messages body, after translation, so they are written in Messages spelling. `reasoning_effort`, `response_format` and `stop` in them were translated before, and now reach the Claude API, which refuses them; use `output_config` and `stop_sequences`. The gateway warns at load about those keys.
 - **Breaking:** `alias_of` in `current` is now `aliasOf`, as the gateway's other field names are camelCase.
+- A candidate whose backend can't serve a request's protocol is now skipped, so a legacy completion reaches a later candidate instead of failing at the first.
 
 ## [0.2.1] - 2026-11-02
 

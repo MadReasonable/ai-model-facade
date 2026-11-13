@@ -451,6 +451,22 @@ Gateway params override the client: they are patches, not defaults.
 The rest of the request passes through byte for byte, including messages, tools, `response_format` and vendor fields, in their original order.
 A translated request is the exception: it is rebuilt in the backend's API, and params patch it in that API's spelling; see [Client APIs](#client-apis).
 
+A setting can be spelled differently in each API, so `params`, at both levels, can hold a block per protocol, plus `all` for what applies whatever the protocol:
+
+```yaml
+params:
+  all: { max_tokens: 1000 }
+  openAiChat: { reasoning_effort: low }
+  anthropicMessages: { output_config: { effort: low } }
+```
+
+The patches apply in this order: the facade's `all`, its block for the protocol, the candidate's `all`, its block.
+The protocol is the one the backend receives, after any translation.
+Each block takes what `params` takes, a map or a list of maps.
+A `params` with neither `all` nor a protocol name among its keys is treated as `all`, and one that mixes them with other keys is a startup error.
+The block names are `openAiChat` (Chat Completions), `openAiCompletions` (legacy completions) and `anthropicMessages` (Messages).
+
+Without blocks, the same params apply to every protocol.
 Some params only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, which applies no chat template.
 
 `params` can also be a list of maps, applied in order.
@@ -471,10 +487,11 @@ params:
 
 The gateway serves OpenAI's API, which most clients and servers speak: Chat Completions at `/v1/chat/completions` and legacy completions at `/v1/completions`, so `http://<gateway>:8088/v1` is an OpenAI client's base URL.
 Every backend but the Claude API serves it, and the Claude API serves Anthropic's Messages API instead.
+A facade's `protocols` list can narrow which of them reach it; a request in a protocol it leaves out gets `404`.
 
 A request in the API its backend serves is forwarded as it came, apart from params and the model.
 A Chat Completions request for the Claude API is translated, and the reply, streamed or not, is translated back.
-Legacy completions are the exception: neither the Claude API nor Open WebUI serves them, and there is no translation for them, so a legacy completion that selects a candidate on either fails with `502`.
+Legacy completions are the exception: neither the Claude API nor Open WebUI serves them, and there is no translation for them, so a candidate on either is skipped for a legacy completion.
 
 #### Chat Completions on the Claude API
 
@@ -749,6 +766,7 @@ The `api` section configures what the gateway presents to the clients of each [c
 | Key | Description |
 |-----|-------------|
 | `openAi.addCurrent` | `true`: `/v1/models` and `/v1/models/{id}` include [`current`](#seeing-the-choice-before-a-request). Default `false`, so those endpoints answer from the config and read no backend's state. A gateway that is a connection of an Open WebUI which a gateway reads needs it on: see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
+| `openAi.protocols` | The protocols the gateway serves: `openAiChat` and `openAiCompletions`. Default: both. A protocol left out has no endpoint, so a request in it gets `404`. A facade whose [`protocols`](#models) are all turned off is a startup error. |
 
 ### `backends`
 
@@ -859,7 +877,7 @@ Params for a candidate on this backend patch the Messages body, after translatio
 The gateway warns at load about `reasoning_effort`, `response_format` or `stop` in params for such a candidate, because the Claude API refuses them; use `output_config` and `stop_sequences`.
 
 Claude 5 models think by default, which counts towards `max_tokens`.
-The Claude API has no legacy `/v1/completions`; such a request fails with `502`.
+The Claude API has no legacy `/v1/completions`, so a request for it skips this candidate, and fails with `502` if no other candidate can serve it.
 
 #### Open WebUI
 
@@ -867,7 +885,7 @@ An `openWebUi` backend is an Open WebUI instance, which runs each request throug
 Model IDs are the ones Open WebUI lists, prefixes included.
 The API key needs these Open WebUI endpoints: `/api/models`, `/api/v1/chats/new`, `/api/chat/completions`, `/api/v1/chats/{id}` (`GET` and `DELETE`), `/api/tasks/chat/{id}` and `/api/tasks/chat/{id}/stop`, plus `/api/v1/chats/{id}/archive` with `chats: archive`.
 
-Open WebUI has no legacy `/v1/completions`; such a request fails with `502`.
+Open WebUI has no legacy `/v1/completions`, so a request for it skips this candidate, and fails with `502` if no other candidate can serve it.
 
 Beyond the shared keys, it takes:
 
@@ -886,6 +904,7 @@ Each entry is a facade, and its name is what clients request.
 |-----|-------------|
 | `backend` | Name of a `backends` entry: the default for its candidates. Required unless every candidate names its own. |
 | `candidates` | The models to choose from, in order of preference. Required. |
+| `protocols` | The protocols this facade serves, from `openAiChat` and `openAiCompletions`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
 | `params` | Applied to every request for this facade. Optional. See [Params](#params). |
 | `description` | Shown in the model lists and `/amf/models`. Optional. |
 | `type` | Facade type. `candidates`, the default, is the only type today. |
@@ -938,10 +957,10 @@ The gateway's own errors use these codes:
 |--------|---------|
 | `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for. |
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching key. |
-| `404` | The requested model isn't a facade, or the path doesn't exist. |
+| `404` | The requested model isn't a facade, its `protocols` list leaves out the request's protocol, or the path doesn't exist. |
 | `405` | The path doesn't take this method. |
 | `413` | The body is over 100 MiB. |
-| `502` | The backend couldn't be reached or failed the request, no backend's state could be read, or the chosen candidate's backend can't serve the request's protocol. |
+| `502` | The backend couldn't be reached or failed the request, no backend's state could be read, or no candidate's backend can serve the request's protocol. |
 | `503` | No candidate is eligible. |
 | `508` | Routing loop: the request has already passed through this facade of this gateway, e.g. via Open WebUI back to itself. |
 

@@ -26,6 +26,8 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 		{"loadIfNone on a pattern", "model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:*", "needs an exact model ID"},
 		{"unknown facade type", "    backend: llamaSwap\n    description", "    type: magic\n    backend: llamaSwap\n    description", `unknown type 'magic'`},
 		{"unknown backend type", "type: llamaSwap,", "type: vllm,", `unknown type 'vllm'`},
+		{"params mixing blocks and keys", "models:\n", "models:\n  mixed: {backend: llamaSwap, params: {all: {a: 1}, b: 2}, candidates: [{model: x}]}\n", "params mixes protocol blocks with the key 'b'"},
+		{"unknown protocol", "models:\n", "models:\n  bad: {backend: llamaSwap, protocols: [openAiChatt], candidates: [{model: x}]}\n", "unknown protocol 'openAiChatt'"},
 		{"negative retry", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", listRetrySeconds: -1`, "listRetrySeconds must not be negative"},
 	}
 	swap := newSwap(t)
@@ -40,6 +42,24 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 				t.Errorf("got %v, want an error with %q", err, c.want)
 			}
 		})
+	}
+}
+
+// A facade that lists a protocol one of its candidates can't be reached from is
+// a wrong config, since every request in that protocol would skip it.
+func TestBuild_RejectsAListedProtocolWithNoRoute(t *testing.T) {
+	cfg, err := parseConfigErr(`
+server: {listen: "127.0.0.1:0"}
+backends:
+  claude: {type: anthropic, baseUrl: "http://127.0.0.1:9", apiKey: k}
+models:
+  bad: {backend: claude, protocols: [openAiCompletions], candidates: [{model: x}]}
+`)
+	if err == nil {
+		_, err = Build(context.Background(), cfg, discard)
+	}
+	if err == nil || !strings.Contains(err.Error(), "lists protocol openAiCompletions, which backend 'claude' doesn't accept") {
+		t.Errorf("got %v", err)
 	}
 }
 

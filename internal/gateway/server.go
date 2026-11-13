@@ -51,8 +51,10 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/models/{id...}", s.authenticated(s.getModel))
 	mux.HandleFunc("GET /amf/models", s.authenticated(s.listFacades))
 	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(s.getFacade))
-	for _, p := range []backend.Protocol{backend.OpenAIChat, backend.OpenAICompletions} {
-		mux.HandleFunc("POST "+protocols.Of(p).Path, s.authenticated(s.completions(p)))
+	for _, d := range protocols.All {
+		if g.served[d.Protocol] {
+			mux.HandleFunc("POST "+d.Path, s.authenticated(s.completions(d.Protocol)))
+		}
 	}
 	// Every request carries its arrival time, so its state reads reuse any
 	// state fetched since then (backend.WithRequestStart).

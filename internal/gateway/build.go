@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
@@ -20,6 +21,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openai"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
 )
 
@@ -36,6 +38,8 @@ type Gateway struct {
 	// see runPending.
 	pending []backend.ListingCheck
 	stop    context.CancelFunc
+	// served are the protocols the gateway serves, by api.openAi.protocols.
+	served map[backend.Protocol]bool
 }
 
 type Model struct {
@@ -52,6 +56,10 @@ type Model struct {
 // Startup notes, such as candidates that resolve to aliases, go to log.
 func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway, error) {
 	g := &Gateway{Config: cfg, backends: map[string]backend.Backend{}}
+	var err error
+	if g.served, err = servedProtocols(cfg.API); err != nil {
+		return nil, err
+	}
 	warn := func(err error) {
 		g.Warnings = append(g.Warnings, err)
 		log.Warn(err.Error())
@@ -98,6 +106,9 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 		if err != nil {
 			return nil, fmt.Errorf("models.%s: %w", e.Name, err)
 		}
+		if err := g.checkServed(h); err != nil {
+			return nil, fmt.Errorf("models.%s: line %d: %w", e.Name, e.Node.Line, err)
+		}
 		g.Models = append(g.Models, Model{Name: e.Name, Handler: h})
 	}
 	for _, c := range checks {
@@ -108,6 +119,45 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 		c.Run(g.catalogs, warn)
 	}
 	return g, nil
+}
+
+// checkServed refuses a facade that serves only protocols the gateway turns
+// off, which no request could reach.
+func (g *Gateway) checkServed(h virtualmodel.Handler) error {
+	var own []string
+	for _, p := range protocols.Names() {
+		if h.Serves(p) {
+			if g.served[p] {
+				return nil
+			}
+			own = append(own, string(p))
+		}
+	}
+	return fmt.Errorf("it serves only %s, which api.openAi.protocols turns off; add one of them there, or a protocol the gateway serves to its protocols", strings.Join(own, ", "))
+}
+
+// servedProtocols returns the protocols the gateway serves: the OpenAI
+// family's that api.openAi.protocols names, or all of them when it is left
+// out.
+func servedProtocols(api config.API) (map[backend.Protocol]bool, error) {
+	var own []string
+	for _, d := range protocols.All {
+		if d.Family == config.FamilyOpenAI {
+			own = append(own, string(d.Protocol))
+		}
+	}
+	names := api.OpenAI.Protocols
+	if names == nil {
+		names = own
+	}
+	served := map[backend.Protocol]bool{}
+	for _, name := range names {
+		if !slices.Contains(own, name) {
+			return nil, fmt.Errorf("api.openAi.protocols: '%s' is not one of the family's protocols; use %s", name, strings.Join(own, ", "))
+		}
+		served[backend.Protocol(name)] = true
+	}
+	return served, nil
 }
 
 // linker is a backend that refers to other backends. Link resolves those
