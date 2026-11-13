@@ -393,7 +393,7 @@ func (s *server) stream(w http.ResponseWriter, r *http.Request, stream backend.C
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	for {
+	for sent := 0; ; sent++ {
 		data, err := stream.Next()
 		if err == io.EOF {
 			if !d.Named {
@@ -406,7 +406,7 @@ func (s *server) stream(w http.ResponseWriter, r *http.Request, stream backend.C
 			if r.Context().Err() != nil {
 				return fmt.Errorf("client went away: %w", err)
 			}
-			writeEvent(w, d, d.ErrorEvent(err))
+			writeEvent(w, d, d.ErrorEvent(err, sent))
 			flush(flusher)
 			return err
 		}

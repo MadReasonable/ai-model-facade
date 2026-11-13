@@ -1,7 +1,7 @@
 // Package openai is the backend adapter for OpenAI's API, through its Chat
-// Completions and legacy Completions endpoints, and for any hosted API that
-// serves them the same way, such as OpenRouter's. Model IDs come from GET
-// /v1/models.
+// Completions, Responses and legacy Completions endpoints, and for any hosted
+// API that serves them the same way, such as OpenRouter's. Model IDs come from
+// GET /v1/models.
 //
 // A hosted model needs no load, so every listed model is ready while the API
 // answers, and a state read answers from the latest list without calling the
@@ -19,8 +19,8 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
-// Backend serves both completion endpoints through the embedded client, since
-// OpenAI serves them at their own paths.
+// Backend serves every endpoint through the embedded client, since OpenAI
+// serves them at their own paths.
 type Backend struct {
 	*openaihttp.Backend
 	listed *openaihttp.ListedState
@@ -50,6 +50,11 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		req.Body = body
 	}
 	return b.Backend.Chat(ctx, req)
+}
+
+// Protocols adds Responses to what the embedded client forwards.
+func (b *Backend) Protocols() []backend.Protocol {
+	return []backend.Protocol{backend.OpenAIChat, backend.OpenAIResponses, backend.OpenAICompletions}
 }
 
 // ListModels returns every model the API lists, and keeps them as its state.

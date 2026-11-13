@@ -497,11 +497,11 @@ func completion(msg gjson.Result, legacy bool, created int64) []byte {
 	for _, block := range msg.Get("content").Array() {
 		switch block.Get("type").String() {
 		case "text":
-			b.text(block.Get("text").String())
+			b.text(block.Get("text").String(), nil)
 		case "thinking":
 			b.reason(block.Get("thinking").String())
 		case "tool_use":
-			b.arguments(b.call(block.Get("id").String(), block.Get("name").String()), block.Get("input").Raw)
+			b.arguments(b.call("function", block.Get("id").String(), block.Get("name").String()), block.Get("input").Raw)
 		}
 	}
 	b.finish(finishReason(msg.Get("stop_reason").String()), usageOf(msg.Get("usage").Get))
@@ -612,13 +612,13 @@ func (s *chunkStream) translate(event gjson.Result) {
 		block := event.Get("content_block")
 		switch block.Get("type").String() {
 		case "tool_use":
-			s.calls[index] = s.reply.call(block.Get("id").String(), block.Get("name").String())
+			s.calls[index] = s.reply.call("function", block.Get("id").String(), block.Get("name").String())
 		}
 	case "content_block_delta":
 		delta := event.Get("delta")
 		switch delta.Get("type").String() {
 		case "text_delta":
-			s.reply.text(delta.Get("text").String())
+			s.reply.text(delta.Get("text").String(), nil)
 		case "thinking_delta":
 			s.reply.reason(delta.Get("thinking").String())
 		case "input_json_delta":

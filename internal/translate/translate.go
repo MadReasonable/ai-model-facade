@@ -52,8 +52,12 @@ type pair struct{ from, to backend.Protocol }
 
 // direct holds the translators written for one pair of protocols.
 var direct = map[pair]Translator{
-	{backend.OpenAIChat, backend.AnthropicMessages}: chatToMessages{},
-	{backend.AnthropicMessages, backend.OpenAIChat}: messagesToChat{},
+	{backend.OpenAIChat, backend.AnthropicMessages}:      chatToMessages{},
+	{backend.AnthropicMessages, backend.OpenAIChat}:      messagesToChat{},
+	{backend.OpenAIResponses, backend.OpenAIChat}:        responsesToChat{},
+	{backend.OpenAIResponses, backend.AnthropicMessages}: responsesToMessages{},
+	{backend.OpenAIChat, backend.OpenAIResponses}:        chatToResponses{},
+	{backend.AnthropicMessages, backend.OpenAIResponses}: messagesToResponses{},
 }
 
 // Route picks the protocol to send a request in to a backend that accepts

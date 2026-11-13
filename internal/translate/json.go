@@ -2,6 +2,8 @@ package translate
 
 import (
 	"bytes"
+	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -67,4 +69,45 @@ func base64DataURL(url string) (mediaType, data string, ok bool) {
 // a real key, since quotes inside a JSON string are escaped.
 func bytesContain(body []byte, key string) bool {
 	return bytes.Contains(body, []byte(`"`+key+`"`))
+}
+
+// isSet reports whether a field asks for something: present, and not null,
+// false or empty.
+func isSet(value gjson.Result) bool {
+	switch {
+	case !value.Exists(), value.Type == gjson.Null, value.Type == gjson.False:
+		return false
+	case value.IsArray():
+		return len(value.Array()) > 0
+	case value.Type == gjson.String:
+		return value.String() != ""
+	}
+	return true
+}
+
+// reportSettings reports the settings of an object field other than those
+// translated, as field.setting.
+func reportSettings(gone *droppedFields, field string, value gjson.Result, translated ...string) {
+	value.ForEach(func(setting, v gjson.Result) bool {
+		if s := setting.String(); !slices.Contains(translated, s) && v.Type != gjson.Null {
+			gone.add(field + "." + s)
+		}
+		return true
+	})
+}
+
+// setPresent sets key to value, if the request gave one.
+func setPresent(dst, key string, value gjson.Result) string {
+	if !value.Exists() || value.Type == gjson.Null {
+		return dst
+	}
+	return setRaw(dst, key, value.Raw)
+}
+
+func rawItems(list gjson.Result) []json.RawMessage {
+	var items []json.RawMessage
+	for _, item := range list.Array() {
+		items = append(items, json.RawMessage(item.Raw))
+	}
+	return items
 }

@@ -237,6 +237,7 @@ type Protocol string
 const (
 	OpenAIChat        Protocol = "openAiChat"
 	OpenAICompletions Protocol = "openAiCompletions" // legacy text completions
+	OpenAIResponses   Protocol = "openAiResponses"
 	AnthropicMessages Protocol = "anthropicMessages"
 )
 
@@ -245,6 +246,19 @@ const (
 // back, but only Anthropic can sign one, so this marks a block that has to come
 // out before Claude sees it.
 const UnsignedThinking = "amf-unsigned"
+
+// OpenAIReasoning prefixes the signature of a thinking block the gateway made
+// from an OpenAI reasoning item: the item itself follows, base64-encoded, so a
+// Messages client that sends the block back sends OpenAI its own reasoning.
+// Like an unsigned block, it has to come out before Claude sees it.
+const OpenAIReasoning = "amf-openai:"
+
+// MadeByGateway reports whether a thinking block's signature is one of the
+// gateway's own, which Claude refuses. Claude's signatures are base64, which
+// has no '-', so none of them can start with "amf-".
+func MadeByGateway(signature string) bool {
+	return signature == UnsignedThinking || strings.HasPrefix(signature, OpenAIReasoning)
+}
 
 // ChatRequest is a completion request in either protocol; both share the
 // same body shape (`model`, `stream`) and response framing.

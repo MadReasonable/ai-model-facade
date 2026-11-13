@@ -627,15 +627,15 @@ func TestAPI_ServesOnlyTheProtocolsTurnedOn(t *testing.T) {
 	claude := testkit.NewAnthropic(t, "claude-a")
 	gw := startGateway(t, `
 server: {listen: "127.0.0.1:0"}
-api: {openAi: {protocols: [openAiChat]}, anthropic: {protocols: []}}
+api: {openAi: {protocols: [openAiResponses]}, anthropic: {protocols: []}}
 backends:
   claude: {type: anthropic, baseUrl: "`+claude.URL+`", apiKey: k}
 models:
   ask: {backend: claude, candidates: [{model: claude-a}]}
-  chatOrClaude: {backend: claude, protocols: [anthropicMessages, openAiChat], candidates: [{model: claude-a}]}
+  chatOrClaude: {backend: claude, protocols: [openAiChat, anthropicMessages, openAiResponses], candidates: [{model: claude-a}]}
 `, nil)
 	body := `{"model":"ask","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
-	for _, path := range []string{"/v1/completions", "/openai/v1/completions", "/anthropic/v1/messages"} {
+	for _, path := range []string{"/v1/chat/completions", "/openai/v1/chat/completions", "/anthropic/v1/messages"} {
 		if r := gw.do(t, http.MethodPost, path, "", body); r.StatusCode != http.StatusNotFound {
 			t.Errorf("%s: got %d %s", path, r.StatusCode, r.body)
 		}
@@ -643,8 +643,8 @@ models:
 	if r := gw.do(t, http.MethodGet, "/anthropic/v1/models", "", ""); r.StatusCode != http.StatusNotFound {
 		t.Errorf("Anthropic listing: got %d %s", r.StatusCode, r.body)
 	}
-	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", body); r.StatusCode != http.StatusOK {
-		t.Errorf("chat: got %d %s", r.StatusCode, r.body)
+	if r := gw.do(t, http.MethodPost, "/v1/responses", "", `{"model":"ask","input":"hi"}`); r.StatusCode != http.StatusOK {
+		t.Errorf("responses: got %d %s", r.StatusCode, r.body)
 	}
 	if got := gjson.Get(gw.get(t, "/v1/models").body, "data.#.id").Raw; got != `["ask","chatOrClaude"]` {
 		t.Errorf("OpenAI listing: %s", got)
@@ -656,7 +656,7 @@ models:
 func TestAPI_RefusesProtocolsItCantServe(t *testing.T) {
 	cases := map[string]string{
 		"{openAi: {protocols: [anthropicMessages]}}": "api.openAi.protocols: 'anthropicMessages' is not one of the family's protocols",
-		"{openAi: {protocols: [openAiCompletions]}}": "models.chatOnly: line 8: it serves only openAiChat, which api.<family>.protocols turns off",
+		"{openAi: {protocols: [openAiResponses]}}":   "models.chatOnly: line 8: it serves only openAiChat, which api.<family>.protocols turns off",
 	}
 	for api, want := range cases {
 		cfg := parseConfig(t, `

@@ -18,7 +18,7 @@ const allProtocolsBlock = "all"
 // paramsBlocks are the keys that make a params map a set of blocks. Every
 // protocol has a name no request field uses, so an old-style patch can't read
 // as a block, and it keeps today's meaning.
-var paramsBlocks = []backend.Protocol{backend.OpenAIChat, backend.OpenAICompletions, backend.AnthropicMessages}
+var paramsBlocks = []backend.Protocol{backend.OpenAIChat, backend.OpenAICompletions, backend.OpenAIResponses, backend.AnthropicMessages}
 
 // protocolParams is one `params` value. A setting is spelled differently in
 // each protocol, so it holds patches for every protocol and patches for one.

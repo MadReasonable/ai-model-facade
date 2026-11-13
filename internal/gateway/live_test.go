@@ -329,3 +329,19 @@ func TestLive_MessagesCountOnLocalAI(t *testing.T) {
 		}
 	}
 }
+
+// A Responses request for a local model is translated to Chat Completions and
+// back, whole or streamed, and its reasoning comes back as a reasoning item
+// with the model's own text, through a function tool loop.
+func TestLive_ResponsesOnALocalModel(t *testing.T) {
+	gw := startDevGateway(t, `
+  respondSwap: {backend: llamaSwap, candidates: [{model: llamaSwap-llm-1, loadIfNone: true}]}
+`, "llamaSwap")
+	for name, stream := range map[string]bool{"whole": false, "streamed": true} {
+		t.Run(name, func(t *testing.T) {
+			if reasoning := liveFunctionLoop(t, gw.gateway, "respondSwap", stream); reasoning.Get("content.0.type").String() != "reasoning_text" {
+				t.Errorf("reasoning item %s", reasoning.Raw)
+			}
+		})
+	}
+}

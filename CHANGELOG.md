@@ -4,18 +4,20 @@ Before 1.0, a minor release can change config keys.
 
 ## [Unreleased]
 
-Clients built for Claude can use every facade, including those on local models, through Anthropic's Messages API.
+Clients built for Claude, or on OpenAI's Responses API, can use every facade, including those on local models.
 
 ### Added
 
 - Anthropic's Messages API at `/anthropic/v1/messages`, streamed or not, so a client built for Claude, such as Claude Code, can use the gateway. A request for a candidate on an `anthropic` backend is forwarded unchanged apart from params and the model, and one for any other backend is translated to Chat Completions and its reply translated back.
+- OpenAI's Responses API at `/v1/responses`, streamed or not. A request for a candidate on an `openAi` backend is forwarded unchanged apart from params and the model, and one for any other backend is translated to Messages on the Claude API, or to Chat Completions, and its reply translated back. Claude's thinking comes back as a reasoning item that carries its signed thinking block, so a client that sends the item back gives Claude its thinking in a tool loop. Codex's `client_metadata`, which only OpenAI's service reads, is dropped toward other backends.
+- `useProtocol` on a candidate names the protocol its backend is sent. With `useProtocol: openAiResponses`, a Chat Completions or Messages request for a candidate on an `openAi` backend is translated to Responses, so a model OpenAI serves only there, such as its codex models, serves every client, and a Messages client in a tool loop gives OpenAI back its own reasoning. A Chat Completions client keeps its log probabilities and custom tools. A Messages client's `user_id` longer than the 128 characters OpenAI takes, as Claude Code's is, reaches `safety_identifier` as its SHA-256.
 - `X-Gateway-Dropped`, a response header naming the client's fields a translation left out, such as `thinking` or `cache_control`; the selection log line has the same list as `dropped`.
 - `/anthropic/v1/messages/count_tokens`, answered by the backend's own count on `anthropic`, `llamaServer` and `llamaSwap` backends, counted by the model's tokenizer with the chat template estimated on `localAi`, and estimated on the others; a count that is partly or wholly an estimate is marked `X-Gateway-Estimated: true`.
 - `/anthropic/v1/models` and `/anthropic/v1/models/{id}`, the facades in Anthropic's list format, each with the smallest output limit among the models it can select as its `max_tokens`.
 - `/amf/models` and `/amf/models/{id}`, the gateway's own listing: each facade with `current` and the state of every candidate, including those after the winner, so why a facade picked a model can be seen without reading the logs. Clients of either API can call it with the key in `Authorization` or `x-api-key`.
 - The `api` section: `default` gives the root to the OpenAI or the Anthropic API, `basePath` sets each API's path, `/openai` and `/anthropic` by default, `addCurrent` adds `current` to each API's model list, and `protocols` turns an API's protocols off gateway-wide.
 - A facade's `protocols` list, which narrows the APIs that reach it. A facade it leaves out of every protocol of an API isn't in that API's model list.
-- Params blocks: `params` can hold a block per protocol, `openAiChat`, `openAiCompletions` or `anthropicMessages`, plus `all`, for a setting spelled differently in each API. A `params` without them applies to every protocol, as before.
+- Params blocks: `params` can hold a block per protocol, `openAiChat`, `openAiCompletions`, `openAiResponses` or `anthropicMessages`, plus `all`, for a setting spelled differently in each API. A `params` without them applies to every protocol, as before.
 - `loopsBack` on a backend, for one whose state read can lead back to this gateway, such as an Open WebUI that has this gateway as a connection.
 - A wrong path or method under `/anthropic` gets a `404` or `405` in Anthropic's JSON error shape, as Anthropic's own API answers one.
 

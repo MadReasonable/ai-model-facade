@@ -304,6 +304,79 @@ func TestOpenAI_ListsModelsAndRefusesAnUnknownOne(t *testing.T) {
 	})
 }
 
+// A Responses request that leaves store on is kept: a later request names it
+// in previous_response_id, and the later response's input_items, oldest first
+// with order=asc and in pages, hold the entire conversation's input and the
+// earlier output. Its output comes back alone from GET /v1/responses/{id}. A
+// response made with store false is not kept, and naming an unknown one is a
+// 400 with the code previous_response_not_found.
+func TestOpenAI_KeepsAResponsesConversation(t *testing.T) {
+	forEachOpenAI(t, func(t *testing.T, b HostedDriver) {
+		auth := map[string]string{"Authorization": "Bearer " + b.Key()}
+		request := func(fields string) (int, string) {
+			return hostedCall(t, b, http.MethodPost, "/v1/responses", `{"model":`+strconv.Quote(b.Model())+`,"reasoning":{"effort":"minimal"},"max_output_tokens":64,`+fields+`}`, auth)
+		}
+		status, first := request(`"input":"Say first."`)
+		if status != http.StatusOK || gjson.Get(first, "object").String() != "response" {
+			t.Fatalf("first turn: %d %.500s", status, first)
+		}
+		status, second := request(`"previous_response_id":` + strconv.Quote(gjson.Get(first, "id").String()) + `,"input":[{"role":"user","content":"Say second."}]`)
+		if status != http.StatusOK {
+			t.Fatalf("second turn: %d %.500s", status, second)
+		}
+		id := gjson.Get(second, "id").String()
+		_, items := hostedCall(t, b, http.MethodGet, "/v1/responses/"+id+"/input_items?order=asc&limit=100", "", auth)
+		data := gjson.Get(items, "data").Array()
+		if len(data) < 3 || gjson.Get(items, "has_more").Bool() || data[0].Get("content.0.text").String() != "Say first." || data[len(data)-1].Get("content.0.text").String() != "Say second." || data[1].Get("type").String() == "message" && data[1].Get("role").String() == "user" {
+			t.Errorf("input_items: %.1500s", items)
+		}
+		_, page := hostedCall(t, b, http.MethodGet, "/v1/responses/"+id+"/input_items?order=asc&limit=1", "", auth)
+		if !gjson.Get(page, "has_more").Bool() || gjson.Get(page, "last_id").String() != data[0].Get("id").String() {
+			t.Errorf("a page of input_items: %.500s", page)
+		}
+		_, after := hostedCall(t, b, http.MethodGet, "/v1/responses/"+id+"/input_items?order=asc&limit=1&after="+data[0].Get("id").String(), "", auth)
+		if gjson.Get(after, "data.0.id").String() != data[1].Get("id").String() {
+			t.Errorf("the page after: %.500s", after)
+		}
+		if _, response := hostedCall(t, b, http.MethodGet, "/v1/responses/"+id, "", auth); gjson.Get(response, "output.#.id").Raw != gjson.Get(second, "output.#.id").Raw || !strings.HasPrefix(gjson.Get(second, "output.#.id").Raw, `["`) {
+			t.Errorf("GET the response: %.500s", response)
+		}
+		_, unstored := request(`"store":false,"input":"Say third."`)
+		if status, _ := hostedCall(t, b, http.MethodGet, "/v1/responses/"+gjson.Get(unstored, "id").String(), "", auth); status != http.StatusNotFound {
+			t.Errorf("GET a response made with store false: %d", status)
+		}
+		status, unknown := request(`"previous_response_id":"resp_0000000000000000000000000000000000000000000000000000","input":"hi"`)
+		if status != http.StatusBadRequest || gjson.Get(unknown, "error.code").String() != "previous_response_not_found" {
+			t.Errorf("an unknown previous_response_id: %d %.500s", status, unknown)
+		}
+	})
+}
+
+// A streamed Responses request is answered with named events, each event line
+// repeating its data's type, numbered from 0 in sequence_number, and ending
+// with response.completed and no [DONE].
+func TestOpenAI_StreamsResponsesAsNamedEvents(t *testing.T) {
+	forEachOpenAI(t, func(t *testing.T, b HostedDriver) {
+		auth := map[string]string{"Authorization": "Bearer " + b.Key()}
+		status, stream := hostedCall(t, b, http.MethodPost, "/v1/responses", `{"model":`+strconv.Quote(b.Model())+`,"reasoning":{"effort":"minimal"},"max_output_tokens":64,"stream":true,"input":"Say hi."}`, auth)
+		if status != http.StatusOK || strings.Contains(stream, "[DONE]") {
+			t.Fatalf("%d %.500s", status, stream)
+		}
+		var types []string
+		for i, event := range strings.Split(strings.TrimSpace(stream), "\n\n") {
+			name, data, _ := strings.Cut(event, "\n")
+			data = strings.TrimPrefix(data, "data: ")
+			if name != "event: "+gjson.Get(data, "type").String() || gjson.Get(data, "sequence_number").Int() != int64(i) {
+				t.Errorf("event %d: %.300s", i, event)
+			}
+			types = append(types, gjson.Get(data, "type").String())
+		}
+		if len(types) < 3 || types[0] != "response.created" || types[len(types)-1] != "response.completed" {
+			t.Errorf("events %v", types)
+		}
+	})
+}
+
 // The Claude API takes a bearer token on both endpoints the gateway uses. It
 // lists its models only with an anthropic-version header, a page at a time,
 // each page saying whether another follows and which model the next one

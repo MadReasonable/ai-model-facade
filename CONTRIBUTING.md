@@ -56,7 +56,7 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | `internal/protocols` | Each protocol's descriptor: how its stream is framed and ended, and its stream error event. |
 | `internal/pipeline` | The run after selection, the same for every facade type: route, translation, params, model and the backend call. |
 | `internal/translate` | Each pair's translators, request and reply, streamed and not, and each protocol's module. |
-| `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
+| `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `responses`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |
 
 Helpers used across one package's test files live in its `helpers_test.go`.
@@ -93,9 +93,11 @@ They skip without `AMF_LIVE` too; run them with:
 
     AMF_LIVE=http://127.0.0.1:18090 go test ./internal/gateway/ -run Live
 
-Its Messages checks serve a facade on the real Claude API, so they skip without `ANTHROPIC_API_KEY` rather than `AMF_LIVE`, and need no Docker; `ANTHROPIC_LIVE_MODEL` names their model, and a run costs a few tokens:
+Its checks on the hosted APIs, in `live_messages_test.go` and `live_responses_test.go`, serve facades on the real Claude and OpenAI APIs, so they skip without the key of each API they reach, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, rather than `AMF_LIVE`, and need no Docker.
+`ANTHROPIC_LIVE_MODEL` and `OPENAI_LIVE_MODEL` name their models, and a run costs a few tokens.
+Without `AMF_LIVE`, this runs only the checks on the hosted APIs:
 
-    ANTHROPIC_API_KEY=... go test ./internal/gateway/ -run Live_Messages
+    ANTHROPIC_API_KEY=... OPENAI_API_KEY=... go test ./internal/gateway/ -run Live
 
 Both sets change the same backends, so a test process holds dev-env, through a lock file in the temp directory, from its first live check until it exits.
 They can therefore run in one `go test ./...`, where packages run at the same time: the second package to reach a live check waits for the first to finish.

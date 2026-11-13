@@ -7,7 +7,7 @@ That model is a facade, and the gateway picks a real model from a list you wrote
 Models and even backends can be swapped without any change on the client side.
 
 It is one compiled binary with one configuration file, and runs as a service or as a container from the published image.
-It serves OpenAI's Chat Completions API and Anthropic's Messages API at the same time, and translates between them, so a client built for either works with any backend.
+It serves OpenAI's Chat Completions and Responses APIs and Anthropic's Messages API at the same time, and translates between them, so a client built for any of them works with any backend.
 OpenAI, Claude, llama-swap, llama.cpp's llama-server, LM Studio, LocalAI, Ollama and Open WebUI are all supported.
 
 The simplest config would map a single facade to a single backend model.
@@ -29,7 +29,7 @@ A facade moves that decision out of every client and into one place, where it is
 
 **Evaluate models without re-pointing clients.** A facade wired into clients such as Cline, llama.vscode or Home Assistant can list every model under evaluation as its candidates: quants of one model, or entirely different generations and families. Requests are routed to whichever model is loaded, so trying the next model means loading it on the backend, with no change to any client or to the gateway's config. Each response carries an `X-Gateway-Target` header naming the model that answered, so each result can be attributed to the model that produced it.
 
-**Claude clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded.
+**Claude and Responses clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded. A client built on OpenAI's Responses API is served the same way.
 
 **Keep keys and addresses out of clients.** Clients get one address and one key, the gateway's. The backends' addresses and keys live in the gateway's config, and a client's own key reaches a backend only where you turn passthrough on. In that respect it is a reverse proxy for LLM endpoints, limited to each API's chat, completion and model-list endpoints, and Claude's token count.
 
@@ -484,9 +484,11 @@ The patches apply in this order: the facade's `all`, its block for the protocol,
 The protocol is the one the backend receives, after any translation.
 Each block takes what `params` takes, a map or a list of maps.
 A `params` with neither `all` nor a protocol name among its keys is treated as `all`, and one that mixes them with other keys is a startup error.
-The block names are `openAiChat` (Chat Completions), `openAiCompletions` (legacy completions) and `anthropicMessages` (Messages).
+The block names are `openAiChat` (Chat Completions), `openAiCompletions` (legacy completions), `openAiResponses` (OpenAI's Responses API) and `anthropicMessages` (Messages).
 
 Without blocks, the same params apply to every protocol.
+That includes every protocol a candidate's backend supports, at the facade and the candidate alike: an `openAi` candidate supports Chat Completions, legacy completions and Responses, so an unblocked key spelled for Chat Completions reaches its Responses requests too, where OpenAI refuses `max_tokens` and `reasoning_effort` (verified 2026-11-12).
+A key in a protocol's block reaches only that protocol, and `null` in a candidate's block removes a facade's unblocked key for that protocol alone.
 Some params only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, which applies no chat template.
 
 `params` can also be a list of maps, applied in order.
@@ -507,11 +509,11 @@ params:
 
 The gateway serves two families of client APIs, each under a base path of its own, because both have a `/v1/models`, with different shapes:
 
-- **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions` and legacy completions at `/v1/completions`. Most clients and servers speak it, and every backend except the Claude API serves it.
+- **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions`, Responses at `/v1/responses`, and legacy completions at `/v1/completions`. Most clients and servers speak Chat Completions, and every backend except the Claude API serves it; of the backends only `openAi` serves Responses.
 - **Anthropic's**, under `/anthropic`: Messages at `/v1/messages`, and its token count. Clients built for Claude speak it, and only the Claude API serves it.
 
-These three protocols, Chat Completions, legacy completions and Messages, with each API's model list and the Messages token count, are everything the gateway serves.
-OpenAI's other APIs, such as Responses, embeddings, images, audio, Realtime, Batch, Files and Moderations, and Anthropic's, such as Message Batches and Files, are unsupported.
+These four protocols, Chat Completions, legacy completions, Responses and Messages, with each API's model list and the Messages token count, are everything the gateway serves.
+OpenAI's other APIs, such as embeddings, images, audio, Realtime, Batch, Files, Conversations and Moderations, and Anthropic's, such as Message Batches and Files, are unsupported.
 
 The root serves the OpenAI API too, so `http://<gateway>:8088/v1` is an OpenAI client's base URL; [`api.default`](#api) can give the root to Anthropic's instead.
 A client built for Claude uses `http://<gateway>:8088/anthropic`, with the gateway's key in `x-api-key` or `Authorization`.
@@ -519,8 +521,9 @@ A facade's `protocols` list can narrow which APIs reach it; a request in a proto
 Each API's model list holds every facade that serves it, in that API's format.
 
 A request in the API its backend serves is forwarded as it came, apart from params and the model.
-A request for a backend that serves only the other API is translated, and the reply, streamed or not, is translated back, so every facade works from both APIs.
-Legacy completions are the exception: neither the Claude API nor Open WebUI serves them, and there is no translation for them, so a candidate on either is skipped for a legacy completion.
+A request for a backend that serves another API is translated, and the reply, streamed or not, is translated back, so every facade works from every API.
+A backend that serves several APIs is sent the client's own, else Chat Completions, unless the candidate names the API with [`useProtocol`](#chat-completions-and-messages-through-responses).
+Legacy completions are the exception: neither the Claude API nor Open WebUI serves them, and there is no translation for them, so a candidate on either, or one sent as Responses, is skipped for a legacy completion.
 
 Of a client's request headers, only Anthropic's `anthropic-version` and `anthropic-beta` reach a backend, and only an `anthropic` one.
 
@@ -555,6 +558,48 @@ Fields that only tune sampling or configure OpenAI's own services, such as `seed
 A request that asks for what the Claude API can't give is refused with `400` before it is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, or a tool that isn't a function.
 
 A Chat Completions client can't send thinking back, since Chat Completions has no place for the signature it needs, so in a tool loop Claude continues without its earlier reasoning.
+
+#### Responses on other backends
+
+A Responses request that selects a candidate on any backend but `openAi` is translated: to Messages on the Claude API, and to Chat Completions everywhere else.
+
+- `instructions`, and system and developer messages wherever they stand, become the system prompt.
+- Messages, function calls and their outputs, images by URL or base64 data URL, and inline files translate both ways; the Claude API takes a file only as a PDF.
+- `max_output_tokens`, `reasoning.effort`, `text.format`, `tool_choice`, `parallel_tool_calls` and `user` translate to their counterparts, and other unknown keys, such as `top_k`, pass on unchanged.
+- Usage comes back in Responses' terms, with cache reads within `input_tokens`, and a reply cut off at its token limit comes back `incomplete`.
+
+Reasoning comes back as a reasoning item.
+A local model's reasoning is its `reasoning_text` content.
+Claude's thinking is its summary, since the thinking Claude returns is a summary of its own; recent Claude models, such as Claude Haiku 5.5, return no thinking text unless asked, so a request with `reasoning.summary` set asks Claude for it, as `thinking.display: summarized`.
+Claude accepts its thinking back only with the signature it was made with, so the item's `encrypted_content` carries the signed thinking block, and a client that sends the item back, as Responses clients do in a tool loop, gives Claude its own thinking.
+Any other reasoning item a request carries is dropped, since only the backend that made it can read it.
+
+Fields that only tune OpenAI's own services or what it returns beyond the response, such as `include`, `metadata`, `service_tier` and `prompt_cache_key`, are dropped.
+A request that needs OpenAI's servers is refused with `400`: a tool that isn't a function, such as web search or file search, `background`, `conversation`, `previous_response_id`, which names a response only OpenAI keeps, a stored `prompt`, an `item_reference`, or an image or file by file ID.
+So a Responses client on another backend sends its conversation every turn, in `input`; `store` is dropped, since only OpenAI keeps a response.
+
+#### Chat Completions and Messages through Responses
+
+A candidate on an `openAi` backend can be sent Responses instead of Chat Completions, with `useProtocol: openAiResponses`.
+OpenAI serves some models, such as its codex models, only through Responses, and Responses carries a reasoning model's reasoning from one turn to the next, which Chat Completions doesn't.
+A Chat Completions or Messages request for such a candidate is translated to Responses, and the reply, streamed or not, translated back.
+
+- Each Chat Completions message becomes an input item in its place, system and developer messages included; Messages' `system` becomes `instructions`.
+- Messages' `metadata.user_id` becomes `safety_identifier`, as its SHA-256 when it is longer than the 128 characters OpenAI takes.
+- Tool calls and their results, images by URL or base64, inline files and, from Messages, text documents translate both ways.
+- `max_tokens` or `max_completion_tokens`, `reasoning_effort` or `output_config.effort`, `response_format` or `output_config.format`, `verbosity`, `tool_choice` and `parallel_tool_calls` translate to their Responses counterparts, and other unknown keys pass on unchanged.
+- From Chat Completions, `logprobs` and `top_logprobs` translate, and the log probabilities come back in Chat Completions' shape, streamed or not.
+- From Chat Completions, custom tools, their calls and outputs, and a `tool_choice` naming one or listing `allowed_tools`, translate both ways.
+- Tools are sent not strict unless the client says otherwise, since Responses makes a tool strict by default, which needs every property required, and neither of the other APIs does.
+- The request isn't kept at OpenAI, unless a Chat Completions client set `store`, since both clients send their conversation every turn.
+
+A Chat Completions client gets a model's reasoning as `reasoning_content` when OpenAI returns a summary of it, which a facade's params can ask for with `reasoning.summary`.
+A Messages client with thinking on is sent the summary as thinking blocks, and the block's signature carries OpenAI's encrypted reasoning, so a client that sends the block back, as Claude's clients do in a tool loop, gives OpenAI its own reasoning.
+Before a Claude candidate sees that history, the gateway removes those blocks, as it removes `amf-unsigned` ones, and the Messages request to OpenAI leaves out Claude's own thinking blocks, which only Anthropic can read.
+
+Fields with no Responses counterpart that only tune sampling or Claude are dropped: `seed`, `presence_penalty`, `frequency_penalty` and `logit_bias`, and `top_k`, `cache_control` and a thinking budget.
+Thinking can't be turned off through Responses, where a reasoning model always reasons, so `thinking: {type: disabled}` is dropped too.
+A request that asks for what Responses can't give is refused with `400`: stop sequences, `n` above 1, audio, `web_search_options`, or a tool that is neither a function nor, from Chat Completions, a custom tool.
 
 #### Dropped fields
 
@@ -873,7 +918,7 @@ The `api` section configures what the gateway presents to the clients of each [c
 | `openAi.basePath`, `anthropic.basePath` | The path in front of the API's own paths, `/v1` included. Default `/openai` and `/anthropic`. |
 | `openAi.addCurrent` | `true`: `/v1/models` and `/v1/models/{id}` include [`current`](#seeing-the-choice-before-a-request). Default `false`, so those endpoints answer from the config and read no backend's state. A gateway that is a connection of an Open WebUI which a gateway reads needs it on: see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
 | `anthropic.addCurrent` | `true`: the Anthropic API's `/v1/models` and `/v1/models/{id}` include `current`. Default `false`, so that listing reads no backend's state. |
-| `openAi.protocols`, `anthropic.protocols` | The API's protocols the gateway serves: `openAiChat` and `openAiCompletions` for OpenAI, `anthropicMessages` for Anthropic. Default: all of them. A protocol left out has no endpoint, so a request in it gets `404`, and `[]` turns the API off, its model list included. A facade whose [`protocols`](#models) are all turned off is a startup error. |
+| `openAi.protocols`, `anthropic.protocols` | The API's protocols the gateway serves: `openAiChat`, `openAiCompletions` and `openAiResponses` for OpenAI, `anthropicMessages` for Anthropic. Default: all of them. A protocol left out has no endpoint, so a request in it gets `404`, and `[]` turns the API off, its model list included. A facade whose [`protocols`](#models) are all turned off is a startup error. |
 
 ### `backends`
 
@@ -976,6 +1021,9 @@ A model the API adds becomes a candidate the next time the list is read.
 
 OpenAI's newer models refuse `max_tokens`, so the gateway sends a chat's token limit as `max_completion_tokens`, with that name's value if a request has both.
 
+A Responses request reaches the backend untranslated, so another hosted API used as an `openAi` backend has to serve `/v1/responses` for a Responses client to use it (not checked on any API but OpenAI's).
+A model OpenAI serves only through Responses, such as its codex models, refuses Chat Completions, so its candidate needs [`useProtocol: openAiResponses`](#chat-completions-and-messages-through-responses) to serve Chat Completions and Messages clients.
+
 #### Anthropic
 
 An `anthropic` backend is Anthropic's Claude API, `https://api.anthropic.com`, reached through its Messages API.
@@ -1017,7 +1065,7 @@ Each entry is a facade, and its name is what clients request.
 |-----|-------------|
 | `backend` | Name of a `backends` entry: the default for its candidates. Required unless every candidate names its own. |
 | `candidates` | The models to choose from, in order of preference. Required. |
-| `protocols` | The protocols this facade serves, from `openAiChat`, `openAiCompletions` and `anthropicMessages`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
+| `protocols` | The protocols this facade serves, from `openAiChat`, `openAiCompletions`, `openAiResponses` and `anthropicMessages`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
 | `params` | Applied to every request for this facade. Optional. See [Params](#params). |
 | `description` | Shown in the model lists and `/amf/models`. Optional. |
 | `type` | Facade type. `candidates`, the default, is the only type today. |
@@ -1030,6 +1078,7 @@ Each candidate takes:
 | `backend` | The backend this candidate is on. Default: the facade's `backend`. |
 | `loadIfNone` | `true`: if no candidate is ready or starting, the first `loadIfNone` candidate is used and its backend loads it. Default `false`: only used when ready or starting. Must be an exact ID. |
 | `params` | Applied after the facade's `params` when this candidate wins. Optional. |
+| `useProtocol` | The protocol this candidate's backend is sent, one it accepts, such as `openAiResponses` on an `openAi` backend. Default: the client's own, else the first the request can be translated to. See [Chat Completions and Messages through Responses](#chat-completions-and-messages-through-responses). |
 
 ## API reference
 
@@ -1039,6 +1088,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | Endpoint | Description |
 |----------|-------------|
 | `POST /v1/chat/completions` | Chat Completions, streamed or not. Also under `/openai`. |
+| `POST /v1/responses` | OpenAI's Responses API, streamed or not; see [Responses on other backends](#responses-on-other-backends). Also under `/openai`. |
 | `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. Also under `/openai`. |
 | `GET /v1/models` | Lists only the facades, so clients that pick from a list see only those. Also under `/openai`. |
 | `GET /v1/models/{id}` | One facade, or `404`. Also under `/openai`. |
@@ -1088,7 +1138,8 @@ Under the Anthropic API's paths, a wrong path or method gets a JSON error in Ant
 
 Once a stream has started, its status can't change.
 If the backend fails mid-stream, the gateway sends a final error event and closes, so clients show an error instead of a silently cut-off reply.
-For Chat Completions and completions that is a `data: {"error": {...}}` event with no `[DONE]`; for Messages it is an `error` event, the backend's own if it sent one.
+For Chat Completions and completions that is a `data: {"error": {...}}` event with no `[DONE]`; for Messages it is an `error` event; for Responses it is an `error` event numbered after the events already sent, since Responses numbers every event.
+If the backend sent an error event of its own in the client's protocol, that event is relayed instead.
 
 ## Commands
 

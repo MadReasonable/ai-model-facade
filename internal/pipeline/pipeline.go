@@ -51,7 +51,8 @@ type Selected struct {
 	// set.
 	Model   string
 	AliasOf string
-	// Accepted are the protocols the backend accepts.
+	// Accepted are the protocols the backend may be sent for this candidate:
+	// every one it accepts, or the one useProtocol names.
 	Accepted []backend.Protocol
 	// Params returns the patches for a body in protocol, in the order they
 	// apply.

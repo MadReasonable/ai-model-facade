@@ -72,8 +72,8 @@ Runs a request after selection, the same way for every facade type: the route to
 Converts a request and its reply between protocols, for a request whose protocol the selected backend doesn't accept.
 `Route` picks the identity route when the backend accepts the protocol, otherwise a direct translator for the pair.
 The code is in two layers.
-Each protocol has a module, `chat.go` and `messages.go`, which reads that protocol's requests into small values and writes its replies through one writer used streamed and not (`chatWriter`, `messagesWriter`), so every translator answering a client of that protocol produces the same shapes.
-The pair has a file, `chat_messages.go`, holding the two translators between them, built on the two modules.
+Each protocol has a module, `chat.go`, `messages.go` and `responses.go`, which reads that protocol's requests into small values and writes its replies through one writer used streamed and not (`chatWriter`, `messagesWriter`, `responseBuilder`), so every translator answering a client of that protocol produces the same shapes.
+Each pair of protocols has a file, `chat_messages.go`, `chat_responses.go` and `messages_responses.go`, holding the two translators between them, built on the two modules.
 `effort.go` and `estimate.go` hold the effort levels and the token estimate the pairs share.
 It runs before params, which are written in the protocol the adapter receives.
 
@@ -92,7 +92,7 @@ It walks the patch, not the body, so keys the config doesn't mention are never t
 
 The contracts between the gateway and its adapters.
 `Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
-`ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages, which sends no `[DONE]`.
+`ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages and Responses, which send no `[DONE]`.
 Further optional capabilities are found by type assertion: `TokenCounter`, a backend's own Messages token count; and `Tokenizer`, counting raw text with a model's tokenizer.
 The markers the translators put on what the gateway made, such as unsigned thinking, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.

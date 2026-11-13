@@ -36,15 +36,17 @@ type chatWriter struct {
 	created      int64
 	chunks       [][]byte
 
-	content, reasoning strings.Builder
-	calls              []*chatCall
-	finished           string
-	usage              map[string]any
+	content, refusal, reasoning strings.Builder
+	logprobs                    []json.RawMessage
+	calls                       []*chatCall
+	finished                    string
+	usage                       map[string]any
 }
 
 type chatCall struct {
+	kind      string // function or custom
 	id, name  string
-	arguments strings.Builder
+	arguments strings.Builder // a custom call's input
 }
 
 func newChatWriter(streaming, includeUsage bool) *chatWriter {
@@ -55,16 +57,30 @@ func newChatWriter(streaming, includeUsage bool) *chatWriter {
 // assistant role.
 func (b *chatWriter) start(id, model string, created int64) {
 	b.id, b.model, b.created = id, model, created
-	b.send(map[string]any{"role": "assistant", "content": ""}, nil)
+	b.send(map[string]any{"role": "assistant", "content": ""}, nil, nil)
 }
 
-// text adds content.
-func (b *chatWriter) text(delta string) {
-	if delta == "" {
+// text adds content, with the log probabilities of its tokens if the
+// backend gave them.
+func (b *chatWriter) text(delta string, logprobs []json.RawMessage) {
+	if delta == "" && len(logprobs) == 0 {
 		return
 	}
 	b.content.WriteString(delta)
-	b.send(map[string]any{"content": delta}, nil)
+	b.logprobs = append(b.logprobs, logprobs...)
+	var choiceLogprobs any
+	if len(logprobs) > 0 {
+		choiceLogprobs = map[string]any{"content": logprobs}
+	}
+	b.send(map[string]any{"content": delta}, nil, choiceLogprobs)
+}
+
+func (b *chatWriter) refused(delta string) {
+	if delta == "" {
+		return
+	}
+	b.refusal.WriteString(delta)
+	b.send(map[string]any{"refusal": delta}, nil, nil)
 }
 
 // reason adds reasoning, as reasoning_content, the field llama-server uses.
@@ -73,25 +89,36 @@ func (b *chatWriter) reason(delta string) {
 		return
 	}
 	b.reasoning.WriteString(delta)
-	b.send(map[string]any{"reasoning_content": delta}, nil)
+	b.send(map[string]any{"reasoning_content": delta}, nil, nil)
 }
 
-// call opens a function call and returns its index, which its argument
-// deltas name.
-func (b *chatWriter) call(id, name string) int {
-	b.calls = append(b.calls, &chatCall{id: id, name: name})
+// call opens a tool call, function or custom, and returns its index, which
+// its argument deltas name.
+func (b *chatWriter) call(kind, id, name string) int {
+	b.calls = append(b.calls, &chatCall{kind: kind, id: id, name: name})
 	index := len(b.calls) - 1
 	if b.legacy {
 		if index == 0 {
-			b.send(map[string]any{"function_call": map[string]any{"name": name, "arguments": ""}}, nil)
+			b.send(map[string]any{"function_call": map[string]any{"name": name, "arguments": ""}}, nil, nil)
 		}
 		return index
 	}
-	b.send(map[string]any{"tool_calls": []any{map[string]any{"index": index, "id": id, "type": "function", "function": map[string]any{"name": name, "arguments": ""}}}}, nil)
+	opened := map[string]any{"index": index, "id": id, "type": kind}
+	opened[kind] = b.callFields(kind, name, "")
+	b.send(map[string]any{"tool_calls": []any{opened}}, nil, nil)
 	return index
 }
 
-// arguments adds to call index's arguments.
+// callFields is a call's name and arguments, or a custom call's input, in
+// the shape of its kind.
+func (b *chatWriter) callFields(kind, name, value string) map[string]any {
+	if kind == "custom" {
+		return map[string]any{"name": name, "input": value}
+	}
+	return map[string]any{"name": name, "arguments": value}
+}
+
+// arguments adds to call index's arguments, or a custom call's input.
 func (b *chatWriter) arguments(index int, delta string) {
 	if index < 0 || index >= len(b.calls) || delta == "" {
 		return
@@ -100,11 +127,17 @@ func (b *chatWriter) arguments(index int, delta string) {
 	call.arguments.WriteString(delta)
 	if b.legacy {
 		if index == 0 {
-			b.send(map[string]any{"function_call": map[string]any{"arguments": delta}}, nil)
+			b.send(map[string]any{"function_call": map[string]any{"arguments": delta}}, nil, nil)
 		}
 		return
 	}
-	b.send(map[string]any{"tool_calls": []any{map[string]any{"index": index, "function": map[string]any{"arguments": delta}}}}, nil)
+	fields := map[string]any{}
+	if call.kind == "custom" {
+		fields["input"] = delta
+	} else {
+		fields["arguments"] = delta
+	}
+	b.send(map[string]any{"tool_calls": []any{map[string]any{"index": index, call.kind: fields}}}, nil, nil)
 }
 
 // finish ends the reply with a finish reason and usage; streaming, it sends
@@ -115,18 +148,22 @@ func (b *chatWriter) finish(reason string, usage map[string]any) {
 		reason = "function_call"
 	}
 	b.finished, b.usage = reason, usage
-	b.send(map[string]any{}, reason)
+	b.send(map[string]any{}, reason, nil)
 	if b.streaming && b.includeUsage {
 		b.queue(map[string]any{"choices": []any{}, "usage": usage})
 	}
 }
 
 // send queues a chunk with one choice, streaming.
-func (b *chatWriter) send(delta map[string]any, finish any) {
+func (b *chatWriter) send(delta map[string]any, finish, logprobs any) {
 	if !b.streaming {
 		return
 	}
-	b.queue(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+	choice := map[string]any{"index": 0, "delta": delta, "finish_reason": finish}
+	if logprobs != nil {
+		choice["logprobs"] = logprobs
+	}
+	b.queue(map[string]any{"choices": []any{choice}})
 }
 
 // queue adds a chunk with the fields every chunk carries.
@@ -147,11 +184,14 @@ func (b *chatWriter) next() ([]byte, bool) {
 }
 
 // body is the completion the parts make: content null where a reply has only
-// tool calls, as OpenAI sends it.
+// tool calls or a refusal, as OpenAI sends it.
 func (b *chatWriter) body() []byte {
 	message := map[string]any{"role": "assistant", "content": b.content.String()}
-	if b.content.Len() == 0 && len(b.calls) > 0 {
+	if b.content.Len() == 0 && (len(b.calls) > 0 || b.refusal.Len() > 0) {
 		message["content"] = nil
+	}
+	if b.refusal.Len() > 0 {
+		message["refusal"] = b.refusal.String()
 	}
 	if b.reasoning.Len() > 0 {
 		message["reasoning_content"] = b.reasoning.String()
@@ -161,11 +201,14 @@ func (b *chatWriter) body() []byte {
 	} else if len(b.calls) > 0 {
 		var calls []any
 		for _, call := range b.calls {
-			calls = append(calls, map[string]any{"id": call.id, "type": "function", "function": map[string]any{"name": call.name, "arguments": call.arguments.String()}})
+			calls = append(calls, map[string]any{"id": call.id, "type": call.kind, call.kind: b.callFields(call.kind, call.name, call.arguments.String())})
 		}
 		message["tool_calls"] = calls
 	}
 	choice := map[string]any{"index": 0, "message": message, "finish_reason": b.finished}
+	if b.logprobs != nil {
+		choice["logprobs"] = map[string]any{"content": b.logprobs, "refusal": nil}
+	}
 	data, _ := json.Marshal(map[string]any{
 		"id":      b.id,
 		"object":  "chat.completion",
@@ -383,7 +426,7 @@ func readChatFormat(req gjson.Result) chatFormat {
 	return chatFormat{kind: format.Get("type").String(), schema: format.Get("json_schema.schema"), name: format.Get("json_schema.name"), strict: format.Get("json_schema.strict"), description: format.Get("json_schema.description")}
 }
 
-// refuse is a request a Chat Completions client sent that its
+// refuse is a request a Chat Completions or Responses client sent that its
 // target can't serve as the client means it. The client gets it as a 400 in
 // OpenAI's shape, since sending it on would either fail or answer something
 // else.
@@ -404,4 +447,23 @@ func reasoningOf(message gjson.Result) string {
 		return reasoning
 	}
 	return message.Get("reasoning").String()
+}
+
+// chatText joins a message's text parts.
+func chatText(content gjson.Result, where string) (string, error) {
+	if !content.Exists() || content.Type == gjson.Null {
+		return "", nil
+	}
+	parts, err := readChatParts(content, where)
+	if err != nil {
+		return "", err
+	}
+	var texts []string
+	for _, part := range parts {
+		if part.kind != "text" {
+			return "", refuse("%s: a '%s' part can't stand here; only text can", where, part.kind)
+		}
+		texts = append(texts, part.text)
+	}
+	return strings.Join(texts, "\n\n"), nil
 }

@@ -78,6 +78,9 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	if body, err = withoutUnsignedThinking(body); err != nil {
 		return backend.ChatResult{}, err
 	}
+	if body, err = withoutDisabledDisplay(body); err != nil {
+		return backend.ChatResult{}, err
+	}
 	req.Body = body
 	resp, err := b.Send(ctx, req, "/v1/messages", messagesHeader(req.Client))
 	if err != nil {
@@ -101,6 +104,9 @@ func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*ba
 	if err != nil {
 		return nil, err
 	}
+	if body, err = withoutDisabledDisplay(body); err != nil {
+		return nil, err
+	}
 	req.Body = body
 	return b.ForwardCountTokens(ctx, req, messagesHeader(req.Client))
 }
@@ -116,13 +122,13 @@ func messagesHeader(client backend.Client) http.Header {
 }
 
 // withoutUnsignedThinking removes the thinking blocks the gateway made from a
-// Chat Completions model's reasoning, which the API refuses (verified: a
-// made-up signature is a 400 in any turn), and any assistant turn they leave
-// empty. What remains is a history it accepts, real signed blocks included
-// (verified). A body without the marker passes on unchanged, with nothing
-// parsed.
+// Chat Completions model's reasoning or an OpenAI reasoning item, which the API
+// refuses (verified: a made-up signature is a 400 in any turn), and any
+// assistant turn they leave empty. What remains is a history it accepts, real
+// signed blocks included (verified). A body without either marker passes on
+// unchanged, with nothing parsed.
 func withoutUnsignedThinking(body []byte) ([]byte, error) {
-	if !bytes.Contains(body, []byte(backend.UnsignedThinking)) {
+	if !bytes.Contains(body, []byte(backend.UnsignedThinking)) && !bytes.Contains(body, []byte(backend.OpenAIReasoning)) {
 		return body, nil
 	}
 	var messages []string
@@ -135,7 +141,7 @@ func withoutUnsignedThinking(body []byte) ([]byte, error) {
 		}
 		var kept []string
 		for _, block := range content.Array() {
-			if block.Get("type").String() != "thinking" || block.Get("signature").String() != backend.UnsignedThinking {
+			if block.Get("type").String() != "thinking" || !backend.MadeByGateway(block.Get("signature").String()) {
 				kept = append(kept, block.Raw)
 			}
 		}
@@ -154,6 +160,20 @@ func withoutUnsignedThinking(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	return sjson.SetRawBytes(body, "messages", []byte("["+strings.Join(messages, ",")+"]"))
+}
+
+// withoutDisabledDisplay removes thinking.display when thinking is disabled,
+// which the API refuses (verified on Claude Haiku 5.5: "thinking.disabled.display:
+// Extra inputs are not permitted"). The Responses translator asks for display
+// summarized when a client asks for a reasoning summary, and a facade's params,
+// applied after it, can turn thinking off; with thinking off there is nothing to
+// display, so the request is sent without it.
+func withoutDisabledDisplay(body []byte) ([]byte, error) {
+	thinking := gjson.GetBytes(body, "thinking")
+	if thinking.Get("type").String() != "disabled" || !thinking.Get("display").Exists() {
+		return body, nil
+	}
+	return sjson.DeleteBytes(body, "thinking.display")
 }
 
 // withMaxTokens adds the model's output cap to a body with no max_tokens. ok

@@ -83,7 +83,8 @@ func TestAnthropic_ForwardsMessagesUnchanged(t *testing.T) {
 	}
 }
 
-// A thinking block the gateway made is removed before the API sees it, along
+// A thinking block the gateway made, unsigned or carrying an OpenAI reasoning
+// item, is removed before the API sees it, along
 // with a turn it leaves empty; a real signed block stays, and a body without
 // the marker is forwarded byte for byte.
 func TestAnthropic_RemovesOnlyUnsignedThinking(t *testing.T) {
@@ -92,7 +93,7 @@ func TestAnthropic_RemovesOnlyUnsignedThinking(t *testing.T) {
 	body := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},` +
 		`{"role":"assistant","content":[{"type":"thinking","thinking":"local","signature":"` + backend.UnsignedThinking + `"},{"type":"text","text":"b"}]},` +
 		`{"role":"user","content":"c"},` +
-		`{"role":"assistant","content":[{"type":"thinking","thinking":"only","signature":"` + backend.UnsignedThinking + `"}]},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"only","signature":"` + backend.UnsignedThinking + `"},{"type":"thinking","thinking":"openai","signature":"` + backend.OpenAIReasoning + `eyJ9"}]},` +
 		`{"role":"user","content":"d"},` +
 		`{"role":"assistant","content":[{"type":"thinking","thinking":"real","signature":"signed"},{"type":"text","text":"e"}]},` +
 		`{"role":"user","content":"f"}]}`
@@ -106,5 +107,23 @@ func TestAnthropic_RemovesOnlyUnsignedThinking(t *testing.T) {
 		`{"role":"user","content":"f"}]}`
 	if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
 		t.Errorf("sent %+v\nwant %s", req, want)
+	}
+}
+
+// With thinking disabled, a display setting is removed, since the API refuses
+// one there; with thinking on, it stays.
+func TestAnthropic_RemovesDisplayFromDisabledThinking(t *testing.T) {
+	f := testkit.NewAnthropic(t, "claude-a")
+	b := newBackend(t, f, "")
+	for body, want := range map[string]string{
+		`{"model":"claude-a","max_tokens":5,"thinking":{"type":"disabled","display":"summarized"},"messages":[]}`: `{"model":"claude-a","max_tokens":5,"thinking":{"type":"disabled"},"messages":[]}`,
+		`{"model":"claude-a","max_tokens":5,"thinking":{"type":"adaptive","display":"summarized"},"messages":[]}`: `{"model":"claude-a","max_tokens":5,"thinking":{"type":"adaptive","display":"summarized"},"messages":[]}`,
+	} {
+		if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: []byte(body)}); err != nil {
+			t.Fatal(err)
+		}
+		if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
+			t.Errorf("sent %+v\nwant %s", req, want)
+		}
 	}
 }

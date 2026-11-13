@@ -64,7 +64,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/pipeline`: the run after selection, the same for every facade type: route, translation, params, model, backend call, reply translated back.
 - `internal/selector`: the selection order (`FirstLoaded`) and how patterns and aliases match.
 - `internal/mergepatch`: params compiled from YAML and applied to raw bodies.
-- `internal/translate`: converting a request and its reply between protocols: a module per protocol (`chat.go`, `messages.go`) that reads its requests and writes its replies, and a file per pair holding its translators. A new pair is a translator registered in `translate.direct`.
+- `internal/translate`: converting a request and its reply between protocols: a module per protocol (`chat.go`, `messages.go`, `responses.go`) that reads its requests and writes its replies, and a file per pair holding its translators. A new pair is a translator registered in `translate.direct`.
 - `internal/backend`: the interfaces adapters implement, optional capabilities (`backend.Has`), and the context helpers for sharing state reads.
 - `internal/backend/openaihttp`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
 - `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.

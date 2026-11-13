@@ -28,14 +28,14 @@ type Descriptor struct {
 	Family string
 	// Named means each stream event's type is on an event line ahead of its
 	// data, and the stream sends no [DONE], ending instead with an event of
-	// one of the LastEvents types, as Messages does. Otherwise
+	// one of the LastEvents types, as Messages and Responses do. Otherwise
 	// events are data lines and [DONE] ends the stream.
 	Named      bool
 	LastEvents []string
-	// ErrorEvent is a broken stream as the protocol's error event: a
-	// backend's own error event where it already is one, else the failure in
-	// the protocol's shape.
-	ErrorEvent func(err error) []byte
+	// ErrorEvent is a broken stream as the protocol's error event, after
+	// sent events: a backend's own error event where it already is one, else
+	// the failure in the protocol's shape.
+	ErrorEvent func(err error, sent int) []byte
 }
 
 // All are the protocols the gateway serves, in the order a client sees them
@@ -43,6 +43,7 @@ type Descriptor struct {
 var All = []Descriptor{
 	{Protocol: backend.OpenAIChat, Path: "/v1/chat/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
 	{Protocol: backend.OpenAICompletions, Path: "/v1/completions", Family: config.FamilyOpenAI, ErrorEvent: openAIErrorEvent},
+	{Protocol: backend.OpenAIResponses, Path: "/v1/responses", Family: config.FamilyOpenAI, Named: true, LastEvents: []string{"response.completed", "response.incomplete", "response.failed"}, ErrorEvent: responsesErrorEvent},
 	{Protocol: backend.AnthropicMessages, Path: "/v1/messages", Family: config.FamilyAnthropic, Named: true, LastEvents: []string{"message_stop"}, ErrorEvent: messagesErrorEvent},
 }
 
@@ -98,7 +99,7 @@ func errorObject(errType, message string) map[string]any {
 // openAIErrorEvent is a broken Chat Completions or legacy Completions stream
 // as one data payload: a backend's OpenAI-style error object as it is, else
 // the failure wrapped in one.
-func openAIErrorEvent(err error) []byte {
+func openAIErrorEvent(err error, _ int) []byte {
 	if data, ok := backendEvent(err, func(e gjson.Result) bool { return e.Get("error").Exists() }); ok {
 		return data
 	}
@@ -112,10 +113,20 @@ func openAIErrorEvent(err error) []byte {
 }
 
 // messagesErrorEvent is a broken stream as a Messages error event.
-func messagesErrorEvent(err error) []byte {
+func messagesErrorEvent(err error, _ int) []byte {
 	if data, ok := backendEvent(err, func(e gjson.Result) bool { return e.Get("error").Exists() }); ok {
 		return data
 	}
 	event, _ := json.Marshal(map[string]any{"type": "error", "error": errorObject("api_error", "backend stream failed: "+err.Error())})
+	return event
+}
+
+// responsesErrorEvent is a broken stream as a Responses error event, numbered
+// after the sent events, since Responses numbers every event.
+func responsesErrorEvent(err error, sent int) []byte {
+	if data, ok := backendEvent(err, func(e gjson.Result) bool { return e.Get("type").String() == "error" }); ok {
+		return data
+	}
+	event, _ := json.Marshal(map[string]any{"type": "error", "code": nil, "message": "backend stream failed: " + err.Error(), "param": nil, "sequence_number": sent})
 	return event
 }

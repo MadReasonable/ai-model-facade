@@ -112,7 +112,10 @@ backends:
   # OpenAI's API takes them too, and so does another hosted API that serves
   # Chat Completions, such as OpenRouter's, at its own baseUrl. Every model
   # it lists counts as loaded while it answers, so put its candidates after
-  # the local ones.
+  # the local ones. OpenAI's Responses API reaches it untranslated. A model it
+  # serves only through Responses, such as a codex model, needs
+  # `useProtocol: openAiResponses` on its candidate to serve Chat Completions
+  # and Messages clients.
   # openAi:
   #   type: openAi
   #   baseUrl: https://api.openai.com

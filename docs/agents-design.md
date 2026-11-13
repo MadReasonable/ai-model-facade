@@ -357,7 +357,8 @@ A bare name is not mapped to `name:latest`, which would be implicit matching by 
 
 ### OpenAI
 
-OpenAI's API serves Chat Completions and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl`.
+OpenAI's API serves Chat Completions, Responses and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl` (Responses not checked on any API but OpenAI's).
+The adapter declares Responses, so a Responses request reaches it untranslated, and OpenAI resolves its `previous_response_id` itself.
 Chat Completions has two names for the token limit, and no one name works everywhere (verified 2026-11-08): OpenAI's models from `gpt-5` on, and `o3`, refuse `max_tokens` even beside the other; Ollama 0.40.8 ignores `max_completion_tokens` with a 200; llama-swap v263, llama-server b11580, LM Studio and LocalAI honour either; Open WebUI v0.12.3 takes `max_tokens` for every connection tried. So `openAi` sends `max_completion_tokens`, `ollama` and `openWebUi` send `max_tokens`, renaming in place (`openaihttp.UseMaxCompletionTokens`, `UseMaxTokens`), and the translator sends `max_tokens`. With both names, `max_completion_tokens`' value wins, as on the backends that honour both.
 Everything here is from OpenAI's API documentation; the testkit's live claim, run with `OPENAI_API_KEY` set, checked the model list, a chat and the refusal of an unknown model against the API.
 
@@ -391,8 +392,9 @@ As for OpenAI, every listed model is ready while the API answers, and the list i
 The adapter declares only `anthropicMessages`, so a legacy completion can't reach it, and params for it are always in Messages spelling.
 Limit: a key that isn't scoped to one workspace needs `anthropic-workspace-id` on every request, which the gateway doesn't send.
 
-Before a request reaches the API, the adapter removes the thinking blocks the gateway made, whose signature is `amf-unsigned`, since only Claude may write a signed one (`withoutUnsignedThinking`).
+Before a request reaches the API, the adapter removes the thinking blocks the gateway made, whose signature is a gateway marker (`backend.MadeByGateway`), since only Claude may write a signed one (`withoutUnsignedThinking`).
 The API refuses them, and they reach a Claude candidate whenever a conversation started elsewhere continues there.
+It also removes `display` from thinking that params turned off (`withoutDisabledDisplay`).
 
 ### Open WebUI
 
@@ -498,12 +500,12 @@ A field is dropped when the request still means what the client asked without it
 
 ### Routes and pairs
 
-Decided: a direct translator for each direction between the two client protocols, Chat Completions and Messages, held in one file for the pair (`chat_messages.go`).
+Decided (2026-11-10): a direct translator for each direction between the three client protocols, Chat Completions, Messages and Responses, six in all, held in one file per pair (`chat_messages.go`, `chat_responses.go`, `messages_responses.go`).
 `translate.Route` picks the identity route when the backend accepts the request's protocol, else the direct translator to the first protocol it accepts.
 Decided against, for now: an intermediate form that every protocol translates to and from, a hub.
-A direct pair carries what both of its protocols have, where a hub carries only what its form has, so the pair stays a valid route beside a hub when one is built.
+A direct pair carries what both of its protocols have, where a hub carries only what its form has, so the six pairs stay valid routes beside a hub when one is built.
 
-Each protocol has a module (`chat.go`, `messages.go`) that reads its requests into small values (messages and parts, tools, tool choice, format, effort) and writes its replies through one writer used streamed and not: `chatWriter`, `messagesWriter`.
+Each protocol has a module (`chat.go`, `messages.go`, `responses.go`) that reads its requests into small values (messages and parts, tools, tool choice, format, effort) and writes its replies through one writer used streamed and not: `chatWriter`, `messagesWriter`, `responseBuilder`.
 Decided: a writer per protocol, so every translator answering a client of that protocol writes the same shapes and events, and a fix to a reply's shape is made once.
 A translator runs before params, since params are written in the protocol the adapter receives.
 
@@ -532,6 +534,29 @@ A model's reasoning comes back as a thinking block signed with `amf-unsigned`, w
 A Chat Completions stream has no blocks, and Messages sends one block at a time and can't reopen one, so the first tool call streams its arguments and later calls are sent complete at the end.
 Decided (2026-11-10): reasoning and text that arrive while the first call's block is open are held until the stream ends and sent after the call, since a Chat Completions stream never says that a call's arguments are complete, and closing the block would lose its later arguments.
 
+### Responses
+
+Responses crosses in both directions: a Responses request reaches the Claude API through `responsesToMessages` and any other backend but OpenAI's through `responsesToChat`, and a Chat Completions or Messages request reaches OpenAI's Responses through `chatToResponses` and `messagesToResponses`.
+
+From Responses, the Messages translator carries a Claude thinking block in a reasoning item's `encrypted_content`, as `amf-anthropic:` and the base64 of the block, so a client that sends the item back gives Claude the block with its signature (verified on Claude Haiku 5.5: the item intact is accepted, its signature altered is refused).
+Claude 5.5 models return no thinking text unless `thinking.display` is `summarized`, so the translator sends `thinking: {type: adaptive, display: summarized}` for a request with `reasoning.summary` set, the request's own `thinking` keys winning; `type` is required with `display` (verified).
+Decided (2026-11-09): the mapping assumes Claude 4.6 or later, the models with adaptive thinking; Haiku 4.5 refuses it (verified).
+A facade's params can turn thinking off after the translator, and the API refuses `display` with `type: disabled` (verified), so the `anthropic` adapter removes it there (`withoutDisabledDisplay`).
+
+To Responses: Decided (2026-11-09): Responses is a target as well as a client protocol, since a model OpenAI serves only through Responses (`gpt-5.3-codex` refuses Chat Completions, verified) could otherwise serve only Responses clients.
+A route is picked per candidate from the protocols its backend accepts, and `openAi` accepts Chat Completions, so the candidate key `useProtocol` narrows them to one; without it nothing would choose the translators to Responses.
+Decided against: a backend-level protocols list, which would apply to every model on the backend, and resending a refused request as Responses, which is a retry.
+`chatToResponses` and `messagesToResponses` send a tool not strict unless the client says otherwise, since Responses makes one strict by default (verified), which needs every property required; and set `store: false`, since their clients send the conversation every turn.
+A Messages client's `metadata.user_id` becomes `safety_identifier`, which OpenAI refuses past 128 characters, and Claude Code 2.1.319 sends one of 150 (verified 2026-11-12), so a longer ID is sent as its SHA-256 in hex, which still tells one user from another.
+A Messages client gets OpenAI's reasoning as a thinking block whose signature is `amf-openai:` and the base64 of the reasoning item, requested with `include: ["reasoning.encrypted_content"]`, so the block sent back is the item again (verified on gpt-5.4-nano: the item intact is accepted, its encrypted content altered is refused); `backend.MadeByGateway` has the `anthropic` adapter remove such blocks as it removes unsigned ones.
+OpenAI accepts that `include` and `reasoning.summary` on a model that doesn't reason (verified on gpt-4.1-mini), so they are sent whatever the model.
+From Chat Completions, `logprobs` become `include: ["message.output_text.logprobs"]` and `top_logprobs`, each part's in the shape Chat Completions gives; and custom tools, `custom_tool_call` items and their `custom_tool_call_output`, and `allowed_tools`, translate both ways (each shape seen from both APIs on gpt-5.4-nano, 2026-11-09).
+Stop sequences, `n` above 1 and audio are refused, having no Responses counterpart.
+
+Decided (2026-11-09): toward another backend, `previous_response_id` is refused, since only OpenAI keeps the response it names, and `store` is dropped, so a Responses client there sends its conversation every turn.
+Deferred (2026-11-09): background mode, which needs work the gateway owns after the request, with polling and cancellation, within the reload rules; and the Conversations API.
+Each is refused.
+
 ### Effort
 
 Reasoning effort levels differ between vendors (verified 2026-11-10): Claude takes `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI `none`, `low`, `medium`, `high` and `xhigh`, and `minimal` on some models.
@@ -552,7 +577,7 @@ Ollama 0.40.8 and LM Studio have no HTTP token count (source), so they keep the 
 
 Before the response starts, an error is an error body in the shape of the client's API family, with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read.
 A request fails with one error type, `pipeline.Error`, holding the status, an OpenAI error type and the message, and the front end writes it in OpenAI's shape or Anthropic's, whose error types Claude's clients use to decide whether to retry.
-After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]` for Chat Completions, and an `error` event for Messages.
+After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]` for Chat Completions, an `error` event for Messages, and an `error` event numbered after the sent events for Responses, which numbers every event.
 Clients then show an error instead of a silently cut reply.
 A backend's error event already in the protocol's shape is relayed as is.
 

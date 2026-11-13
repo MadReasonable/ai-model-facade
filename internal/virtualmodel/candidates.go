@@ -35,6 +35,10 @@ type candidateConfig struct {
 	Backend    string    `yaml:"backend"` // default: the virtual model's backend
 	LoadIfNone bool      `yaml:"loadIfNone"`
 	Params     yaml.Node `yaml:"params"`
+	// UseProtocol is the protocol the backend receives for this candidate, one
+	// it accepts; default: the client's, else the first it can be translated
+	// to.
+	UseProtocol string `yaml:"useProtocol"`
 }
 
 // candidates is the default type: route params, then the first eligible
@@ -47,8 +51,11 @@ type candidates struct {
 	backend      backend.Backend // nil likewise
 	backendNames []string        // per candidate
 	backends     []backend.Backend
-	accepted     [][]backend.Protocol // per candidate: the protocols its backend accepts
-	catalogs     []*backend.Catalog   // per candidate: its backend's model list at startup
+	// accepted holds, per candidate, the protocols its backend may be sent:
+	// all it accepts, or the one useProtocol names.
+	accepted     [][]backend.Protocol
+	useProtocols []string           // per candidate: its useProtocol, or ""
+	catalogs     []*backend.Catalog // per candidate: its backend's model list at startup
 	description  string
 	protocols    []backend.Protocol // the protocols the facade serves; nil means all
 	params       protocolParams
@@ -111,7 +118,10 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		if err := candidate.Validate(); err != nil {
 			return nil, fmt.Errorf("line %d: %w", node.Line, err)
 		}
-		accepted := b.Protocols()
+		accepted, err := protocolsFor(cc.UseProtocol, b, name, node.Line)
+		if err != nil {
+			return nil, err
+		}
 		for _, p := range m.protocols {
 			if !reaches(p, accepted) {
 				return nil, fmt.Errorf("line %d: facade '%s' lists protocol %s, which backend '%s' doesn't accept; it accepts %s", node.Line, entry.Name, p, name, joinProtocols(accepted))
@@ -139,11 +149,25 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		m.backendNames = append(m.backendNames, name)
 		m.backends = append(m.backends, b)
 		m.accepted = append(m.accepted, accepted)
+		m.useProtocols = append(m.useProtocols, cc.UseProtocol)
 		m.catalogs = append(m.catalogs, env.Catalogs[name])
 		m.patches = append(m.patches, patches)
 	}
 	m.notePassthrough(env.Log, entry.Name)
 	return m, nil
+}
+
+// protocolsFor returns the protocols a candidate's backend may be sent: the one
+// useProtocol names, which the backend must accept, or else all it accepts.
+func protocolsFor(name string, b backend.Backend, backendName string, line int) ([]backend.Protocol, error) {
+	if name == "" {
+		return b.Protocols(), nil
+	}
+	protocol := backend.Protocol(name)
+	if !slices.Contains(b.Protocols(), protocol) {
+		return nil, fmt.Errorf("line %d: useProtocol '%s' is not a protocol backend '%s' accepts; it accepts %s", line, name, backendName, joinProtocols(b.Protocols()))
+	}
+	return []backend.Protocol{protocol}, nil
 }
 
 // chatOnlyKeys exist only in Chat Completions. The Messages API refuses a field
@@ -447,6 +471,9 @@ func (m *candidates) Describe(w io.Writer) {
 			note = " (loadIfNone)"
 		}
 		fmt.Fprintf(w, "  %d. %s%s\n", i+1, c.On(c.Model), note)
+		if m.useProtocols[i] != "" {
+			fmt.Fprintf(w, "     use protocol: %s\n", m.useProtocols[i])
+		}
 		hasParams := !m.params.empty() || !m.patches[i].empty()
 		for _, line := range describeAliases(c.Model, m.backendNames[i], m.catalogs[i], hasParams) {
 			fmt.Fprintf(w, "     %s\n", line)

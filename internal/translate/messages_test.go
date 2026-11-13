@@ -8,10 +8,10 @@ import (
 )
 
 // A Messages history with a search result and a cited document, as it
-// reaches Chat Completions: the search result becomes text, and what has no
+// reaches each OpenAI API: the search result becomes text, and what has no
 // counterpart is reported: document citations, Claude's service settings.
 // Claude's max effort becomes OpenAI's highest, xhigh.
-func TestMessages_TranslatesHistoryAndSettingsForChat(t *testing.T) {
+func TestMessages_TranslatesHistoryAndSettingsForEitherOpenAIAPI(t *testing.T) {
 	body := `{"output_config":{"effort":"max"},"speed":"fast","diagnostics":{},"user_profile_id":"u","workspace_id":"w","messages":[` +
 		`{"role":"user","content":[{"type":"search_result","title":"Oslo","source":"https://x","content":[{"type":"text","text":"Big city."}]},{"type":"document","citations":{"enabled":true},"source":{"type":"text","data":"doc"}}]},` +
 		`{"role":"assistant","content":[{"type":"text","text":"Found."}]}]}`
@@ -22,6 +22,7 @@ func TestMessages_TranslatesHistoryAndSettingsForChat(t *testing.T) {
 		texts      string
 	}{
 		{"chat", messagesToChat{}, "reasoning_effort", "messages.#.content"},
+		{"responses", messagesToResponses{}, "reasoning.effort", "input.#.content"},
 	}
 	for _, c := range cases {
 		out, reply, err := c.translator.Request([]byte(body))
@@ -53,9 +54,14 @@ func TestMessages_TranslatesHistoryAndSettingsForChat(t *testing.T) {
 	}
 }
 
-// Chat Completions has no way to take a document by URL.
-func TestMessages_RefusesADocumentByURLOnChat(t *testing.T) {
+// A document by URL reaches Responses as a file by URL; Chat Completions has
+// no way to take one.
+func TestMessages_SendsADocumentByURLWhereItCan(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"https://x/d.pdf"}}]}]}`
+	out, _, err := messagesToResponses{}.Request([]byte(body))
+	if err != nil || gjson.GetBytes(out, "input.0.content.0").Raw != `{"type":"input_file","file_url":"https://x/d.pdf"}` {
+		t.Errorf("responses: %s, %v", out, err)
+	}
 	if _, _, err := (messagesToChat{}).Request([]byte(body)); err == nil {
 		t.Error("chat: a document by URL was taken")
 	}

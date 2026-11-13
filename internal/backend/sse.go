@@ -152,7 +152,7 @@ func (s *SSEStream) Close() error {
 }
 
 // EndingStream ends a stream at an event of one of the last types, for a
-// protocol that sends no [DONE], as Messages sends none. A stream
+// protocol that sends no [DONE], as Messages and Responses send none. A stream
 // that ends before one is broken, as SSEStream reports.
 type EndingStream struct {
 	events *SSEStream
