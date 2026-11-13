@@ -37,6 +37,21 @@ func New(entry config.Entry) (*Backend, error) {
 	return b, nil
 }
 
+// Chat forwards a request with its token limit named max_completion_tokens,
+// since OpenAI's newer models refuse max_tokens, and a client may send either.
+// Groq's and OpenRouter's references also take that name and deprecate the
+// other (read 2026-11-08, not run). Legacy Completions has only max_tokens.
+func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
+	if req.Protocol == backend.OpenAIChat {
+		body, err := openaihttp.UseMaxCompletionTokens(req.Body)
+		if err != nil {
+			return backend.ChatResult{}, err
+		}
+		req.Body = body
+	}
+	return b.Backend.Chat(ctx, req)
+}
+
 // ListModels returns every model the API lists, and keeps them as its state.
 func (b *Backend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) {
 	return b.listed.List(ctx)

@@ -942,6 +942,8 @@ A candidate without a tag, such as `llama3`, isn't treated as `llama3:latest`; t
 State comes from `/api/ps`.
 It takes no keys beyond the shared ones; Ollama itself ignores `apiKey`, but a proxy in front of it may need one.
 
+Ollama honours only `max_tokens` and ignores `max_completion_tokens`, which would leave a reply unlimited, so the gateway sends a chat's token limit as `max_tokens`, with `max_completion_tokens`' value if a request has both.
+
 #### OpenAI
 
 An `openAi` backend is OpenAI's API, `https://api.openai.com`, or another hosted API that serves Chat Completions the same way, such as OpenRouter's, at its own `baseUrl`.
@@ -960,6 +962,8 @@ It reads the list again in two cases, so an API that goes down stops counting as
 While the list can't be read, the backend's candidates count as `state unavailable`, and selection passes over them; each request then tries the list again, so the backend is back as soon as the API answers.
 A `429` rate limit doesn't count as down: it is passed on with its `Retry-After`.
 A model the API adds becomes a candidate the next time the list is read.
+
+OpenAI's newer models refuse `max_tokens`, so the gateway sends a chat's token limit as `max_completion_tokens`, with that name's value if a request has both.
 
 #### Anthropic
 
@@ -982,6 +986,7 @@ An `openWebUi` backend is an Open WebUI instance, which runs each request throug
 Model IDs are the ones Open WebUI lists, prefixes included.
 The API key needs these Open WebUI endpoints: `/api/models`, `/api/v1/chats/new`, `/api/chat/completions`, `/api/v1/chats/{id}` (`GET` and `DELETE`), `/api/tasks/chat/{id}` and `/api/tasks/chat/{id}/stop`, plus `/api/v1/chats/{id}/archive` with `chats: archive`.
 
+The gateway sends a chat's token limit as `max_tokens`, with `max_completion_tokens`' value if a request has both, since Open WebUI takes that name for every connection and an Ollama model behind it ignores the other.
 Open WebUI has no legacy `/v1/completions`, so a request for it skips this candidate, and fails with `502` if no other candidate can serve it.
 
 Beyond the shared keys, it takes:

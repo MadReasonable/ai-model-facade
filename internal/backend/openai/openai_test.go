@@ -115,3 +115,22 @@ func TestOpenAI_RejectsAWrongConfig(t *testing.T) {
 		}
 	}
 }
+
+// A chat's token limit goes out as max_completion_tokens, whichever name the
+// client used; legacy Completions keeps max_tokens, its only name.
+func TestOpenAI_NamesTheTokenLimitForTheAPI(t *testing.T) {
+	f := testkit.NewOpenAI(t, "gpt-a")
+	b := newBackend(t, f, "")
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"gpt-a","max_tokens":5,"messages":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := f.Last("POST /v1/chat/completions"); !ok || req.Body != `{"model":"gpt-a","max_completion_tokens":5,"messages":[]}` {
+		t.Errorf("chat sent %+v", req)
+	}
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAICompletions, Body: []byte(`{"model":"gpt-a","max_tokens":5,"prompt":"x"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := f.Last("POST /v1/completions"); !ok || req.Body != `{"model":"gpt-a","max_tokens":5,"prompt":"x"}` {
+		t.Errorf("legacy sent %+v", req)
+	}
+}

@@ -27,6 +27,19 @@ type Backend struct {
 	*openaihttp.Backend
 }
 
+// Chat forwards a request with its token limit named max_tokens, since Ollama
+// accepts max_completion_tokens and ignores it, which leaves a reply unlimited.
+func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
+	if req.Protocol == backend.OpenAIChat {
+		body, err := openaihttp.UseMaxTokens(req.Body)
+		if err != nil {
+			return backend.ChatResult{}, err
+		}
+		req.Body = body
+	}
+	return b.Backend.Chat(ctx, req)
+}
+
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}

@@ -357,6 +357,7 @@ A bare name is not mapped to `name:latest`, which would be implicit matching by 
 ### OpenAI
 
 OpenAI's API serves Chat Completions and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl`.
+Chat Completions has two names for the token limit, and no one name works everywhere (verified 2026-11-08): OpenAI's models from `gpt-5` on, and `o3`, refuse `max_tokens` even beside the other; Ollama 0.40.8 ignores `max_completion_tokens` with a 200; llama-swap v263, llama-server b11580, LM Studio and LocalAI honour either; Open WebUI v0.12.3 takes `max_tokens` for every connection tried. So `openAi` sends `max_completion_tokens`, `ollama` and `openWebUi` send `max_tokens`, renaming in place (`openaihttp.UseMaxCompletionTokens`, `UseMaxTokens`), and the translator sends `max_tokens`. With both names, `max_completion_tokens`' value wins, as on the backends that honour both.
 Everything here is from OpenAI's API documentation; the testkit's live claim, run with `OPENAI_API_KEY` set, checked the model list, a chat and the refusal of an unknown model against the API.
 
 A hosted model needs no load, so every model `/v1/models` lists is ready while the API answers.

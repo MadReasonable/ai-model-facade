@@ -26,7 +26,12 @@ Clients built for Claude can use every facade, including those on local models, 
 - **Breaking:** params for a candidate on an `anthropic` backend now patch the Messages body, after translation, so they are written in Messages spelling. `reasoning_effort`, `response_format` and `stop` in them were translated before, and now reach the Claude API, which refuses them; use `output_config` and `stop_sequences`. The gateway warns at load about those keys.
 - **Breaking:** `alias_of` in `current` is now `aliasOf`, as the gateway's other field names are camelCase.
 - A candidate whose backend can't serve a request's protocol is now skipped, so a legacy completion reaches a later candidate instead of failing at the first.
+- A chat's token limit now reaches an `openAi` backend as `max_completion_tokens`, which OpenAI's newer models require, and an `ollama` or `openWebUi` backend as `max_tokens`, the only name Ollama honours. Params that set the other name are renamed the same way.
 - A request without `max_tokens` to an `anthropic` backend gets the model's output limit whichever API the client used.
+
+### Fixed
+
+- A response through Open WebUI from a model on the Claude or OpenAI API now reports usage, since the gateway always asks Open WebUI for it.
 
 ## [0.2.1] - 2026-11-02
 

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
 
@@ -94,6 +96,42 @@ func (gw *liveGateway) askInBackground(t *testing.T, facade string) *backgroundA
 		ask.resp = response{resp, string(body)}
 	}()
 	return ask
+}
+
+// checkTokenLimit asks facade for a long answer with this token limit, and fails
+// t unless the backend stopped there, whole and streamed.
+func (gw *liveGateway) checkTokenLimit(t *testing.T, facade, limit string, want int64) {
+	t.Helper()
+	question := `"messages":[{"role":"user","content":"Write every whole number from 1 to 500 in order, separated by spaces."}]`
+	r := gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"`+facade+`",`+limit+`,`+question+`}`)
+	if got := gjson.Get(r.body, "usage.completion_tokens").Int(); r.StatusCode != http.StatusOK || got != want {
+		t.Errorf("%s, %s: got %d tokens, want %d: %d %.200s", facade, limit, got, want, r.StatusCode, r.body)
+	}
+	r = gw.do(t, http.MethodPost, "/v1/chat/completions", "", `{"model":"`+facade+`",`+limit+`,"stream":true,"stream_options":{"include_usage":true},`+question+`}`)
+	var got int64
+	for _, line := range strings.Split(r.body, "\n") {
+		if usage := gjson.Get(strings.TrimPrefix(line, "data: "), "usage.completion_tokens"); usage.Exists() {
+			got = usage.Int()
+		}
+	}
+	if r.StatusCode != http.StatusOK || got != want {
+		t.Errorf("%s, %s, streamed: got %d tokens, want %d: %d", facade, limit, got, want, r.StatusCode)
+	}
+}
+
+// Ollama ignores max_completion_tokens, so a client that uses that name gets
+// no limit unless the adapter renames it, directly or through Open WebUI. With
+// both names, max_completion_tokens' value is the limit.
+func TestLive_TokenLimitReachesOllama(t *testing.T) {
+	gw := startDevGateway(t, `
+  limitedOllama: {backend: ollama, candidates: [{model: "ollama-llm-1:latest", loadIfNone: true}]}
+  limitedWebUi: {backend: openWebUi, candidates: [{model: "ollama-llm-1:latest", loadIfNone: true}]}
+`, "ollama", "openWebUi")
+	for _, facade := range []string{"limitedOllama", "limitedWebUi"} {
+		gw.checkTokenLimit(t, facade, `"max_completion_tokens":5`, 5)
+		gw.checkTokenLimit(t, facade, `"max_tokens":5`, 5)
+		gw.checkTokenLimit(t, facade, `"max_tokens":40,"max_completion_tokens":5`, 5)
+	}
 }
 
 // A facade on one backend uses its first candidate when that is loaded, and

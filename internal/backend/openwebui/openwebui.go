@@ -688,6 +688,14 @@ func (b *Backend) Protocols() []backend.Protocol {
 // up in the background once the result is known, so the response doesn't wait
 // on that call.
 func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
+	// Open WebUI passes max_completion_tokens on to Ollama, which ignores it,
+	// and takes max_tokens for every connection: it reaches OpenAI's newer
+	// models too, which refuse that name directly (verified on v0.12.3).
+	limited, limitErr := openaihttp.UseMaxTokens(req.Body)
+	if limitErr != nil {
+		return backend.ChatResult{}, limitErr
+	}
+	req.Body = limited
 	r := &run{
 		b:         b,
 		client:    req.Client,
@@ -787,6 +795,11 @@ func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.Chat
 		raw  string
 	}{
 		{"stream", "true"},
+		// Open WebUI stores usage only if its model reports it, and a backend
+		// streaming to it, such as the Claude or OpenAI API through a gateway,
+		// reports it only when asked. The client's own setting still decides
+		// whether a stream it receives ends with usage (verified on v0.12.3).
+		{"stream_options.include_usage", "true"},
 		{"chat_id", quote(r.chatID)},
 		{"id", quote(r.messageID)},
 		{"session_id", quote("ai-model-facade-" + newID())},

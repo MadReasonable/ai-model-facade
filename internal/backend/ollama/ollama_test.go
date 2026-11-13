@@ -68,3 +68,15 @@ func TestOllama_RejectsAWrongConfig(t *testing.T) {
 		}
 	}
 }
+
+// A chat's token limit goes out as max_tokens, the only name Ollama honours.
+func TestOllama_NamesTheTokenLimitForOllama(t *testing.T) {
+	f := testkit.NewOllama(t, "a:1")
+	b := newBackend(t, f, "")
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"a:1","max_completion_tokens":5,"messages":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := f.Last("POST /v1/chat/completions"); !ok || req.Body != `{"model":"a:1","max_tokens":5,"messages":[]}` {
+		t.Errorf("sent %+v", req)
+	}
+}

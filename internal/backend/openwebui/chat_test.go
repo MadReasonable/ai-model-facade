@@ -350,3 +350,31 @@ func TestChat_CountsAsPendingUntilTheFirstOutput(t *testing.T) {
 		t.Error("after a refused start: still starting")
 	}
 }
+
+// A chat's token limit goes to Open WebUI as max_tokens, which reaches every
+// kind of connection; an Ollama model behind it ignores the other name.
+func TestChat_NamesTheTokenLimitForOpenWebUI(t *testing.T) {
+	f := testkit.NewOpenWebUI(t, testkit.OllamaEntry("qwen3:1.7b", true))
+	b := newBackend(t, f, "")
+	if _, err := chat(t, b, `{"model":"qwen3:1.7b","max_completion_tokens":5,"messages":[{"role":"user","content":"x"}]}`, false); err != nil {
+		t.Fatal(err)
+	}
+	req, ok := f.Last("POST /api/chat/completions")
+	if !ok || gjson.Get(req.Body, "max_tokens").Int() != 5 || gjson.Get(req.Body, "max_completion_tokens").Exists() {
+		t.Errorf("sent %+v", req)
+	}
+}
+
+// Open WebUI is always asked for usage, since it stores usage only if its model
+// reports it, and some report it only when asked; a client's stream still ends
+// with usage only if the client asked.
+func TestChat_AlwaysAsksOpenWebUIForUsage(t *testing.T) {
+	f := testkit.NewOpenWebUI(t, testkit.OllamaEntry("qwen3:1.7b", true))
+	b := newBackend(t, f, "")
+	if _, err := chat(t, b, `{"model":"qwen3:1.7b","messages":[{"role":"user","content":"x"}]}`, false); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := f.Last("POST /api/chat/completions"); !ok || !gjson.Get(req.Body, "stream_options.include_usage").Bool() {
+		t.Errorf("sent %+v", req)
+	}
+}
