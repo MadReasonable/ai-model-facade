@@ -148,11 +148,12 @@ func TestChatToResponses_TranslatesARequest(t *testing.T) {
 	}
 }
 
-// Log probabilities and custom tools have Responses counterparts: logprobs as
-// an include and top_logprobs, and custom tools, their calls and outputs, and
-// a tool choice naming one, as custom ones there.
-func TestChatToResponses_TranslatesLogprobsAndCustomTools(t *testing.T) {
-	body := `{"logprobs":true,"top_logprobs":2,` +
+// Log probabilities, web search and custom tools have Responses
+// counterparts: logprobs as an include and top_logprobs, web_search_options as
+// the web_search tool with its location flattened, and custom tools, their
+// calls and outputs, and a tool choice naming one, as custom ones there.
+func TestChatToResponses_TranslatesLogprobsWebSearchAndCustomTools(t *testing.T) {
+	body := `{"logprobs":true,"top_logprobs":2,"web_search_options":{"search_context_size":"low","user_location":{"type":"approximate","approximate":{"country":"NO","city":"Oslo"}}},` +
 		`"tools":[{"type":"custom","custom":{"name":"sql","description":"d","format":{"type":"text"}}}],"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"custom","custom":{"name":"sql"}}]}},` +
 		`"messages":[{"role":"user","content":"count"},{"role":"assistant","tool_calls":[{"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT 1"}}]},{"role":"tool","tool_call_id":"c1","content":"1"}]}`
 	out, _, err := chatToResponses{}.Request([]byte(body))
@@ -160,7 +161,7 @@ func TestChatToResponses_TranslatesLogprobsAndCustomTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"include":["message.output_text.logprobs"],"top_logprobs":2,` +
-		`"tools":[{"type":"custom","name":"sql","description":"d","format":{"type":"text"}}],` +
+		`"tools":[{"type":"custom","name":"sql","description":"d","format":{"type":"text"}},{"type":"web_search","search_context_size":"low","user_location":{"type":"approximate","country":"NO","city":"Oslo"}}],` +
 		`"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"custom","name":"sql"}]},` +
 		`"input":[{"type":"message","role":"user","content":"count"},{"type":"custom_tool_call","call_id":"c1","name":"sql","input":"SELECT 1"},{"type":"custom_tool_call_output","call_id":"c1","output":"1"}],"store":false}`
 	if string(out) != want {
@@ -171,16 +172,20 @@ func TestChatToResponses_TranslatesLogprobsAndCustomTools(t *testing.T) {
 	}
 }
 
-// A response's log probabilities come back as the choice's, and a custom tool
-// call as one.
-func TestChatToResponses_TranslatesLogprobsAndCustomCalls(t *testing.T) {
-	response := `{"status":"completed","output":[{"type":"message","content":[` +
+// A response's citations come back as Chat Completions annotations, their
+// ranges counted in the joined content, its log probabilities as the choice's,
+// and a custom tool call as one.
+func TestChatToResponses_TranslatesCitationsLogprobsAndCustomCalls(t *testing.T) {
+	response := `{"status":"completed","output":[{"type":"web_search_call","status":"completed"},{"type":"message","content":[` +
 		`{"type":"output_text","text":"Oslé.","annotations":[],"logprobs":[{"token":"Oslé.","logprob":-1,"bytes":[1],"top_logprobs":[]}]},` +
-		`{"type":"output_text","text":" Big.","annotations":[],"logprobs":[{"token":" Big.","logprob":-2,"bytes":[2],"top_logprobs":[]}]}]},` +
+		`{"type":"output_text","text":" Big.","annotations":[{"type":"url_citation","start_index":1,"end_index":4,"url":"https://x","title":"X"}],"logprobs":[{"token":" Big.","logprob":-2,"bytes":[2],"top_logprobs":[]}]}]},` +
 		`{"type":"custom_tool_call","call_id":"c1","name":"sql","input":"SELECT 1"}]}`
 	_, reply, _ := chatToResponses{}.Request([]byte(`{"messages":[]}`))
 	got := gjson.ParseBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(response)}}).Response.Body)
 	choice := got.Get("choices.0")
+	if a := choice.Get("message.annotations.0.url_citation"); a.Get("start_index").Int() != 6 || a.Get("end_index").Int() != 9 || a.Get("url").String() != "https://x" {
+		t.Errorf("annotation %s", choice.Get("message.annotations").Raw)
+	}
 	if choice.Get("logprobs.content.#.logprob").Raw != "[-1,-2]" {
 		t.Errorf("logprobs %s", choice.Get("logprobs").Raw)
 	}
@@ -189,9 +194,10 @@ func TestChatToResponses_TranslatesLogprobsAndCustomCalls(t *testing.T) {
 	}
 }
 
-// Streamed, log probabilities ride on their text chunk's choice, and a custom
-// tool call opens with its name and streams its input.
-func TestChatToResponses_StreamsLogprobsAndCustomCalls(t *testing.T) {
+// Streamed, log probabilities ride on their text chunk's choice, a citation is
+// a chunk of annotations counted in the content streamed, and a custom tool
+// call opens with its name and streams its input.
+func TestChatToResponses_StreamsCitationsLogprobsAndCustomCalls(t *testing.T) {
 	_, reply, _ := chatToResponses{}.Request([]byte(`{"messages":[],"stream":true}`))
 	events, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
 		`{"type":"response.created","response":{"id":"resp_1"}}`,
@@ -200,6 +206,7 @@ func TestChatToResponses_StreamsLogprobsAndCustomCalls(t *testing.T) {
 		`{"type":"response.output_text.delta","item_id":"msg_1","delta":"Oslé.","logprobs":[{"token":"Oslé.","logprob":-1}]}`,
 		`{"type":"response.content_part.added","item_id":"msg_1","part":{"type":"output_text","text":""}}`,
 		`{"type":"response.output_text.delta","item_id":"msg_1","delta":" Big.","logprobs":[]}`,
+		`{"type":"response.output_text.annotation.added","item_id":"msg_1","annotation":{"type":"url_citation","start_index":1,"end_index":4,"url":"https://x","title":"X"}}`,
 		`{"type":"response.output_item.added","item":{"id":"ctc_1","type":"custom_tool_call","call_id":"c1","name":"sql","input":""}}`,
 		`{"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","delta":"SELECT 1"}`,
 		`{"type":"response.completed","response":{"status":"completed"}}`,
@@ -215,6 +222,7 @@ func TestChatToResponses_StreamsLogprobsAndCustomCalls(t *testing.T) {
 		`{"content":"","role":"assistant"} `,
 		`{"content":"Oslé."} {"content":[{"token":"Oslé.","logprob":-1}]}`,
 		`{"content":" Big."} `,
+		`{"annotations":[{"type":"url_citation","url_citation":{"end_index":9,"start_index":6,"title":"X","url":"https://x"}}]} `,
 		`{"tool_calls":[{"custom":{"input":"","name":"sql"},"id":"c1","index":0,"type":"custom"}]} `,
 		`{"tool_calls":[{"custom":{"input":"SELECT 1"},"index":0}]} `,
 		`{} `,
@@ -327,13 +335,14 @@ func TestChatToResponses_TranslatesLegacyFunctionCalling(t *testing.T) {
 
 // Toward Chat Completions, a Responses request keeps what Chat Completions
 // has too: custom tools, their calls and outputs, a tool choice naming one or
-// listing allowed tools, log probabilities, verbosity, and OpenAI's service
-// settings.
+// listing allowed tools, log probabilities, verbosity, web search with its
+// location, and OpenAI's service settings; a web search's record in the
+// history becomes text, reported.
 func TestResponsesToChat_KeepsWhatChatCompletionsHasToo(t *testing.T) {
 	body := `{"include":["message.output_text.logprobs"],"top_logprobs":2,"text":{"verbosity":"low"},"metadata":{"a":"b"},"service_tier":"flex","prompt_cache_key":"k","moderation":{},` +
-		`"tools":[{"type":"custom","name":"sql","format":{"type":"text"}}],` +
+		`"tools":[{"type":"custom","name":"sql","format":{"type":"text"}},{"type":"web_search","search_context_size":"low","user_location":{"type":"approximate","country":"NO"}}],` +
 		`"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"custom","name":"sql"}]},` +
-		`"input":[{"role":"user","content":"count"},{"type":"custom_tool_call","call_id":"c1","name":"sql","input":"SELECT 1"},{"type":"custom_tool_call_output","call_id":"c1","output":"1"}]}`
+		`"input":[{"role":"user","content":"count"},{"type":"web_search_call","action":{"query":"q"}},{"type":"custom_tool_call","call_id":"c1","name":"sql","input":"SELECT 1"},{"type":"custom_tool_call_output","call_id":"c1","output":"1"}]}`
 	out, reply, err := responsesToChat{}.Request([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +357,9 @@ func TestResponsesToChat_KeepsWhatChatCompletionsHasToo(t *testing.T) {
 		"prompt_cache_key":        `"k"`,
 		"moderation":              "{}",
 		"tools":                   `[{"type":"custom","custom":{"name":"sql","format":{"type":"text"}}}]`,
+		"web_search_options":      `{"search_context_size":"low","user_location":{"type":"approximate","approximate":{"country":"NO"}}}`,
 		"tool_choice":             `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"custom","custom":{"name":"sql"}}]}}`,
+		"messages.1.content":      `"[web search: q]"`,
 		"messages.1.tool_calls.0": `{"type":"custom","custom":{"name":"sql","input":"SELECT 1"},"id":"c1"}`,
 		"messages.2":              `{"role":"tool","tool_call_id":"c1","content":"1"}`,
 	}
@@ -357,7 +368,114 @@ func TestResponsesToChat_KeepsWhatChatCompletionsHasToo(t *testing.T) {
 			t.Errorf("%s: got %s, want %s", path, v, want)
 		}
 	}
-	if dropped := strings.Join(reply.Dropped(), ","); dropped != "" {
+	if dropped := strings.Join(reply.Dropped(), ","); dropped != "web_search_call" {
 		t.Errorf("dropped %s", dropped)
+	}
+}
+
+// A Chat Completions reply's citations, custom tool calls and log
+// probabilities reach a Responses client as its own: url_citation
+// annotations, custom_tool_call items, and the text part's logprobs.
+func TestResponsesToChat_RepliesWithCitationsCustomCallsAndLogprobs(t *testing.T) {
+	_, reply, _ := responsesToChat{}.Request([]byte(`{"model":"facade","input":"hi"}`))
+	completion := `{"model":"m","choices":[{"finish_reason":"tool_calls","logprobs":{"content":[{"token":"Big","logprob":-1}]},"message":{"content":"Big city.","annotations":[{"type":"url_citation","url_citation":{"start_index":0,"end_index":3,"url":"https://x","title":"X"}}],` +
+		`"tool_calls":[{"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT 1"}}]}}]}`
+	got := gjson.ParseBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(completion)}}).Response.Body)
+	part := got.Get("output.0.content.0")
+	if part.Get("annotations.0").Raw != `{"end_index":3,"start_index":0,"title":"X","type":"url_citation","url":"https://x"}` || part.Get("logprobs.0.token").String() != "Big" {
+		t.Errorf("text part %s", part.Raw)
+	}
+	if call := got.Get("output.1"); call.Get("type").String() != "custom_tool_call" || call.Get("input").String() != "SELECT 1" || call.Get("call_id").String() != "c1" {
+		t.Errorf("call %s", call.Raw)
+	}
+	events, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"model":"m","choices":[{"delta":{"content":"Big city."}}]}`,
+		`{"choices":[{"delta":{"annotations":[{"type":"url_citation","url_citation":{"start_index":0,"end_index":3,"url":"https://x","title":"X"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"custom","custom":{"name":"sql","input":"SELECT"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"custom":{"input":" 1"}}]},"finish_reason":"tool_calls"}]}`,
+	}}}).Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, e := range events {
+		kinds = append(kinds, e.Get("type").String())
+	}
+	all := strings.Join(kinds, ",")
+	for _, want := range []string{"response.output_text.annotation.added", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("%s missing from %s", want, all)
+		}
+	}
+	if last := events[len(events)-1].Get("response.output.1"); last.Get("input").String() != "SELECT 1" {
+		t.Errorf("completed call %s", last.Raw)
+	}
+}
+
+// A Responses client's shell and apply_patch reach a Chat backend as
+// functions of their names: their calls and outputs in history as tool calls
+// and tool messages, and a call in the reply as the client tool's record,
+// whole and streamed, held in a stream until its arguments are complete.
+func TestResponsesToChat_OffersClientToolsAsFunctions(t *testing.T) {
+	request := `{"tools":[{"type":"shell"},{"type":"apply_patch"}],"input":[` +
+		`{"type":"shell_call","call_id":"s1","status":"completed","action":{"commands":["ls"]}},` +
+		`{"type":"shell_call_output","call_id":"s1","output":[{"stdout":"a\n","stderr":"","outcome":{"type":"exit","exit_code":1}}]},` +
+		`{"type":"apply_patch_call","call_id":"p1","status":"completed","operation":{"type":"delete_file","path":"x"}},` +
+		`{"type":"apply_patch_call_output","call_id":"p1","status":"failed","output":"no file"}]}`
+	out, reply, err := responsesToChat{}.Request([]byte(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := gjson.GetBytes(out, "tools")
+	if tools.Get("0.function.name").String() != "shell" || tools.Get("0.function.parameters.required.0").String() != "commands" ||
+		tools.Get("1.function.name").String() != "apply_patch" || !strings.Contains(tools.Get("1.function.description").String(), "@@") {
+		t.Errorf("tools %s", tools.Raw)
+	}
+	messages := gjson.GetBytes(out, "messages")
+	if call := messages.Get("0.tool_calls.0"); call.Get("function.name").String() != "shell" || call.Get("function.arguments").String() != `{"commands":["ls"]}` {
+		t.Errorf("shell call %s", messages.Raw)
+	}
+	if output := messages.Get("1"); output.Get("role").String() != "tool" || output.Get("tool_call_id").String() != "s1" || output.Get("content").String() != "a\n\n[exit code 1]" {
+		t.Errorf("shell output %s", output.Raw)
+	}
+	if call := messages.Get("2.tool_calls.0"); call.Get("function.name").String() != "apply_patch" || gjson.Get(call.Get("function.arguments").String(), "path").String() != "x" {
+		t.Errorf("patch call %s", messages.Raw)
+	}
+	if output := messages.Get("3"); output.Get("content").String() != "The patch failed: no file" {
+		t.Errorf("patch output %s", output.Raw)
+	}
+
+	completion := `{"id":"c","model":"m","choices":[{"message":{"role":"assistant","tool_calls":[` +
+		`{"id":"t1","type":"function","function":{"name":"shell","arguments":"{\"commands\":[\"pwd\"],\"timeout_ms\":500}"}},` +
+		`{"id":"t2","type":"function","function":{"name":"apply_patch","arguments":"{\"type\":\"create_file\",\"path\":\"n\",\"diff\":\"+a\"}"}}]},"finish_reason":"tool_calls"}]}`
+	got := gjson.ParseBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(completion)}}).Response.Body)
+	if shell := got.Get("output.0"); shell.Get("type").String() != "shell_call" || shell.Get("call_id").String() != "t1" || shell.Get("action.commands").Raw != `["pwd"]` || shell.Get("action.timeout_ms").Int() != 500 {
+		t.Errorf("shell %s", got.Raw)
+	}
+	if patch := got.Get("output.1"); patch.Get("type").String() != "apply_patch_call" || patch.Get("operation.path").String() != "n" {
+		t.Errorf("patch %s", got.Raw)
+	}
+	events, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"id":"c","model":"m","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"shell","arguments":"{\"comm"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ands\":[\"pwd\"]}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	}}}).Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done []string
+	for _, e := range events {
+		if e.Get("type").String() == "response.output_item.done" {
+			done = append(done, e.Get("item.type").String()+":"+e.Get("item.action.commands").Raw)
+		}
+		if e.Get("type").String() == "response.function_call_arguments.delta" {
+			t.Errorf("streamed a function call: %s", e.Raw)
+		}
+	}
+	if strings.Join(done, ",") != `shell_call:["pwd"]` {
+		t.Errorf("streamed %v", done)
+	}
+	if _, _, err := (responsesToChat{}).Request([]byte(`{"tools":[{"type":"shell"},{"type":"function","name":"shell","parameters":{}}],"input":"hi"}`)); err == nil || !strings.Contains(err.Error(), "can't be sent beside") {
+		t.Errorf("clash: %v", err)
 	}
 }

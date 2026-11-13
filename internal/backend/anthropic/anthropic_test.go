@@ -3,6 +3,8 @@ package anthropic
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -124,6 +126,67 @@ func TestAnthropic_RemovesDisplayFromDisabledThinking(t *testing.T) {
 		}
 		if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
 			t.Errorf("sent %+v\nwant %s", req, want)
+		}
+	}
+}
+
+// A citation the gateway made for a Messages client, from an OpenAI API's, is
+// removed before Claude sees the history, since only Claude can make its
+// encrypted_index; Claude's own citations stay.
+func TestAnthropic_RemovesTheGatewaysCitations(t *testing.T) {
+	f := testkit.NewAnthropic(t, "claude-a")
+	b := newBackend(t, f, "")
+	own := `{"type":"web_search_result_location","url":"https://c","encrypted_index":"real"}`
+	made := `{"type":"web_search_result_location","url":"https://x","encrypted_index":"` + backend.GatewayCitation + `"}`
+	body := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},{"role":"assistant","content":[{"type":"text","text":"b","citations":[` + made + `]},{"type":"text","text":"c","citations":[` + own + `,` + made + `]}]},{"role":"user","content":"d"}]}`
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},{"role":"assistant","content":[{"type":"text","text":"b"},{"type":"text","text":"c","citations":[` + own + `]}]},{"role":"user","content":"d"}]}`
+	if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
+		t.Errorf("sent %+v\nwant %s", req, want)
+	}
+}
+
+// A server tool's call and result the gateway made for a Messages client,
+// from an OpenAI API's record, are removed before Claude sees the history.
+func TestAnthropic_RemovesTheGatewaysServerToolBlocks(t *testing.T) {
+	f := testkit.NewAnthropic(t, "claude-a")
+	b := newBackend(t, f, "")
+	id := backend.GatewayServerTool + "ci_1"
+	body := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},{"role":"assistant","content":[{"type":"server_tool_use","id":"` + id + `","name":"bash_code_execution","input":{"command":"ls"}},` +
+		`{"type":"bash_code_execution_tool_result","tool_use_id":"` + id + `","content":{}},{"type":"text","text":"b"}]},{"role":"user","content":"c"}]}`
+	if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model":"claude-a","max_tokens":5,"messages":[{"role":"user","content":"a"},{"role":"assistant","content":[{"type":"text","text":"b"}]},{"role":"user","content":"c"}]}`
+	if req, ok := f.Last("POST /v1/messages"); !ok || req.Body != want {
+		t.Errorf("sent %+v\nwant %s", req, want)
+	}
+}
+
+// A request naming MCP servers gets the connector's beta header unless the
+// client sent one; another request gets none.
+func TestAnthropic_AddsTheMCPBetaWhereNeeded(t *testing.T) {
+	f := testkit.NewAnthropic(t, "claude-a")
+	b := newBackend(t, f, "")
+	cases := []struct {
+		body, client, want string
+	}{
+		{`{"model":"claude-a","max_tokens":5,"mcp_servers":[{"type":"url","url":"u","name":"s"}],"messages":[]}`, "", mcpBeta},
+		{`{"model":"claude-a","max_tokens":5,"mcp_servers":[{"type":"url","url":"u","name":"s"}],"messages":[]}`, "mcp-client-2025-04-04", "mcp-client-2025-04-04"},
+		{`{"model":"claude-a","max_tokens":5,"messages":[]}`, "", ""},
+	}
+	for _, c := range cases {
+		client := backend.Client{}
+		if c.client != "" {
+			client.MessagesHeader = http.Header{"Anthropic-Beta": {c.client}}
+		}
+		if _, err := b.Chat(context.Background(), backend.ChatRequest{Protocol: backend.AnthropicMessages, Body: []byte(c.body), Client: client}); err != nil {
+			t.Fatal(err)
+		}
+		if req, _ := f.Last("POST /v1/messages"); strings.Join(req.Header.Values("Anthropic-Beta"), ",") != c.want {
+			t.Errorf("%s with %q: beta %q", c.body, c.client, req.Header.Values("Anthropic-Beta"))
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 
@@ -37,6 +38,8 @@ type chatWriter struct {
 	chunks       [][]byte
 
 	content, refusal, reasoning strings.Builder
+	contentLength               int // characters of content so far, which citations count in
+	annotations                 []any
 	logprobs                    []json.RawMessage
 	calls                       []*chatCall
 	finished                    string
@@ -67,12 +70,19 @@ func (b *chatWriter) text(delta string, logprobs []json.RawMessage) {
 		return
 	}
 	b.content.WriteString(delta)
+	b.contentLength += utf8.RuneCountInString(delta)
 	b.logprobs = append(b.logprobs, logprobs...)
 	var choiceLogprobs any
 	if len(logprobs) > 0 {
 		choiceLogprobs = map[string]any{"content": logprobs}
 	}
 	b.send(map[string]any{"content": delta}, nil, choiceLogprobs)
+}
+
+// sent is how many characters of content the reply has, for a citation
+// whose range is counted within a later part.
+func (b *chatWriter) sent() int {
+	return b.contentLength
 }
 
 func (b *chatWriter) refused(delta string) {
@@ -90,6 +100,14 @@ func (b *chatWriter) reason(delta string) {
 	}
 	b.reasoning.WriteString(delta)
 	b.send(map[string]any{"reasoning_content": delta}, nil, nil)
+}
+
+// annotate adds a citation, its range counted in the content of every part
+// joined, as Chat Completions counts it.
+func (b *chatWriter) annotate(url, title string, start, end int) {
+	annotation := map[string]any{"type": "url_citation", "url_citation": map[string]any{"start_index": start, "end_index": end, "url": url, "title": title}}
+	b.annotations = append(b.annotations, annotation)
+	b.send(map[string]any{"annotations": []any{annotation}}, nil, nil)
 }
 
 // call opens a tool call, function or custom, and returns its index, which
@@ -195,6 +213,9 @@ func (b *chatWriter) body() []byte {
 	}
 	if b.reasoning.Len() > 0 {
 		message["reasoning_content"] = b.reasoning.String()
+	}
+	if len(b.annotations) > 0 {
+		message["annotations"] = b.annotations
 	}
 	if len(b.calls) > 0 && b.legacy {
 		message["function_call"] = map[string]any{"name": b.calls[0].name, "arguments": b.calls[0].arguments.String()}

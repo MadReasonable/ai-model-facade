@@ -104,7 +104,7 @@ func responsesFromMessages(body []byte) ([]byte, droppedFields, error) {
 			}
 		case k == "tools":
 			var tools string
-			tools, failed = responsesToolsFromMessages(value)
+			tools, failed = responsesToolsFromMessages(value, req.Get("mcp_servers"), &gone)
 			place("tools", tools)
 		case k == "tool_choice":
 			var choice string
@@ -123,6 +123,16 @@ func responsesFromMessages(body []byte) ([]byte, droppedFields, error) {
 				}
 				return true
 			})
+		case k == "mcp_servers":
+			// each server becomes the mcp tool its toolset names
+			// (responsesToolsFromMessages); one no toolset names is refused,
+			// as the Claude API refuses it
+			for i, server := range value.Array() {
+				name := server.Get("name").String()
+				if !gjson.GetBytes(body, `tools.#(mcp_server_name==`+strconv.Quote(name)+`)`).Exists() {
+					failed = refuseMessages("mcp_servers[%d]: server '%s' is named by no mcp_toolset tool", i, name)
+				}
+			}
 		case refusedMessagesFields[k]:
 			failed = refuseMessages("'%s' needs the Claude API, and this model is served through the Responses API", k)
 		case k == "top_k" || droppedMessagesFieldsEverywhere[k]:
@@ -142,7 +152,11 @@ func responsesFromMessages(body []byte) ([]byte, droppedFields, error) {
 	place("instructions", instructions)
 	place("input", input)
 	place("store", "false")
-	place("include", `["reasoning.encrypted_content"]`)
+	include := `["reasoning.encrypted_content"]`
+	if strings.Contains(gjson.GetBytes(body, "tools.#.type").Raw, "code_execution_") {
+		include = `["reasoning.encrypted_content","code_interpreter_call.outputs"]`
+	}
+	place("include", include)
 	return out.bytes(), gone, nil
 }
 
@@ -216,14 +230,15 @@ func textFromOutputConfig(config gjson.Result, gone *droppedFields) (string, err
 // only the Claude API reads, becomes text the model can read.
 func responsesInputFromMessages(turns []messagesTurn, gone *droppedFields) (string, error) {
 	var items []string
+	shells := map[string]bool{} // IDs of bash calls, whose results are a shell's
 	for _, t := range turns {
 		var turn []string
 		var err error
 		switch t.role {
 		case "user":
-			turn, err = responsesUserFromMessages(t)
+			turn, err = responsesUserFromMessages(t, shells)
 		case "assistant":
-			turn, err = responsesAssistantFromMessages(t, gone)
+			turn, err = responsesAssistantFromMessages(t, shells, gone)
 		case "system":
 			var text string
 			if text, err = blocksText(t.blocks, t.where); err == nil {
@@ -238,12 +253,16 @@ func responsesInputFromMessages(turns []messagesTurn, gone *droppedFields) (stri
 	return "[" + strings.Join(items, ",") + "]", nil
 }
 
-func responsesUserFromMessages(t messagesTurn) ([]string, error) {
+func responsesUserFromMessages(t messagesTurn, shells map[string]bool) ([]string, error) {
 	if len(t.blocks) == 1 && t.blocks[0].raw.Type == gjson.String {
 		return []string{set(`{"type":"message","role":"user"}`, "content", t.blocks[0].text)}, nil
 	}
 	var outputs, parts []string
 	for _, b := range t.blocks {
+		if b.kind == "tool_result" && shells[b.toolUseID] {
+			outputs = append(outputs, shellOutput(b))
+			continue
+		}
 		if b.kind == "tool_result" {
 			output, err := responsesToolOutput(b)
 			if err != nil {
@@ -324,7 +343,7 @@ func responsesToolOutput(b messagesBlock) (string, error) {
 	return setRaw(output, "output", "["+strings.Join(parts, ",")+"]"), nil
 }
 
-func responsesAssistantFromMessages(t messagesTurn, gone *droppedFields) ([]string, error) {
+func responsesAssistantFromMessages(t messagesTurn, shells map[string]bool, gone *droppedFields) ([]string, error) {
 	var items, text []string
 	flush := func() {
 		if len(text) > 0 {
@@ -336,6 +355,10 @@ func responsesAssistantFromMessages(t messagesTurn, gone *droppedFields) ([]stri
 		switch {
 		case b.kind == "text":
 			text = append(text, b.text)
+		case b.kind == "tool_use" && b.name == "bash":
+			flush()
+			shells[b.id] = true
+			items = append(items, set(set(set(`{"type":"shell_call","status":"completed"}`, "call_id", b.id), "action.commands", []string{gjson.Get(b.input, "command").String()}), "action.timeout_ms", nil))
 		case b.kind == "tool_use":
 			flush()
 			arguments := b.input
@@ -352,6 +375,8 @@ func responsesAssistantFromMessages(t messagesTurn, gone *droppedFields) ([]stri
 			} else {
 				gone.add("thinking")
 			}
+		case isServerToolBlock(b.kind):
+			text = append(text, serverToolText(b))
 		default:
 			return nil, refuseMessages("%s: the Responses API can't take a '%s' block", t.where, b.kind)
 		}
@@ -362,9 +387,41 @@ func responsesAssistantFromMessages(t messagesTurn, gone *droppedFields) ([]stri
 
 // responsesToolsFromMessages turns client tools into function tools. The
 // others are tool types only the Claude API defines.
-func responsesToolsFromMessages(tools gjson.Result) (string, error) {
+func responsesToolsFromMessages(tools, servers gjson.Result, gone *droppedFields) (string, error) {
 	var out []string
 	for i, tool := range tools.Array() {
+		if tool.Get("type").String() == "mcp_toolset" {
+			mcp, err := responsesMCPTool(tool, servers, i)
+			if err != nil {
+				return "", err
+			}
+			out = append(out, mcp)
+			continue
+		}
+		if strings.HasPrefix(tool.Get("type").String(), "code_execution_") {
+			out = append(out, `{"type":"code_interpreter","container":{"type":"auto"}}`)
+			continue
+		}
+		if strings.HasPrefix(tool.Get("type").String(), "bash_") {
+			out = append(out, `{"type":"shell"}`)
+			continue
+		}
+		if strings.HasPrefix(tool.Get("type").String(), "text_editor_") {
+			function, err := clientToolFunction(tool, i)
+			if err != nil {
+				return "", err
+			}
+			out = append(out, setRaw(setRaw(function, "type", `"function"`), "strict", "false"))
+			continue
+		}
+		if isClaudeWebSearch(tool) {
+			search := `{"type":"web_search"}`
+			search = setPresent(search, "user_location", claudeSearchLocation(tool))
+			search = setPresent(search, "filters.allowed_domains", tool.Get("allowed_domains"))
+			reportSearchSettings(tool, gone, "max_uses", "blocked_domains")
+			out = append(out, search)
+			continue
+		}
 		if kind := tool.Get("type").String(); kind != "" && kind != "custom" {
 			return "", refuseMessages("tools[%d]: only the Claude API defines tool type '%s', and this model is served through the Responses API; a tool sent to it needs its own 'input_schema'", i, kind)
 		}
@@ -432,9 +489,9 @@ func (r *responsesMessagesReply) Result(result backend.ChatResult) backend.ChatR
 
 // messageFromResponse turns a response into a Messages response: each
 // reasoning item a thinking block that carries the item in its signature, text
-// and refusals as text, and function calls as tool_use blocks. Other items,
-// such as OpenAI's hosted tool calls, have no place in a message and are left
-// out.
+// and refusals as text, function calls and shell calls as tool_use blocks, and
+// the record of a search, a code run or an MCP call as the blocks Claude
+// writes for it. Other items have no place in a message and are left out.
 func messageFromResponse(response gjson.Result) []byte {
 	b := newMessagesWriter(false)
 	b.start("msg_"+response.Get("id").String(), response.Get("model").String(), nil)
@@ -449,7 +506,9 @@ func messageFromResponse(response gjson.Result) []byte {
 			for _, part := range item.Get("content").Array() {
 				switch part.Get("type").String() {
 				case "output_text":
+					start := utf8.RuneCountInString(b.openText())
 					b.text(part.Get("text").String())
+					citeAnnotations(b, part.Get("annotations").Array(), start)
 				case "refusal":
 					refused = true
 					b.text(part.Get("refusal").String())
@@ -460,10 +519,118 @@ func messageFromResponse(response gjson.Result) []byte {
 			calls = true
 			b.useTool(item.Get("call_id").String(), item.Get("name").String())
 			b.input(item.Get("arguments").String())
+		case "web_search_call":
+			for _, block := range searchBlocks(item) {
+				b.block(block)
+			}
+		case "code_interpreter_call":
+			for _, block := range codeBlocks(item) {
+				b.block(block)
+			}
+		case "shell_call":
+			calls = true
+			b.useTool(item.Get("call_id").String(), "bash")
+			b.input(set("{}", "command", shellCommand(item.Get("action.commands"))))
+			b.closeBlock()
+		case "mcp_call":
+			for _, block := range mcpBlocks(item) {
+				b.block(block)
+			}
 		}
 	}
 	b.finish(stopFromResponse(response, calls, refused), messagesUsageFromResponses(response.Get("usage")))
 	return b.body()
+}
+
+// responsesMCPTool is a Claude MCP toolset, with the server it names, as a
+// Responses MCP tool: the server by label, URL and key, run without asking
+// for approval, as Claude runs it, and only the tools the toolset enables when
+// it disables the rest.
+func responsesMCPTool(toolset, servers gjson.Result, i int) (string, error) {
+	name := toolset.Get("mcp_server_name").String()
+	var server gjson.Result
+	for _, s := range servers.Array() {
+		if s.Get("name").String() == name {
+			server = s
+		}
+	}
+	if !server.Exists() {
+		return "", refuseMessages("tools[%d]: mcp_toolset names server '%s', which mcp_servers doesn't list", i, name)
+	}
+	tool := set(set(`{"type":"mcp"}`, "server_label", name), "server_url", server.Get("url").String())
+	if token := server.Get("authorization_token").String(); token != "" {
+		tool = set(tool, "authorization", token)
+	}
+	tool = set(tool, "require_approval", "never")
+	if toolset.Get("default_config.enabled").Type == gjson.False {
+		allowed := []string{}
+		toolset.Get("configs").ForEach(func(key, config gjson.Result) bool {
+			if config.Get("enabled").Type != gjson.False {
+				allowed = append(allowed, key.String())
+			}
+			return true
+		})
+		tool = set(tool, "allowed_tools", allowed)
+	}
+	return tool, nil
+}
+
+// mcpBlocks is an mcp_call record as the blocks Claude writes an MCP call
+// with: the call and its result, their IDs marked as the gateway's, as
+// codeBlocks marks them.
+func mcpBlocks(item gjson.Result) []map[string]any {
+	id := backend.GatewayServerTool + item.Get("id").String()
+	output, isError := item.Get("output").String(), false
+	if e := item.Get("error"); e.Exists() && e.Type != gjson.Null {
+		output, isError = e.String(), true
+	}
+	return []map[string]any{
+		{"type": "mcp_tool_use", "id": id, "name": item.Get("name").String(), "server_name": item.Get("server_label").String(), "input": inputOf(item.Get("arguments").String())},
+		{"type": "mcp_tool_result", "tool_use_id": id, "is_error": isError, "content": []any{map[string]any{"type": "text", "text": output}}},
+	}
+}
+
+// shellOutput is a bash tool's result as the shell_call_output a Responses
+// shell's call takes: the text as stdout, its exit an error code where the
+// result is an error.
+func shellOutput(b messagesBlock) string {
+	text, _ := blocksText(b.content, b.where)
+	code := 0
+	if b.isError {
+		code = 1
+	}
+	output := set(`{"type":"shell_call_output"}`, "call_id", b.toolUseID)
+	return set(output, "output", []any{map[string]any{"stdout": text, "stderr": "", "outcome": map[string]any{"type": "exit", "exit_code": code}}})
+}
+
+// searchBlocks is a web_search_call record as the blocks Claude writes a
+// search with, marked as the gateway's. Their result lists no pages: OpenAI
+// lists a search's sources only when the request asks for them in include,
+// and its citations reach the client on the answer's text.
+func searchBlocks(item gjson.Result) []map[string]any {
+	id := backend.GatewayServerTool + item.Get("id").String()
+	return []map[string]any{
+		{"type": "server_tool_use", "id": id, "name": "web_search", "input": map[string]any{"query": item.Get("action.query").String()}},
+		{"type": "web_search_tool_result", "tool_use_id": id, "content": []any{}},
+	}
+}
+
+// codeBlocks is a code_interpreter_call record as the blocks Claude writes a
+// code execution with: the call and its result. Only Claude can make real ones,
+// so their IDs carry the gateway's marker, by which the anthropic adapter
+// removes them before Claude sees the history.
+func codeBlocks(item gjson.Result) []map[string]any {
+	id := backend.GatewayServerTool + item.Get("id").String()
+	var logs []string
+	for _, output := range item.Get("outputs").Array() {
+		if output.Get("type").String() == "logs" {
+			logs = append(logs, output.Get("logs").String())
+		}
+	}
+	return []map[string]any{
+		{"type": "server_tool_use", "id": id, "name": "bash_code_execution", "input": map[string]any{"command": item.Get("code").String()}},
+		{"type": "bash_code_execution_tool_result", "tool_use_id": id, "content": map[string]any{"type": "bash_code_execution_result", "stdout": strings.Join(logs, "\n"), "stderr": "", "return_code": 0, "content": []any{}}},
+	}
 }
 
 // stopFromResponse maps a response's status to a Messages stop_reason.
@@ -578,6 +745,8 @@ func (s *messagesFromResponsesStream) translate(event gjson.Result) error {
 		s.reply.think(event.Get("delta").String())
 	case "response.output_text.delta":
 		s.reply.text(event.Get("delta").String())
+	case "response.output_text.annotation.added":
+		citeAnnotations(s.reply, []gjson.Result{event.Get("annotation")}, 0)
 	case "response.refusal.delta":
 		s.refused = true
 		s.reply.text(event.Get("delta").String())
@@ -585,6 +754,29 @@ func (s *messagesFromResponsesStream) translate(event gjson.Result) error {
 		s.reply.input(event.Get("delta").String())
 	case "response.output_item.done":
 		item := event.Get("item")
+		switch item.Get("type").String() {
+		case "web_search_call":
+			for _, block := range searchBlocks(item) {
+				s.reply.block(block)
+			}
+			return nil
+		case "code_interpreter_call":
+			for _, block := range codeBlocks(item) {
+				s.reply.block(block)
+			}
+			return nil
+		case "shell_call":
+			s.calls = true
+			s.reply.useTool(item.Get("call_id").String(), "bash")
+			s.reply.input(set("{}", "command", shellCommand(item.Get("action.commands"))))
+			s.reply.closeBlock()
+			return nil
+		case "mcp_call":
+			for _, block := range mcpBlocks(item) {
+				s.reply.block(block)
+			}
+			return nil
+		}
 		if !s.opened[item.Get("id").String()] {
 			return nil
 		}
@@ -610,11 +802,16 @@ func (s *messagesFromResponsesStream) Close() error {
 type responsesToMessages struct{}
 
 func (responsesToMessages) Request(body []byte) ([]byte, Reply, error) {
-	out, gone, err := messagesFromResponses(body)
+	flat, err := withoutNamespaces(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	return out, &messagesResponsesReply{request: gjson.ParseBytes(body), dropped: gone}, nil
+	out, gone, err := messagesFromResponses(flat)
+	if err != nil {
+		return nil, nil, err
+	}
+	req := gjson.ParseBytes(body)
+	return out, &messagesResponsesReply{request: req, records: clientRecordsOf(req), dropped: gone}, nil
 }
 
 // safetyIdentifier is a Messages user_id as Responses' safety_identifier, a
@@ -711,8 +908,9 @@ func messagesFromResponses(body []byte) ([]byte, droppedFields, error) {
 			place("metadata", metadataOf(req))
 		case k == "tools":
 			var tools string
-			tools, failed = messagesToolsFromResponses(value, allowedNames(req.Get("tool_choice")))
+			tools, failed = messagesToolsFromResponses(value, allowedNames(req.Get("tool_choice")), &gone)
 			place("tools", tools)
+			place("mcp_servers", claudeServers(value))
 		case k == "include":
 			if wantsLogprobs(req) {
 				failed = refuse("the Claude API returns no log probabilities; include must not ask for 'message.output_text.logprobs'")
@@ -804,6 +1002,26 @@ func messagesFromResponsesInput(req gjson.Result, gone *droppedFields) (system, 
 			var block string
 			block, err = messagesToolResult(item, where)
 			blocks = []string{block}
+		case "shell_call":
+			role = "assistant"
+			block := set(`{"type":"tool_use","name":"bash"}`, "id", item.Get("call_id").String())
+			blocks = []string{set(block, "input.command", shellCommand(item.Get("action.commands")))}
+		case "shell_call_output":
+			role = "user"
+			blocks = []string{shellResult(item)}
+		case "apply_patch_call":
+			role = "assistant"
+			block := set(`{"type":"tool_use"}`, "id", item.Get("call_id").String())
+			block = set(block, "name", patchToolName)
+			blocks = []string{setRaw(block, "input", jsonOr(item.Get("operation").Raw, "{}"))}
+		case "apply_patch_call_output":
+			role = "user"
+			block := set(`{"type":"tool_result"}`, "tool_use_id", item.Get("call_id").String())
+			block = set(block, "content", item.Get("output").String())
+			if item.Get("status").String() == "failed" {
+				block = set(block, "is_error", true)
+			}
+			blocks = []string{block}
 		case "reasoning":
 			block, ok := decodeThinking(item)
 			if !ok {
@@ -814,7 +1032,12 @@ func messagesFromResponsesInput(req gjson.Result, gone *droppedFields) (system, 
 		case "item_reference":
 			err = refuse("%s: an item_reference names an item kept at OpenAI; send the item itself, or chain the turn with previous_response_id", where)
 		default:
-			err = refuse("%s: a '%s' item can't be served through the Claude API", where, kind)
+			if !responsesServerItems[kind] {
+				err = refuse("%s: a '%s' item can't be served through the Claude API", where, kind)
+				break
+			}
+			gone.add(kind)
+			role, blocks = "assistant", []string{set(`{"type":"text"}`, "text", serverItemText(item))}
 		}
 		if err != nil {
 			return "", "", err
@@ -984,12 +1207,46 @@ func messagesToolChoiceFromResponses(req gjson.Result) (string, error) {
 }
 
 // messagesToolsFromResponses turns function tools into Messages tools. The
-// others are OpenAI's hosted tools, which only its servers run.
-func messagesToolsFromResponses(tools gjson.Result, allowed []string) (string, error) {
+// others are OpenAI's hosted tools, which only its servers run. With none
+// left, such as a cache-only search dropped, it returns "", for no tools.
+func messagesToolsFromResponses(tools gjson.Result, allowed []string, gone *droppedFields) (string, error) {
+	if err := clientToolClash(tools, "bash"); err != nil {
+		return "", err
+	}
 	out := "[]"
 	for i, tool := range tools.Array() {
 		switch kind := tool.Get("type").String(); kind {
 		case "function":
+		case "web_search", "web_search_preview":
+			if tool.Get("external_web_access").Type == gjson.False {
+				// the client allows only OpenAI's cached index, and Claude
+				// searches the live web
+				gone.add("tools.web_search")
+				continue
+			}
+			out = setRaw(out, "-1", claudeWebSearch(tool, gone))
+			continue
+		case "mcp":
+			if approval := tool.Get("require_approval"); approval.String() != "never" {
+				return "", refuse("tools[%d]: the Claude API runs MCP tools without asking for approval; require_approval must be 'never', not %s", i, jsonOr(approval.Raw, `"always"`))
+			}
+			out = setRaw(out, "-1", claudeToolset(tool))
+			continue
+		case "shell":
+			out = setRaw(out, "-1", `{"type":"bash_20250124","name":"bash"}`)
+			continue
+		case "apply_patch":
+			tool := setRaw(set(`{}`, "name", patchToolName), "input_schema", patchSchema)
+			out = setRaw(out, "-1", set(tool, "description", patchDescription))
+			continue
+		case "code_interpreter":
+			// Claude runs code in a container of its own; a container OpenAI
+			// keeps or sizes has no counterpart
+			if container := tool.Get("container"); container.Exists() && container.Get("type").String() != "auto" {
+				gone.add("tools.container")
+			}
+			out = setRaw(out, "-1", `{"type":"code_execution_20260120","name":"code_execution"}`)
+			continue
 		case "custom":
 			return "", refuse("tools[%d]: the Claude API has no custom tools; '%s' needs to be a function tool", i, tool.Get("name").String())
 		default:
@@ -1012,7 +1269,103 @@ func messagesToolsFromResponses(tools gjson.Result, allowed []string) (string, e
 		}
 		out = setRaw(out, "-1", block)
 	}
+	if out == "[]" {
+		return "", nil
+	}
 	return out, nil
+}
+
+// shellCommand is a shell_call's commands as one bash command, a line each,
+// run in order as the shell tool runs them (seen 2026-11-10: gpt-5.4-nano's
+// shell_call carries action.commands, a list).
+func shellCommand(commands gjson.Result) string {
+	var lines []string
+	for _, c := range commands.Array() {
+		lines = append(lines, c.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+// shellResult is a shell_call_output as the tool_result Claude's bash tool
+// takes: the output as text, an error where a command failed or timed out
+// (output shape from openai-python's types, read 2026-11-10).
+func shellResult(item gjson.Result) string {
+	text, failed := shellOutputText(item)
+	block := set(`{"type":"tool_result"}`, "tool_use_id", item.Get("call_id").String())
+	block = set(block, "content", text)
+	if failed {
+		block = set(block, "is_error", true)
+	}
+	return block
+}
+
+// shellCall is a call of Claude's bash tool as the shell_call item a
+// Responses client runs. A restart has no shell counterpart; it runs no
+// command.
+func shellCall(id, input string) map[string]any {
+	commands := []string{}
+	if command := gjson.Get(input, "command").String(); command != "" {
+		commands = append(commands, command)
+	}
+	return map[string]any{"id": newID("sh_"), "type": "shell_call", "call_id": id, "status": "completed", "action": map[string]any{"commands": commands, "timeout_ms": nil, "max_output_length": nil}}
+}
+
+// claudeToolset is a Responses MCP tool as the mcp_toolset that names its
+// server, with only the allowed tools enabled when it lists them; the server
+// itself goes in mcp_servers (claudeServers).
+func claudeToolset(tool gjson.Result) string {
+	toolset := set(`{"type":"mcp_toolset"}`, "mcp_server_name", tool.Get("server_label").String())
+	allowed := tool.Get("allowed_tools")
+	if names := allowed.Get("tool_names"); names.IsArray() {
+		allowed = names
+	}
+	if allowed.IsArray() {
+		toolset = setRaw(toolset, "default_config", `{"enabled":false}`)
+		for _, name := range allowed.Array() {
+			toolset = setRaw(toolset, "configs."+pathKey(name.String()), `{"enabled":true}`)
+		}
+	}
+	return toolset
+}
+
+// claudeServers is the mcp_servers list for a request's MCP tools: each
+// server by its label, URL and key (MCP connector, beta mcp-client-2025-11-20,
+// seen 2026-11-10).
+func claudeServers(tools gjson.Result) string {
+	var servers []string
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() != "mcp" {
+			continue
+		}
+		server := set(set(`{"type":"url"}`, "url", tool.Get("server_url").String()), "name", tool.Get("server_label").String())
+		token := tool.Get("authorization").String()
+		if token == "" {
+			token = strings.TrimPrefix(tool.Get("headers.Authorization").String(), "Bearer ")
+		}
+		if token != "" {
+			server = set(server, "authorization_token", token)
+		}
+		servers = append(servers, server)
+	}
+	if servers == nil {
+		return ""
+	}
+	return "[" + strings.Join(servers, ",") + "]"
+}
+
+// claudeWebSearch is Responses' web_search tool as Claude's, in the version
+// whose results come back with citations (verified 2026-11-10: the later
+// versions filter results with code execution and returned none), with the
+// location and allowed domains that both have; the context size has no
+// counterpart.
+func claudeWebSearch(tool gjson.Result, gone *droppedFields) string {
+	search := `{"type":"web_search_20250305","name":"web_search"}`
+	search = setPresent(search, "user_location", tool.Get("user_location"))
+	search = setPresent(search, "allowed_domains", tool.Get("filters.allowed_domains"))
+	if tool.Get("search_context_size").Exists() {
+		gone.add("tools.search_context_size")
+	}
+	return search
 }
 
 // messagesResponsesReply converts what a Messages backend answered back to
@@ -1020,19 +1373,33 @@ func messagesToolsFromResponses(tools gjson.Result, allowed []string) (string, e
 // backend's status.
 type messagesResponsesReply struct {
 	request gjson.Result
+	records clientRecords
 	dropped droppedFields
+}
+
+// clientRecordsOf is the client tools Claude is given: OpenAI's shell, as
+// Claude's bash tool, and apply_patch, as a tool of that name.
+func clientRecordsOf(request gjson.Result) clientRecords {
+	records := clientRecords{}
+	if request.Get(`tools.#(type=="shell")`).Exists() {
+		records["bash"] = shellCall
+	}
+	if request.Get(`tools.#(type=="apply_patch")`).Exists() {
+		records[patchToolName] = patchCall
+	}
+	return records
 }
 
 func (r *messagesResponsesReply) Dropped() []string { return r.dropped }
 
 func (r *messagesResponsesReply) Result(result backend.ChatResult) backend.ChatResult {
 	if result.Stream != nil {
-		return backend.ChatResult{Stream: newMessagesResponsesStream(result.Stream, r.request)}
+		return backend.ChatResult{Stream: newMessagesResponsesStream(result.Stream, r.request, r.records)}
 	}
 	resp := *result.Response
 	resp.ContentType = "application/json"
 	if resp.Status/100 == 2 {
-		resp.Body = responseFromMessage(gjson.ParseBytes(resp.Body), r.request)
+		resp.Body = responseFromMessage(gjson.ParseBytes(resp.Body), r.request, r.records)
 		resp.RetryAfter = ""
 	} else {
 		resp.Body = openAIError(resp.Body)
@@ -1045,9 +1412,10 @@ func (r *messagesResponsesReply) Result(result backend.ChatResult) backend.ChatR
 // thinking is, carrying the block in encrypted_content; text as a message,
 // and each tool_use block as a function call. Other blocks, such as server
 // tool results, have no place in a response and are left out.
-func responseFromMessage(msg, request gjson.Result) []byte {
+func responseFromMessage(msg, request gjson.Result, records clientRecords) []byte {
 	b := newResponseBuilder(request, false)
 	b.model = msg.Get("model").String()
+	uses := map[string]gjson.Result{} // server tool calls, by ID, for their results
 	for _, block := range msg.Get("content").Array() {
 		switch block.Get("type").String() {
 		case "thinking", "redacted_thinking":
@@ -1056,13 +1424,96 @@ func responseFromMessage(msg, request gjson.Result) []byte {
 			b.encrypt(encodeThinking([]byte(block.Raw)))
 			b.closeItem()
 		case "text":
+			start := b.textLength()
 			b.text("output_text", block.Get("text").String())
+			annotateResponseCitations(b, block.Get("citations").Array(), start)
 		case "tool_use":
+			if record := records[block.Get("name").String()]; record != nil {
+				b.record(record(block.Get("id").String(), block.Get("input").Raw))
+				continue
+			}
 			b.call(block.Get("id").String(), block.Get("name").String())
 			b.arguments(block.Get("input").Raw)
+		case "server_tool_use":
+			uses[block.Get("id").String()] = block
+			if record := serverToolRecord(block.Get("name").String(), block.Get("input").Raw); record != nil {
+				b.record(record)
+			}
+		case "bash_code_execution_tool_result", "code_execution_tool_result", "text_editor_code_execution_tool_result":
+			b.record(codeRecord(uses[block.Get("tool_use_id").String()], block, msg.Get("container.id").String()))
+		case "mcp_tool_use":
+			uses[block.Get("id").String()] = block
+		case "mcp_tool_result":
+			b.record(mcpRecord(uses[block.Get("tool_use_id").String()], block))
 		}
 	}
 	return b.finish(incompleteFromStop(msg.Get("stop_reason").String()), messagesUsageForResponses(msg.Get("usage").Get))
+}
+
+// mcpRecord is a Claude MCP call and its result as the mcp_call item
+// Responses records one with.
+func mcpRecord(use, result gjson.Result) map[string]any {
+	var texts []string
+	for _, block := range result.Get("content").Array() {
+		texts = append(texts, block.Get("text").String())
+	}
+	record := map[string]any{"id": newID("mcp_"), "type": "mcp_call", "status": "completed", "server_label": use.Get("server_name").String(), "name": use.Get("name").String(), "arguments": jsonOr(use.Get("input").Raw, "{}"), "output": strings.Join(texts, "\n"), "error": nil}
+	if result.Get("is_error").Bool() {
+		record["output"], record["error"] = nil, strings.Join(texts, "\n")
+	}
+	return record
+}
+
+// jsonOr is text if it is valid JSON, else fallback, for input a stream may
+// have sent in part.
+func jsonOr(text, fallback string) string {
+	if gjson.Valid(text) {
+		return text
+	}
+	return fallback
+}
+
+// codeRecord is a Claude code execution, its call and its result, as the
+// code_interpreter_call item Responses records one with: the command or code
+// run, and its output as logs (Claude's shapes seen 2026-11-10 on Haiku 5.5:
+// bash_code_execution with input.command, a result with stdout, stderr and
+// return_code).
+func codeRecord(use, result gjson.Result, container string) map[string]any {
+	input := use.Get("input")
+	code := input.Get("command").String()
+	if code == "" {
+		code = input.Get("code").String()
+	}
+	if code == "" && input.Exists() {
+		code = input.Raw
+	}
+	content := result.Get("content")
+	logs := content.Get("stdout").String() + content.Get("stderr").String()
+	if !content.Get("stdout").Exists() && content.Exists() {
+		logs = content.Raw
+	}
+	return map[string]any{"id": newID("ci_"), "type": "code_interpreter_call", "status": "completed", "code": code, "container_id": container, "outputs": []any{map[string]any{"type": "logs", "logs": logs}}}
+}
+
+// annotateResponseCitations adds a Claude text block's web citations to the open text
+// part as URL citations over the block's text, from start to the part's end.
+// Citations of a document the client sent have no Responses counterpart.
+func annotateResponseCitations(b *responseBuilder, citations []gjson.Result, start int) {
+	for _, c := range citations {
+		if url := c.Get("url").String(); url != "" {
+			b.annotate(url, c.Get("title").String(), start, b.textLength())
+		}
+	}
+}
+
+// serverToolRecord is a Claude server tool's call as the Responses item that
+// records the same call, nil for one Responses has no record of. Claude's
+// results stay out: they are encrypted for Claude alone (seen 2026-11-10).
+func serverToolRecord(name, input string) map[string]any {
+	if name == "web_search" {
+		return map[string]any{"id": newID("ws_"), "type": "web_search_call", "status": "completed", "action": map[string]any{"type": "search", "query": gjson.Get(input, "query").String()}}
+	}
+	return nil
 }
 
 // incompleteFromStop maps a Messages stop_reason to Responses'
@@ -1091,11 +1542,18 @@ func messagesUsageForResponses(usage func(path string) gjson.Result) map[string]
 // responseFromMessage does a complete one. A thinking block's text streams
 // as its summary, and its signature, which arrives last, goes into
 // encrypted_content as the item closes. message_stop ends the response.
-func newMessagesResponsesStream(events backend.ChatStream, request gjson.Result) *responsesStream {
+func newMessagesResponsesStream(events backend.ChatStream, request gjson.Result, records clientRecords) *responsesStream {
 	b := newResponseBuilder(request, true)
 	var startUsage, deltaUsage gjson.Result
 	var stop string
-	var thinking, signature strings.Builder
+	var thinking, signature, serverInput strings.Builder
+	var serverTool, serverID string // the open server tool block's tool and ID, or ""
+	var container string            // the code execution container, from message_start
+	uses := map[string]gjson.Result{}
+	var mcpUse gjson.Result         // the open MCP call block, as it started
+	var recordID, recordName string // the open call's ID and tool, when it stands for a record
+	var textStart int               // the open text block's start in its part
+	var citations []gjson.Result    // the open text block's
 	usage := func(path string) gjson.Result {
 		if v := deltaUsage.Get(path); v.Exists() {
 			return v
@@ -1109,6 +1567,7 @@ func newMessagesResponsesStream(events backend.ChatStream, request gjson.Result)
 		case "message_start":
 			b.start(event.Get("message.model").String())
 			startUsage = event.Get("message.usage")
+			container = event.Get("message.container.id").String()
 		case "content_block_start":
 			block := event.Get("content_block")
 			b.closeItem()
@@ -1119,7 +1578,25 @@ func newMessagesResponsesStream(events backend.ChatStream, request gjson.Result)
 			case "redacted_thinking":
 				b.encrypt(encodeThinking([]byte(block.Raw)))
 			case "tool_use":
+				if records[block.Get("name").String()] != nil {
+					recordID, recordName = block.Get("id").String(), block.Get("name").String()
+					serverInput.Reset()
+					break
+				}
 				b.call(block.Get("id").String(), block.Get("name").String())
+			case "server_tool_use":
+				serverTool = block.Get("name").String()
+				serverID = block.Get("id").String()
+				serverInput.Reset()
+			case "bash_code_execution_tool_result", "code_execution_tool_result", "text_editor_code_execution_tool_result":
+				b.record(codeRecord(uses[block.Get("tool_use_id").String()], block, container))
+			case "mcp_tool_use":
+				mcpUse = block
+				serverInput.Reset()
+			case "mcp_tool_result":
+				b.record(mcpRecord(uses[block.Get("tool_use_id").String()], block))
+			case "text":
+				textStart, citations = 0, nil
 			}
 		case "content_block_delta":
 			delta := event.Get("delta")
@@ -1132,9 +1609,36 @@ func newMessagesResponsesStream(events backend.ChatStream, request gjson.Result)
 			case "text_delta":
 				b.text("output_text", delta.Get("text").String())
 			case "input_json_delta":
-				b.arguments(delta.Get("partial_json").String())
+				if serverTool != "" || mcpUse.Exists() || recordID != "" {
+					serverInput.WriteString(delta.Get("partial_json").String())
+				} else {
+					b.arguments(delta.Get("partial_json").String())
+				}
+			case "citations_delta":
+				citations = append(citations, delta.Get("citation"))
 			}
 		case "content_block_stop":
+			if recordID != "" {
+				b.record(records[recordName](recordID, serverInput.String()))
+				recordID = ""
+				return false
+			}
+			if mcpUse.Exists() {
+				input := jsonOr(serverInput.String(), mcpUse.Get("input").Raw)
+				uses[mcpUse.Get("id").String()] = gjson.Parse(setRaw(mcpUse.Raw, "input", jsonOr(input, "{}")))
+				mcpUse = gjson.Result{}
+				return false
+			}
+			if serverTool != "" {
+				uses[serverID] = gjson.Parse(setRaw(set("{}", "name", serverTool), "input", jsonOr(serverInput.String(), "{}")))
+				if record := serverToolRecord(serverTool, serverInput.String()); record != nil {
+					b.record(record)
+				}
+				serverTool = ""
+				return false
+			}
+			annotateResponseCitations(b, citations, textStart)
+			citations = nil
 			if signature.Len() > 0 {
 				block, _ := json.Marshal(map[string]string{"type": "thinking", "thinking": thinking.String(), "signature": signature.String()})
 				b.encrypt(encodeThinking(block))

@@ -150,6 +150,36 @@ func (b *messagesWriter) sign(signature string) {
 	b.signature = signature
 }
 
+// cite adds a web citation to the open text block. Only Claude can write a
+// citation's encrypted_index, so the gateway's carries its marker, by which
+// the anthropic adapter removes it before Claude sees the history.
+func (b *messagesWriter) cite(url, title, citedText string) {
+	if !b.isOpen("text") {
+		return
+	}
+	citation := map[string]any{"type": "web_search_result_location", "url": url, "title": title, "cited_text": citedText, "encrypted_index": backend.GatewayCitation}
+	citations, _ := b.open["citations"].([]any)
+	b.open["citations"] = append(citations, citation)
+	b.delta(map[string]any{"type": "citations_delta", "citation": citation})
+}
+
+// block adds a complete block, such as a server tool's call or result, sent
+// started and stopped at once.
+func (b *messagesWriter) block(block map[string]any) {
+	b.closeBlock()
+	b.blocks = append(b.blocks, block)
+	b.event(map[string]any{"type": "content_block_start", "index": b.index(), "content_block": block})
+	b.event(map[string]any{"type": "content_block_stop", "index": b.index()})
+}
+
+// openText is the open text block's text so far, "" if none is open.
+func (b *messagesWriter) openText() string {
+	if !b.isOpen("text") {
+		return ""
+	}
+	return b.open["text"].(string)
+}
+
 // useTool opens a tool_use block.
 func (b *messagesWriter) useTool(id, name string) {
 	b.openBlock(map[string]any{"type": "tool_use", "id": id, "name": name})
@@ -215,9 +245,11 @@ type messagesBlock struct {
 	kind  string // the block's type
 	raw   gjson.Result
 	text  string // a text block's text, a search result's text
+	// citations are a text block's.
+	citations []gjson.Result
 	// source is an image's or document's source.
 	source gjson.Result
-	// id, name and input are a tool_use's.
+	// id, name and input are a tool_use's, or a server tool's call.
 	id, name string
 	input    string
 	// toolUseID, isError and content are a tool result's.
@@ -250,10 +282,10 @@ func readMessagesBlocks(content gjson.Result, where string) []messagesBlock {
 		b := messagesBlock{where: where + ".content[" + strconv.Itoa(j) + "]", kind: block.Get("type").String(), raw: block, source: block.Get("source")}
 		switch b.kind {
 		case "text":
-			b.text = block.Get("text").String()
+			b.text, b.citations = block.Get("text").String(), block.Get("citations").Array()
 		case "search_result":
 			b.text = searchResultText(block)
-		case "tool_use":
+		case "tool_use", "server_tool_use", "mcp_tool_use":
 			b.id, b.name, b.input = block.Get("id").String(), block.Get("name").String(), block.Get("input").Raw
 		case "tool_result":
 			b.toolUseID, b.isError = block.Get("tool_use_id").String(), block.Get("is_error").Bool()
@@ -272,6 +304,38 @@ func searchResultText(block gjson.Result) string {
 		texts = append(texts, part.Get("text").String())
 	}
 	return block.Get("title").String() + " (" + block.Get("source").String() + ")\n" + strings.Join(texts, "\n")
+}
+
+// serverToolText is a server tool's call or result from a conversation's
+// history as text, for a model that can't take the block itself: what was
+// called with what input, or what came back.
+func serverToolText(block messagesBlock) string {
+	switch block.kind {
+	case "server_tool_use", "mcp_tool_use":
+		return "[" + block.name + " called with " + block.input + "]"
+	case "web_search_tool_result":
+		var results []string
+		for _, r := range block.raw.Get("content").Array() {
+			if url := r.Get("url").String(); url != "" {
+				results = append(results, r.Get("title").String()+" <"+url+">")
+			}
+		}
+		return "[web search results: " + strings.Join(results, "; ") + "]"
+	}
+	if content := block.raw.Get("content"); content.Exists() {
+		return "[" + block.kind + ": " + content.Raw + "]"
+	}
+	return "[" + block.kind + "]"
+}
+
+// isServerToolBlock reports whether a block is a server tool's call or
+// result, which only the Claude API reads.
+func isServerToolBlock(kind string) bool {
+	switch kind {
+	case "server_tool_use", "mcp_tool_use", "mcp_tool_result", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "tool_search_tool_result", "advisor_tool_result", "container_upload":
+		return true
+	}
+	return false
 }
 
 // readMessagesSystem joins the system prompt's text.
@@ -299,8 +363,8 @@ var droppedMessagesFieldsEverywhere = map[string]bool{
 }
 
 // reportDroppedBlocks reports what translating a Messages conversation leaves
-// out of its blocks: cache markers, eager input streaming and document
-// citations. A quoted key can only
+// out of its blocks: cache markers, eager input streaming, document
+// citations, and server tool blocks, which become text. A quoted key can only
 // match a real key, since quotes inside a JSON string are escaped.
 func reportDroppedBlocks(body []byte, turns []messagesTurn, gone *droppedFields) {
 	if bytesContain(body, "cache_control") {
@@ -314,6 +378,8 @@ func reportDroppedBlocks(body []byte, turns []messagesTurn, gone *droppedFields)
 			switch {
 			case b.kind == "document" && b.raw.Get("citations.enabled").Bool():
 				gone.add("citations")
+			case isServerToolBlock(b.kind):
+				gone.add(b.kind)
 			}
 		}
 	}
@@ -436,4 +502,67 @@ func documentBlock(part chatPart, where string) (string, error) {
 		return "", refuse("%s: the Claude API takes a file part only as an inline PDF in file_data", where)
 	}
 	return set(`{"type":"document","source":{"type":"base64","media_type":"application/pdf"}}`, "source.data", data), nil
+}
+
+// isClaudeWebSearch reports whether a Messages tool is Claude's web search,
+// in any of its versions (web_search_20250305, 20260209, 20260318 seen).
+func isClaudeWebSearch(tool gjson.Result) bool {
+	return strings.HasPrefix(tool.Get("type").String(), "web_search_")
+}
+
+// claudeSearchLocation is a web search tool's user location, which Claude
+// and Responses both spell flat: type, city, region, country, timezone.
+func claudeSearchLocation(tool gjson.Result) gjson.Result {
+	return tool.Get("user_location")
+}
+
+// reportSearchSettings reports a Claude web search tool's settings that the
+// target has no counterpart for.
+func reportSearchSettings(tool gjson.Result, gone *droppedFields, unmatched ...string) {
+	for _, key := range unmatched {
+		if tool.Get(key).Exists() {
+			gone.add("tools." + key)
+		}
+	}
+}
+
+// editorToolType is the text editor of Claude 4 and later, the one a backend
+// without it is given as a function: editorDescription and editorSchema
+// describe its commands as the Claude API documents them, and gpt-5.4-nano
+// used each of them through that function as Claude does (2026-11-10).
+const editorToolType = "text_editor_20250728"
+
+const editorDescription = "View, create and edit files. Commands:\n" +
+	"- view: show a file with line numbers, or list a directory; view_range [start, end] limits a file to those lines (end -1 for the end).\n" +
+	"- create: write file_text to a new file at path.\n" +
+	"- str_replace: replace old_str, which must occur exactly once in the file, with new_str.\n" +
+	"- insert: insert insert_text after line insert_line (0 for the start of the file)."
+
+const editorSchema = `{"type":"object","properties":{"command":{"type":"string","enum":["view","create","str_replace","insert"]},"path":{"type":"string"},"view_range":{"type":"array","items":{"type":"integer"}},"file_text":{"type":"string"},"old_str":{"type":"string"},"new_str":{"type":"string"},"insert_line":{"type":"integer"},"insert_text":{"type":"string"}},"required":["command","path"]}`
+
+// bashDescription and bashSchema describe Claude's bash tool, as the Claude
+// API documents it, for a backend without it.
+const bashDescription = "Run a command in a bash shell that keeps its state between calls, and return its output. restart: true starts a new shell."
+
+const bashSchema = `{"type":"object","properties":{"command":{"type":"string"},"restart":{"type":"boolean"}}}`
+
+// clientToolFunction is a tool the Claude API defines and the client runs,
+// bash or the text editor, as a function of its name with its commands, for
+// a backend without it; "" for any other tool. An earlier text editor is
+// refused.
+func clientToolFunction(tool gjson.Result, i int) (string, error) {
+	kind := tool.Get("type").String()
+	var description, schema string
+	switch {
+	case strings.HasPrefix(kind, "bash_"):
+		description, schema = bashDescription, bashSchema
+	case kind == editorToolType:
+		description, schema = editorDescription, editorSchema
+	case strings.HasPrefix(kind, "text_editor_"):
+		return "", refuseMessages("tools[%d]: '%s' is the text editor of Claude models before Claude 4; use '%s'", i, kind, editorToolType)
+	default:
+		return "", nil
+	}
+	function := set(set(`{}`, "name", tool.Get("name").String()), "description", description)
+	return setRaw(function, "parameters", schema), nil
 }

@@ -82,7 +82,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 		return backend.ChatResult{}, err
 	}
 	req.Body = body
-	resp, err := b.Send(ctx, req, "/v1/messages", messagesHeader(req.Client))
+	resp, err := b.Send(ctx, req, "/v1/messages", withMCPBeta(messagesHeader(req.Client), body))
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -108,7 +108,7 @@ func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*ba
 		return nil, err
 	}
 	req.Body = body
-	return b.ForwardCountTokens(ctx, req, messagesHeader(req.Client))
+	return b.ForwardCountTokens(ctx, req, withMCPBeta(messagesHeader(req.Client), body))
 }
 
 // messagesHeader is the adapter's API version, with what the client asked for
@@ -121,14 +121,39 @@ func messagesHeader(client backend.Client) http.Header {
 	return header
 }
 
-// withoutUnsignedThinking removes the thinking blocks the gateway made from a
-// Chat Completions model's reasoning or an OpenAI reasoning item, which the API
-// refuses (verified: a made-up signature is a 400 in any turn), and any
-// assistant turn they leave empty. What remains is a history it accepts, real
-// signed blocks included (verified). A body without either marker passes on
-// unchanged, with nothing parsed.
+// mcpBeta is the beta the MCP connector needs (Claude API docs; seen
+// 2026-11-10).
+const mcpBeta = "mcp-client-2025-11-20"
+
+// withMCPBeta adds the MCP connector's beta to a request that names MCP
+// servers, if the client didn't: a translated request's client, of another
+// API, can't know Claude needs it.
+func withMCPBeta(header http.Header, body []byte) http.Header {
+	if !bytes.Contains(body, []byte(`"mcp_servers"`)) {
+		return header
+	}
+	for _, value := range header.Values("Anthropic-Beta") {
+		for _, beta := range strings.Split(value, ",") {
+			if strings.HasPrefix(strings.TrimSpace(beta), "mcp-client-") {
+				return header
+			}
+		}
+	}
+	header.Add("Anthropic-Beta", mcpBeta)
+	return header
+}
+
+// withoutUnsignedThinking removes what the gateway made for a Messages client
+// and only Claude can make: thinking blocks from a Chat Completions model's
+// reasoning or an OpenAI reasoning item, which the API refuses (verified: a
+// made-up signature is a 400 in any turn), and any assistant turn they leave
+// empty; server tool calls and results made from an OpenAI API's records,
+// whose IDs Claude didn't issue; and citations from an OpenAI API's, whose
+// encrypted_index Claude can't read. What remains is a history it accepts, real signed blocks
+// included (verified). A body without a marker passes on unchanged, with
+// nothing parsed.
 func withoutUnsignedThinking(body []byte) ([]byte, error) {
-	if !bytes.Contains(body, []byte(backend.UnsignedThinking)) && !bytes.Contains(body, []byte(backend.OpenAIReasoning)) {
+	if !bytes.Contains(body, []byte(backend.UnsignedThinking)) && !bytes.Contains(body, []byte(backend.OpenAIReasoning)) && !bytes.Contains(body, []byte(backend.GatewayCitation)) && !bytes.Contains(body, []byte(backend.GatewayServerTool)) {
 		return body, nil
 	}
 	var messages []string
@@ -140,12 +165,19 @@ func withoutUnsignedThinking(body []byte) ([]byte, error) {
 			return true
 		}
 		var kept []string
+		cited := false
 		for _, block := range content.Array() {
-			if block.Get("type").String() != "thinking" || !backend.MadeByGateway(block.Get("signature").String()) {
-				kept = append(kept, block.Raw)
+			if block.Get("type").String() == "thinking" && backend.MadeByGateway(block.Get("signature").String()) {
+				continue
 			}
+			if strings.HasPrefix(block.Get("id").String(), backend.GatewayServerTool) || strings.HasPrefix(block.Get("tool_use_id").String(), backend.GatewayServerTool) {
+				continue
+			}
+			raw, changed := withoutGatewayCitations(block)
+			cited = cited || changed
+			kept = append(kept, raw)
 		}
-		if len(kept) == len(content.Array()) {
+		if len(kept) == len(content.Array()) && !cited {
 			messages = append(messages, message.Raw)
 			return true
 		}
@@ -174,6 +206,30 @@ func withoutDisabledDisplay(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	return sjson.DeleteBytes(body, "thinking.display")
+}
+
+// withoutGatewayCitations returns a text block without the citations the
+// gateway made, and whether it had any.
+func withoutGatewayCitations(block gjson.Result) (string, bool) {
+	citations := block.Get("citations")
+	if block.Get("type").String() != "text" || !citations.IsArray() {
+		return block.Raw, false
+	}
+	var kept []string
+	for _, c := range citations.Array() {
+		if c.Get("encrypted_index").String() != backend.GatewayCitation {
+			kept = append(kept, c.Raw)
+		}
+	}
+	if len(kept) == len(citations.Array()) {
+		return block.Raw, false
+	}
+	if len(kept) == 0 {
+		raw, _ := sjson.Delete(block.Raw, "citations")
+		return raw, true
+	}
+	raw, _ := sjson.SetRaw(block.Raw, "citations", "["+strings.Join(kept, ",")+"]")
+	return raw, true
 }
 
 // withMaxTokens adds the model's output cap to a body with no max_tokens. ok

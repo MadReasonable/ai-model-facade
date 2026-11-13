@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 
@@ -64,6 +66,44 @@ func wantsLogprobs(req gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+// responsesServerItems are input items that record a call of a tool OpenAI's
+// servers ran, which only OpenAI reads; toward another API each becomes text
+// the model can read.
+var responsesServerItems = map[string]bool{
+	"code_interpreter_call": true,
+	"file_search_call":      true,
+	"image_generation_call": true,
+	"mcp_call":              true,
+	"mcp_list_tools":        true,
+	"mcp_approval_request":  true,
+	"mcp_approval_response": true,
+	"web_search_call":       true,
+	"tool_search_call":      true,
+	"compaction_trigger":    true,
+	"program":               true,
+	"program_output":        true,
+	"additional_tools":      true,
+}
+
+// serverItemText is a server tool's record from a conversation's history as
+// text: what was searched, run or called, and what came back.
+func serverItemText(item gjson.Result) string {
+	kind := item.Get("type").String()
+	switch kind {
+	case "web_search_call":
+		return "[web search: " + item.Get("action.query").String() + "]"
+	case "code_interpreter_call":
+		var outputs []string
+		for _, o := range item.Get("outputs").Array() {
+			outputs = append(outputs, o.Get("logs").String())
+		}
+		return "[code run: " + item.Get("code").String() + " -> " + strings.Join(outputs, "\n") + "]"
+	case "mcp_call":
+		return "[" + item.Get("name").String() + " called with " + item.Get("arguments").String() + " -> " + item.Get("output").String() + "]"
+	}
+	return "[" + kind + "]"
 }
 
 // allowedNames is the names of the tools a Responses tool choice allows, nil
@@ -132,20 +172,25 @@ type responseBuilder struct {
 }
 
 type outputItem struct {
-	kind      string // reasoning, message or function_call
+	kind      string         // reasoning, message, function_call or record
+	raw       map[string]any // a record's object
 	id        string
 	index     int
 	content   []*contentPart // message content, or reasoning_text
 	summary   []*contentPart // summary_text
 	callID    string
 	name      string
+	namespace string // the namespace holding a called tool, if any
 	arguments strings.Builder
 	encrypted string
 }
 
 type contentPart struct {
-	kind string // output_text, refusal, reasoning_text or summary_text
-	text strings.Builder
+	kind        string // output_text, refusal, reasoning_text or summary_text
+	text        strings.Builder
+	length      int // characters of text, which an annotation's range counts in
+	annotations []any
+	logprobs    []json.RawMessage
 }
 
 func newResponseBuilder(request gjson.Result, streaming bool) *responseBuilder {
@@ -179,12 +224,12 @@ func (b *responseBuilder) event(kind string, fields map[string]any) {
 }
 
 func (b *responseBuilder) openItem(kind string, fields func(*outputItem)) *outputItem {
-	if b.open != nil && b.open.kind == kind && kind != "function_call" {
+	if b.open != nil && b.open.kind == kind && kind != "function_call" && kind != "custom_tool_call" {
 		return b.open
 	}
 	b.closeItem()
 	b.start("")
-	prefixes := map[string]string{"reasoning": "rs_", "message": "msg_", "function_call": "fc_"}
+	prefixes := map[string]string{"reasoning": "rs_", "message": "msg_", "function_call": "fc_", "custom_tool_call": "ctc_"}
 	item := &outputItem{kind: kind, id: newID(prefixes[kind]), index: len(b.output)}
 	if fields != nil {
 		fields(item)
@@ -198,19 +243,67 @@ func (b *responseBuilder) openItem(kind string, fields func(*outputItem)) *outpu
 // text adds a delta to the open message, in a part of this kind: output_text
 // or refusal.
 func (b *responseBuilder) text(kind, delta string) {
+	b.textWithLogprobs(kind, delta, nil)
+}
+
+// textWithLogprobs is text with the log probabilities of its tokens, which a
+// text part carries as Responses reports them (verified 2026-11-09, the same
+// shape as Chat Completions').
+func (b *responseBuilder) textWithLogprobs(kind, delta string, logprobs []json.RawMessage) {
 	if delta == "" {
 		return
 	}
 	item := b.openItem("message", nil)
 	part, index := b.part(item, &item.content, kind, "")
 	part.text.WriteString(delta)
+	part.length += utf8.RuneCountInString(delta)
+	part.logprobs = append(part.logprobs, logprobs...)
 	fields := map[string]any{"item_id": item.id, "output_index": item.index, "content_index": index, "delta": delta}
 	if kind == "output_text" {
-		fields["logprobs"] = []any{}
+		fields["logprobs"] = logprobs
+		if logprobs == nil {
+			fields["logprobs"] = []any{}
+		}
 		b.event("response.output_text.delta", fields)
 		return
 	}
 	b.event("response.refusal.delta", fields)
+}
+
+// textLength is how many characters the open text part holds, 0 if none is
+// open, for an annotation whose range starts after text written so far.
+func (b *responseBuilder) textLength() int {
+	if b.open == nil || b.open.kind != "message" || len(b.open.content) == 0 {
+		return 0
+	}
+	if part := b.open.content[len(b.open.content)-1]; part.kind == "output_text" {
+		return part.length
+	}
+	return 0
+}
+
+// annotate adds a URL citation to the open text part, its range counted in
+// that part's characters, as Responses counts it.
+func (b *responseBuilder) annotate(url, title string, start, end int) {
+	if b.open == nil || b.open.kind != "message" || len(b.open.content) == 0 {
+		return
+	}
+	index := len(b.open.content) - 1
+	part := b.open.content[index]
+	annotation := map[string]any{"type": "url_citation", "url": url, "title": title, "start_index": start, "end_index": end}
+	part.annotations = append(part.annotations, annotation)
+	b.event("response.output_text.annotation.added", map[string]any{"item_id": b.open.id, "output_index": b.open.index, "content_index": index, "annotation_index": len(part.annotations) - 1, "annotation": annotation})
+}
+
+// record adds a complete output item that records a server tool's call, such
+// as a web search, sent added and done at once.
+func (b *responseBuilder) record(object map[string]any) {
+	b.closeItem()
+	b.start("")
+	item := &outputItem{kind: "record", index: len(b.output), raw: object}
+	b.output = append(b.output, item)
+	b.event("response.output_item.added", map[string]any{"output_index": item.index, "item": object})
+	b.event("response.output_item.done", map[string]any{"output_index": item.index, "item": object})
 }
 
 // reasoning adds a delta to the open reasoning item, as reasoning_text or
@@ -274,16 +367,27 @@ func (b *responseBuilder) closePart(item *outputItem, parts []*contentPart, summ
 
 // call opens a function call.
 func (b *responseBuilder) call(callID, name string) {
-	b.openItem("function_call", func(item *outputItem) { item.callID, item.name = callID, name })
+	namespace, own := b.namespaceOf(name)
+	b.openItem("function_call", func(item *outputItem) { item.callID, item.name, item.namespace = callID, own, namespace })
+}
+
+// callCustom opens a custom tool's call, whose input is free text.
+func (b *responseBuilder) callCustom(callID, name string) {
+	namespace, own := b.namespaceOf(name)
+	b.openItem("custom_tool_call", func(item *outputItem) { item.callID, item.name, item.namespace = callID, own, namespace })
 }
 
 // arguments adds a delta to the open function call's arguments.
 func (b *responseBuilder) arguments(delta string) {
 	item := b.open
-	if item == nil || item.kind != "function_call" || delta == "" {
+	if item == nil || (item.kind != "function_call" && item.kind != "custom_tool_call") || delta == "" {
 		return
 	}
 	item.arguments.WriteString(delta)
+	if item.kind == "custom_tool_call" {
+		b.event("response.custom_tool_call_input.delta", map[string]any{"item_id": item.id, "output_index": item.index, "delta": delta})
+		return
+	}
 	b.event("response.function_call_arguments.delta", map[string]any{"item_id": item.id, "output_index": item.index, "delta": delta})
 }
 
@@ -308,6 +412,8 @@ func (b *responseBuilder) closeItem() {
 		b.closePart(item, item.content, "")
 	case "function_call":
 		b.event("response.function_call_arguments.done", map[string]any{"item_id": item.id, "output_index": item.index, "arguments": item.arguments.String()})
+	case "custom_tool_call":
+		b.event("response.custom_tool_call_input.done", map[string]any{"item_id": item.id, "output_index": item.index, "input": item.arguments.String()})
 	}
 	b.event("response.output_item.done", map[string]any{"output_index": item.index, "item": item.object("completed")})
 }
@@ -378,6 +484,9 @@ func (b *responseBuilder) response(status, incomplete string, usage map[string]a
 
 // object is the item as a Responses output item, with this status once done.
 func (item *outputItem) object(status string) map[string]any {
+	if item.kind == "record" {
+		return item.raw
+	}
 	if status == "in_progress" {
 		// a newly added item has no parts yet
 		switch item.kind {
@@ -386,7 +495,10 @@ func (item *outputItem) object(status string) map[string]any {
 		case "message":
 			return map[string]any{"id": item.id, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}}
 		}
-		return map[string]any{"id": item.id, "type": "function_call", "status": "in_progress", "call_id": item.callID, "name": item.name, "arguments": ""}
+		if item.kind == "custom_tool_call" {
+			return item.withNamespace(map[string]any{"id": item.id, "type": "custom_tool_call", "status": "in_progress", "call_id": item.callID, "name": item.name, "input": ""})
+		}
+		return item.withNamespace(map[string]any{"id": item.id, "type": "function_call", "status": "in_progress", "call_id": item.callID, "name": item.name, "arguments": ""})
 	}
 	switch item.kind {
 	case "reasoning":
@@ -401,7 +513,18 @@ func (item *outputItem) object(status string) map[string]any {
 	case "message":
 		return map[string]any{"id": item.id, "type": "message", "status": status, "role": "assistant", "content": parts(item.content)}
 	}
-	return map[string]any{"id": item.id, "type": "function_call", "status": status, "call_id": item.callID, "name": item.name, "arguments": item.arguments.String()}
+	if item.kind == "custom_tool_call" {
+		return item.withNamespace(map[string]any{"id": item.id, "type": "custom_tool_call", "status": status, "call_id": item.callID, "name": item.name, "input": item.arguments.String()})
+	}
+	return item.withNamespace(map[string]any{"id": item.id, "type": "function_call", "status": status, "call_id": item.callID, "name": item.name, "arguments": item.arguments.String()})
+}
+
+// withNamespace adds a call's namespace to its object, where it has one.
+func (item *outputItem) withNamespace(object map[string]any) map[string]any {
+	if item.namespace != "" {
+		object["namespace"] = item.namespace
+	}
+	return object
 }
 
 func parts(list []*contentPart) []any {
@@ -416,7 +539,14 @@ func (part *contentPart) object() map[string]any {
 	text := part.text.String()
 	switch part.kind {
 	case "output_text":
-		return map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}
+		var annotations, logprobs any = part.annotations, part.logprobs
+		if part.annotations == nil {
+			annotations = []any{}
+		}
+		if part.logprobs == nil {
+			logprobs = []any{}
+		}
+		return map[string]any{"type": "output_text", "text": text, "annotations": annotations, "logprobs": logprobs}
 	case "refusal":
 		return map[string]any{"type": "refusal", "refusal": text}
 	}
@@ -544,4 +674,166 @@ func streamErrorMessage(data []byte) string {
 		return message
 	}
 	return errorMessage(data)
+}
+
+// A Responses client's shell and apply_patch, which it runs itself, reach a
+// backend without them as tools of their names: patchSchema takes the
+// operation apply_patch_call carries, and patchDescription gives the diff
+// format OpenAI's Agents SDK applies (apply_diff.py, read 2026-11-10), in
+// which Claude Sonnet 5.5 and Haiku 5.5 wrote diffs that applied, creating,
+// updating in several places and deleting (2026-11-10); shellSchema takes
+// the commands shell_call carries.
+const (
+	patchToolName = "apply_patch"
+	shellToolName = "shell"
+)
+
+const patchSchema = `{"type":"object","properties":{"type":{"type":"string","enum":["create_file","update_file","delete_file"]},"path":{"type":"string"},"diff":{"type":"string"}},"required":["type","path"]}`
+
+const patchDescription = "Create, update or delete one file.\n" +
+	"- create_file: diff is the file's full contents, every line prefixed with \"+\" (an empty line is a lone \"+\").\n" +
+	"- update_file: diff is one or more hunks. A hunk starts with a line \"@@\", or \"@@ \" followed by one line of the file that comes before the change, such as a function's signature, to find the place. Then each line of the hunk starts with \" \" for an unchanged line, \"-\" for a line removed or \"+\" for a line added. Give about three unchanged lines before and after each change, so the place is found once. Unchanged and removed lines must match the file exactly. A hunk at the end of the file can end with a line \"*** End of File\".\n" +
+	"- delete_file: no diff."
+
+const shellSchema = `{"type":"object","properties":{"commands":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["commands"]}`
+
+const shellDescription = "Run shell commands, one after another, and return each one's output and exit status. timeout_ms limits how long each may run."
+
+// namespaceSeparator joins a namespace's name and the name of a tool it
+// holds, in the name a backend is given: only Responses groups tools in
+// namespaces, and the Claude API and Chat Completions take only letters,
+// digits, _ and - in a tool's name.
+const namespaceSeparator = "__"
+
+// withoutNamespaces rewrites a Responses request for a backend with no
+// namespace tools, which group a client's own tools under one name, as Codex
+// groups its sub-agent functions. Each namespace becomes the tools it holds,
+// each named its namespace's name and its own, joined by namespaceSeparator,
+// and described by the namespace's description ahead of its own. A call in
+// the input that names a namespace is renamed the same way, and so is a tool
+// a tool choice names, which names no namespace, where only one namespace
+// holds it. responseBuilder.call gives the reply's calls their namespace back.
+func withoutNamespaces(body []byte) ([]byte, error) {
+	req := gjson.ParseBytes(body)
+	tools := req.Get("tools").Array()
+	top := map[string]bool{}
+	for _, tool := range tools {
+		if tool.Get("type").String() != "namespace" {
+			top[tool.Get("name").String()] = true
+		}
+	}
+	out := string(body)
+	if len(top) < len(tools) {
+		var flat []string
+		held := map[string][]string{} // a held tool's own name: the names it is given
+		for i, tool := range tools {
+			if tool.Get("type").String() != "namespace" {
+				flat = append(flat, tool.Raw)
+				continue
+			}
+			namespace := tool.Get("name").String()
+			for _, inner := range tool.Get("tools").Array() {
+				own, name := inner.Get("name").String(), namespace+namespaceSeparator+inner.Get("name").String()
+				if top[name] {
+					return nil, refuse("tools[%d]: namespace '%s' holds '%s', which a backend without namespaces is given as '%s', the name of another tool", i, namespace, own, name)
+				}
+				description := strings.TrimSpace(tool.Get("description").String() + "\n\n" + inner.Get("description").String())
+				flat = append(flat, set(set(inner.Raw, "name", name), "description", description))
+				held[own] = append(held[own], name)
+			}
+		}
+		out = setRaw(out, "tools", "["+strings.Join(flat, ",")+"]")
+		named := func(path string) error {
+			own := req.Get(path).String()
+			if top[own] || len(held[own]) == 0 {
+				return nil
+			}
+			if len(held[own]) > 1 {
+				return refuse("%s: '%s' is in more than one namespace, and a tool choice names no namespace", path, own)
+			}
+			out = set(out, path, held[own][0])
+			return nil
+		}
+		choice := req.Get("tool_choice")
+		switch choice.Get("type").String() {
+		case "function", "custom":
+			if err := named("tool_choice.name"); err != nil {
+				return nil, err
+			}
+		case "allowed_tools":
+			for i := range choice.Get("tools").Array() {
+				if err := named(fmt.Sprintf("tool_choice.tools.%d.name", i)); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for i, item := range req.Get("input").Array() {
+		if namespace := item.Get("namespace").String(); namespace != "" {
+			if kind := item.Get("type").String(); kind == "function_call" || kind == "custom_tool_call" {
+				out = set(out, fmt.Sprintf("input.%d.name", i), namespace+namespaceSeparator+item.Get("name").String())
+			}
+		}
+	}
+	return []byte(out), nil
+}
+
+// namespaceOf splits the name a backend called a tool by into the namespace
+// holding the tool and the tool's own name, as withoutNamespaces named it,
+// or returns no namespace for a tool that isn't in one.
+func (b *responseBuilder) namespaceOf(name string) (namespace, own string) {
+	for _, tool := range b.request.Get("tools").Array() {
+		if tool.Get("type").String() != "namespace" {
+			continue
+		}
+		prefix := tool.Get("name").String() + namespaceSeparator
+		for _, inner := range tool.Get("tools").Array() {
+			if name == prefix+inner.Get("name").String() {
+				return tool.Get("name").String(), inner.Get("name").String()
+			}
+		}
+	}
+	return "", name
+}
+
+// clientRecords holds, by the name of the tool a backend was given, the
+// Responses item that a call of that tool stands for: a call of a tool the
+// client runs that has no function form on the backend, such as shell or
+// apply_patch.
+type clientRecords map[string]func(id, input string) map[string]any
+
+// patchCall is a call of the tool that stands for apply_patch as the
+// apply_patch_call a Responses client runs: its input is the operation.
+func patchCall(id, input string) map[string]any {
+	return map[string]any{"id": newID("apc_"), "type": "apply_patch_call", "call_id": id, "status": "completed", "operation": json.RawMessage(jsonOr(input, "{}"))}
+}
+
+// shellOutputText is a shell_call_output as text, each command's output
+// with how it ended where it failed, and whether any failed or timed out
+// (output shape from openai-python's types, read 2026-11-10).
+func shellOutputText(item gjson.Result) (text string, failed bool) {
+	var texts []string
+	for _, o := range item.Get("output").Array() {
+		texts = append(texts, o.Get("stdout").String()+o.Get("stderr").String())
+		if outcome := o.Get("outcome"); outcome.Get("type").String() == "timeout" {
+			texts = append(texts, "[timed out]")
+			failed = true
+		} else if outcome.Get("exit_code").Int() != 0 {
+			texts = append(texts, "[exit code "+outcome.Get("exit_code").String()+"]")
+			failed = true
+		}
+	}
+	return strings.Join(texts, "\n"), failed
+}
+
+// clientToolClash refuses a function or custom tool named like the tool that stands for a
+// client's shell or apply_patch beside that tool, since a call of it would
+// be read as the client tool's.
+func clientToolClash(tools gjson.Result, shellName string) error {
+	for _, c := range [][2]string{{"shell", shellName}, {"apply_patch", patchToolName}} {
+		if tools.Get(`#(type=="`+c[0]+`")`).Exists() && tools.Get(`#(name=="`+c[1]+`")`).Exists() {
+			return refuse("tools: a function named '%s' can't be sent beside the %s tool, which reaches the backend as a tool of that name", c[1], c[0])
+		}
+	}
+	return nil
 }

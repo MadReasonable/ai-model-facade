@@ -9,7 +9,8 @@
 //  3. Translation, on a translated route.
 //  4. Params in the protocol the backend receives, then the model rewritten
 //     to the candidate's ID.
-//  5. The backend call.
+//  5. The backend call, and on a translated route the turn sent back after
+//     each pause in Claude's reply, which only a Messages client knows to do.
 //  6. The reply translated back, then shown to the hook, which records the
 //     turn.
 package pipeline
@@ -149,6 +150,13 @@ func (p *Pipeline) Serve(ctx context.Context, protocol backend.Protocol, body []
 		return reply, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", sel.BackendName, err)}
 	}
 	if back != nil {
+		send := func(body []byte) (backend.ChatResult, error) {
+			req.Body = body
+			return sel.Backend.Chat(ctx, req)
+		}
+		if reply.Chat, err = translate.Resend(to, body, reply.Chat, send); err != nil {
+			return reply, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s': %v", sel.BackendName, err)}
+		}
 		reply.Chat = back.Result(reply.Chat)
 	}
 	if turn != nil {

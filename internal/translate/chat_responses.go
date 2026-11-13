@@ -86,7 +86,7 @@ func responsesFromChat(body []byte) ([]byte, bool, droppedFields, error) {
 			var text string
 			text, failed = responsesTextFromChat(req)
 			place("text", text)
-		case k == "tools" || k == "functions":
+		case k == "tools" || k == "functions" || k == "web_search_options":
 			var tools string
 			tools, failed = responsesToolsFromChat(req)
 			place("tools", tools)
@@ -128,7 +128,7 @@ func responsesFromChat(body []byte) ([]byte, bool, droppedFields, error) {
 }
 
 // checkChatForResponses refuses the fields that ask for something Responses
-// can't give here: several choices, audio, stop sequences, or web search.
+// can't give: several choices, audio, or stop sequences.
 func checkChatForResponses(req gjson.Result) error {
 	if n := req.Get("n"); n.Exists() && n.Type != gjson.Null && n.Int() != 1 {
 		return refuse("the Responses API returns one choice per request; 'n' must be 1, not %s", n.Raw)
@@ -143,9 +143,6 @@ func checkChatForResponses(req gjson.Result) error {
 	}
 	if stop := req.Get("stop"); isSet(stop) {
 		return refuse("the Responses API has no stop sequences, and this model is served through it; 'stop' must be absent")
-	}
-	if req.Get("web_search_options").Exists() {
-		return refuse("this model is served through the Responses API, and the gateway doesn't translate 'web_search_options' to it")
 	}
 	return nil
 }
@@ -283,7 +280,9 @@ func responsesTextFromChat(req gjson.Result) (string, error) {
 }
 
 // responsesToolsFromChat turns function and custom tools, the legacy
-// functions included, into Responses' flatter shape.
+// functions included, into Responses' flatter shape, and web_search_options
+// into its web_search tool, which takes the same settings with the location
+// flattened.
 func responsesToolsFromChat(req gjson.Result) (string, error) {
 	tools, err := readChatTools(req)
 	if err != nil {
@@ -306,6 +305,21 @@ func responsesToolsFromChat(req gjson.Result) (string, error) {
 		function = setPresent(function, "parameters", tool.parameters)
 		function = setPresent(function, "strict", tool.strict)
 		out = append(out, function)
+	}
+	if options := req.Get("web_search_options"); options.IsObject() {
+		search := `{"type":"web_search"}`
+		if size := options.Get("search_context_size"); size.Exists() && size.Type != gjson.Null {
+			search = setRaw(search, "search_context_size", size.Raw)
+		}
+		if location := options.Get("user_location"); location.IsObject() {
+			flat := set("{}", "type", location.Get("type").String())
+			location.Get("approximate").ForEach(func(key, value gjson.Result) bool {
+				flat = setRaw(flat, pathKey(key.String()), value.Raw)
+				return true
+			})
+			search = setRaw(search, "user_location", flat)
+		}
+		out = append(out, search)
 	}
 	if len(out) == 0 {
 		return "", nil
@@ -365,10 +379,11 @@ func (r *responsesChatReply) Result(result backend.ChatResult) backend.ChatResul
 }
 
 // completionFromResponse turns a response into a chat completion: messages'
-// text joined as content, with its log probabilities, refusals as refusal,
-// reasoning as reasoning_content, as llama-server reports reasoning, and
-// function and custom tool calls as tool calls. Other items have no place in
-// a chat completion and are left out.
+// text joined as content, with its citations and log probabilities, refusals
+// as refusal, reasoning as reasoning_content, as llama-server reports
+// reasoning, and function and custom tool calls as tool calls. Other items,
+// such as a web search's call, have no place in a chat completion and are
+// left out.
 func completionFromResponse(response gjson.Result, legacy bool) []byte {
 	b := newChatWriter(false, false)
 	b.legacy = legacy
@@ -379,7 +394,9 @@ func completionFromResponse(response gjson.Result, legacy bool) []byte {
 			for _, part := range item.Get("content").Array() {
 				switch part.Get("type").String() {
 				case "output_text":
+					start := b.sent()
 					b.text(part.Get("text").String(), rawItems(part.Get("logprobs")))
+					annotate(b, part.Get("annotations").Array(), start)
 				case "refusal":
 					b.refused(part.Get("refusal").String())
 				}
@@ -394,6 +411,21 @@ func completionFromResponse(response gjson.Result, legacy bool) []byte {
 	}
 	b.finish(finishFromResponse(response, len(b.calls) > 0), chatUsageFromResponses(response.Get("usage")))
 	return b.body()
+}
+
+// annotate adds a text part's URL citations as Chat Completions annotations,
+// their ranges moved from the part onto the content of every part joined,
+// since Chat Completions counts them there and Responses within its part,
+// both in characters (verified 2026-11-09 on Norwegian text, a citation after
+// 'o with stroke' and a narrow no-break space landing on the cited link).
+// Other annotations, such as file citations, have no Chat Completions
+// counterpart.
+func annotate(b *chatWriter, annotations []gjson.Result, partStart int) {
+	for _, a := range annotations {
+		if a.Get("type").String() == "url_citation" {
+			b.annotate(a.Get("url").String(), a.Get("title").String(), partStart+int(a.Get("start_index").Int()), partStart+int(a.Get("end_index").Int()))
+		}
+	}
 }
 
 // finishFromResponse maps a response's status to a Chat Completions
@@ -431,6 +463,8 @@ func chatUsageFromResponses(usage gjson.Result) map[string]any {
 //   - a text, refusal or reasoning delta, a chunk with content, refusal or
 //     reasoning_content, a text delta with its log probabilities; a reasoning
 //     item's parts after the first are joined with a blank line;
+//   - a citation, a chunk with annotations, its range counted in the content
+//     streamed;
 //   - a function or custom tool call added, a chunk opening the tool call,
 //     numbered in the order the calls arrive, and its argument or input
 //     deltas, chunks with arguments or input;
@@ -446,8 +480,9 @@ type chatFromResponsesStream struct {
 	reply  *chatWriter
 	done   bool
 
-	calls    map[string]int // tool call item ID -> tool call index
-	reasoned bool           // a reasoning part has been sent in the open item
+	calls     map[string]int // tool call item ID -> tool call index
+	reasoned  bool           // a reasoning part has been sent in the open item
+	partStart int            // content characters sent before the open text part
 }
 
 func newChatFromResponsesStream(events backend.ChatStream, includeUsage, legacy bool) *chatFromResponsesStream {
@@ -497,6 +532,8 @@ func (s *chatFromResponsesStream) translate(event gjson.Result) error {
 		}
 	case "response.content_part.added":
 		switch event.Get("part.type").String() {
+		case "output_text":
+			s.partStart = s.reply.sent()
 		case "reasoning_text":
 			s.separateReasoning()
 		}
@@ -504,6 +541,8 @@ func (s *chatFromResponsesStream) translate(event gjson.Result) error {
 		s.separateReasoning()
 	case "response.output_text.delta":
 		s.reply.text(event.Get("delta").String(), rawItems(event.Get("logprobs")))
+	case "response.output_text.annotation.added":
+		annotate(s.reply, []gjson.Result{event.Get("annotation")}, s.partStart)
 	case "response.refusal.delta":
 		s.reply.refused(event.Get("delta").String())
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
@@ -539,11 +578,16 @@ func (s *chatFromResponsesStream) Close() error {
 type responsesToChat struct{}
 
 func (responsesToChat) Request(body []byte) ([]byte, Reply, error) {
-	out, gone, err := chatFromResponses(body)
+	flat, err := withoutNamespaces(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	return out, &chatResponsesReply{request: gjson.ParseBytes(body), dropped: gone}, nil
+	out, gone, err := chatFromResponses(flat)
+	if err != nil {
+		return nil, nil, err
+	}
+	request := gjson.ParseBytes(body)
+	return out, &chatResponsesReply{request: request, records: chatClientRecords(request), dropped: gone}, nil
 }
 
 // chatFromResponses translates a Responses body into a Chat Completions
@@ -585,10 +629,13 @@ func chatFromResponses(body []byte) ([]byte, droppedFields, error) {
 			}
 			reportSettings(&gone, k, value, "format", "verbosity")
 		case k == "tools":
-			var tools string
-			tools, failed = chatToolsFromResponses(value)
+			var tools, search string
+			tools, search, failed = chatToolsFromResponses(value, &gone)
 			if tools != "" {
 				out.add(`"tools"`, tools)
+			}
+			if search != "" {
+				out.add(`"web_search_options"`, search)
 			}
 		case k == "tool_choice":
 			var choice string
@@ -711,6 +758,28 @@ func chatMessagesFromResponses(req gjson.Result, gone *droppedFields) (string, e
 				call = set(call, "custom.input", item.Get("input").String())
 			}
 			assistant = setRaw(assistant, "tool_calls.-1", call)
+		case "shell_call", "apply_patch_call":
+			if assistant == "" {
+				assistant = `{"role":"assistant","content":null}`
+			}
+			call := set(`{"type":"function","function":{"name":"shell"}}`, "id", item.Get("call_id").String())
+			call = set(call, "function.arguments", setRaw(`{}`, "commands", jsonOr(item.Get("action.commands").Raw, "[]")))
+			if kind == "apply_patch_call" {
+				call = set(set(`{"type":"function","function":{}}`, "id", item.Get("call_id").String()), "function.name", patchToolName)
+				call = set(call, "function.arguments", jsonOr(item.Get("operation").Raw, "{}"))
+			}
+			assistant = setRaw(assistant, "tool_calls.-1", call)
+		case "shell_call_output":
+			flush()
+			output, _ := shellOutputText(item)
+			messages = append(messages, set(set(`{"role":"tool"}`, "tool_call_id", item.Get("call_id").String()), "content", output))
+		case "apply_patch_call_output":
+			flush()
+			output := item.Get("output").String()
+			if item.Get("status").String() == "failed" {
+				output = "The patch failed: " + output
+			}
+			messages = append(messages, set(set(`{"role":"tool"}`, "tool_call_id", item.Get("call_id").String()), "content", output))
 		case "function_call_output", "custom_tool_call_output":
 			flush()
 			output, err := responsesItemText(item.Get("output"), where+".output")
@@ -723,7 +792,19 @@ func chatMessagesFromResponses(req gjson.Result, gone *droppedFields) (string, e
 		case "item_reference":
 			return "", refuse("%s: an item_reference names an item kept at OpenAI; send the item itself, or chain the turn with previous_response_id", where)
 		default:
-			return "", refuse("%s: a '%s' item can't be served through Chat Completions", where, kind)
+			if !responsesServerItems[kind] {
+				return "", refuse("%s: a '%s' item can't be served through Chat Completions", where, kind)
+			}
+			gone.add(kind)
+			text := serverItemText(item)
+			if gjson.Get(assistant, "tool_calls").Exists() {
+				flush()
+			}
+			if assistant == "" {
+				assistant = set(`{"role":"assistant"}`, "content", text)
+			} else {
+				assistant = set(assistant, "content", gjson.Get(assistant, "content").String()+text)
+			}
 		}
 	}
 	flush()
@@ -776,8 +857,15 @@ func chatUserFromResponses(content gjson.Result, where string) (string, error) {
 }
 
 // chatToolsFromResponses turns function and custom tools into Chat
-// Completions tools. The other tools only OpenAI's servers run.
-func chatToolsFromResponses(tools gjson.Result) (out string, err error) {
+// Completions tools, and the web_search tool into web_search_options, which
+// takes the same settings with the location nested (verified 2026-11-09). A
+// search limited to OpenAI's cached index has no counterpart there, where a
+// search is live, and is dropped. The other server tools only OpenAI's
+// servers run.
+func chatToolsFromResponses(tools gjson.Result, gone *droppedFields) (out, search string, err error) {
+	if err := clientToolClash(tools, shellToolName); err != nil {
+		return "", "", err
+	}
 	var list []string
 	for i, tool := range tools.Array() {
 		switch kind := tool.Get("type").String(); kind {
@@ -793,14 +881,38 @@ func chatToolsFromResponses(tools gjson.Result) (out string, err error) {
 				custom = setPresent(custom, key, tool.Get(key))
 			}
 			list = append(list, setRaw(`{"type":"custom"}`, "custom", custom))
+		case "shell", "apply_patch":
+			function := set(`{"name":"shell"}`, "description", shellDescription)
+			function = setRaw(function, "parameters", shellSchema)
+			if kind == "apply_patch" {
+				function = setRaw(set(set(`{}`, "name", patchToolName), "description", patchDescription), "parameters", patchSchema)
+			}
+			list = append(list, setRaw(`{"type":"function"}`, "function", function))
+		case "web_search", "web_search_preview":
+			if tool.Get("external_web_access").Type == gjson.False {
+				gone.add("tools.web_search")
+				continue
+			}
+			search = "{}"
+			search = setPresent(search, "search_context_size", tool.Get("search_context_size"))
+			if location := tool.Get("user_location"); location.IsObject() {
+				nested := set("{}", "type", location.Get("type").String())
+				location.ForEach(func(key, value gjson.Result) bool {
+					if key.String() != "type" {
+						nested = setRaw(nested, "approximate."+pathKey(key.String()), value.Raw)
+					}
+					return true
+				})
+				search = setRaw(search, "user_location", nested)
+			}
 		default:
-			return "", refuse("tools[%d]: '%s' is a tool OpenAI's servers run, and this model is served through Chat Completions, which can't run it", i, kind)
+			return "", "", refuse("tools[%d]: '%s' is a tool OpenAI's servers run, and this model is served through Chat Completions, which can't run it", i, kind)
 		}
 	}
 	if list != nil {
 		out = "[" + strings.Join(list, ",") + "]"
 	}
-	return out, nil
+	return out, search, nil
 }
 
 // chatToolChoiceFromResponses translates a tool choice: a function or custom
@@ -853,19 +965,47 @@ func chatFormatFromResponses(format gjson.Result) (string, error) {
 // the backend's status.
 type chatResponsesReply struct {
 	request gjson.Result
+	records clientRecords
 	dropped droppedFields
+}
+
+// chatClientRecords is the client tools a Chat backend is given as functions
+// of their names: shell and apply_patch.
+func chatClientRecords(request gjson.Result) clientRecords {
+	records := clientRecords{}
+	if request.Get(`tools.#(type=="shell")`).Exists() {
+		records[shellToolName] = shellCallFromArguments
+	}
+	if request.Get(`tools.#(type=="apply_patch")`).Exists() {
+		records[patchToolName] = patchCall
+	}
+	return records
+}
+
+// shellCallFromArguments is a call of the function that stands for a shell
+// as the shell_call a Responses client runs.
+func shellCallFromArguments(id, arguments string) map[string]any {
+	commands := []string{}
+	for _, c := range gjson.Get(arguments, "commands").Array() {
+		commands = append(commands, c.String())
+	}
+	var timeout any
+	if t := gjson.Get(arguments, "timeout_ms"); t.Type == gjson.Number {
+		timeout = t.Int()
+	}
+	return map[string]any{"id": newID("sh_"), "type": "shell_call", "call_id": id, "status": "completed", "action": map[string]any{"commands": commands, "timeout_ms": timeout, "max_output_length": nil}}
 }
 
 func (r *chatResponsesReply) Dropped() []string { return r.dropped }
 
 func (r *chatResponsesReply) Result(result backend.ChatResult) backend.ChatResult {
 	if result.Stream != nil {
-		return backend.ChatResult{Stream: newChatResponsesStream(result.Stream, r.request)}
+		return backend.ChatResult{Stream: newChatResponsesStream(result.Stream, r.request, r.records)}
 	}
 	resp := *result.Response
 	resp.ContentType = "application/json"
 	if resp.Status/100 == 2 {
-		resp.Body = responseFromChat(gjson.ParseBytes(resp.Body), r.request)
+		resp.Body = responseFromChat(gjson.ParseBytes(resp.Body), r.request, r.records)
 		resp.RetryAfter = ""
 	} else if !gjson.GetBytes(resp.Body, "error.message").Exists() {
 		resp.Body = openAIErrorBody("api_error", errorMessage(resp.Body))
@@ -875,20 +1015,50 @@ func (r *chatResponsesReply) Result(result backend.ChatResult) backend.ChatResul
 
 // responseFromChat turns a chat completion into a response: reasoning as a
 // reasoning item, the text and any refusal as a message, and each tool call
-// as a function call.
-func responseFromChat(completion, request gjson.Result) []byte {
+// as a function call, or as the record of the client tool it stands for.
+func responseFromChat(completion, request gjson.Result, records clientRecords) []byte {
 	b := newResponseBuilder(request, false)
 	b.model = completion.Get("model").String()
 	choice := completion.Get("choices.0")
 	message := choice.Get("message")
 	b.reasoning("reasoning_text", reasoningOf(message))
-	b.text("output_text", message.Get("content").String())
+	b.textWithLogprobs("output_text", message.Get("content").String(), rawItems(choice.Get("logprobs.content")))
+	annotateResponse(b, message.Get("annotations").Array())
 	b.text("refusal", message.Get("refusal").String())
 	for _, call := range message.Get("tool_calls").Array() {
+		if call.Get("type").String() == "custom" {
+			b.callCustom(call.Get("id").String(), call.Get("custom.name").String())
+			b.arguments(call.Get("custom.input").String())
+			continue
+		}
+		if record := records[call.Get("function.name").String()]; record != nil {
+			b.record(record(call.Get("id").String(), call.Get("function.arguments").String()))
+			continue
+		}
 		b.call(call.Get("id").String(), call.Get("function.name").String())
 		b.arguments(call.Get("function.arguments").String())
 	}
 	return b.finish(incompleteReason(choice.Get("finish_reason").String()), chatUsageForResponses(completion.Get("usage")))
+}
+
+// openCall opens a function or custom tool's call on the builder.
+func openCall(b *responseBuilder, call *toolCall) {
+	if call.custom {
+		b.callCustom(call.id, call.name)
+		return
+	}
+	b.call(call.id, call.name)
+}
+
+// annotateResponse adds a chat message's URL citations to the open text
+// part. Chat Completions counts a range in the message's content, which the
+// translated message holds as one text part, so the range is kept.
+func annotateResponse(b *responseBuilder, annotations []gjson.Result) {
+	for _, a := range annotations {
+		if c := a.Get("url_citation"); a.Get("type").String() == "url_citation" {
+			b.annotate(c.Get("url").String(), c.Get("title").String(), int(c.Get("start_index").Int()), int(c.Get("end_index").Int()))
+		}
+	}
 }
 
 // incompleteReason maps a Chat Completions finish_reason to Responses'
@@ -913,8 +1083,9 @@ func chatUsageForResponses(usage gjson.Result) map[string]any {
 // as responseFromChat does a complete one. Chunks may interleave tool
 // calls, while Responses sends one item after another, so the first call
 // streams its arguments and the others are sent complete at the end, as
-// messagesToChat's stream does.
-func newChatResponsesStream(chunks backend.ChatStream, request gjson.Result) *responsesStream {
+// messagesToChat's stream does. A call that stands for a client tool's is
+// sent as its record at the end, once its arguments are complete.
+func newChatResponsesStream(chunks backend.ChatStream, request gjson.Result, records clientRecords) *responsesStream {
 	b := newResponseBuilder(request, true)
 	var calls []*toolCall
 	var finish string
@@ -928,7 +1099,8 @@ func newChatResponsesStream(chunks backend.ChatStream, request gjson.Result) *re
 		choice := chunk.Get("choices.0")
 		delta := choice.Get("delta")
 		b.reasoning("reasoning_text", reasoningOf(delta))
-		b.text("output_text", delta.Get("content").String())
+		b.textWithLogprobs("output_text", delta.Get("content").String(), rawItems(choice.Get("logprobs.content")))
+		annotateResponse(b, delta.Get("annotations").Array())
 		b.text("refusal", delta.Get("refusal").String())
 		for _, d := range delta.Get("tool_calls").Array() {
 			index := d.Get("index").Int()
@@ -948,14 +1120,17 @@ func newChatResponsesStream(chunks backend.ChatStream, request gjson.Result) *re
 			if name := d.Get("function.name").String(); name != "" {
 				call.name = name
 			}
-			arguments := d.Get("function.arguments").String()
-			if call != calls[0] || call.name == "" || call.opened && (b.open == nil || b.open.kind != "function_call") {
+			if name := d.Get("custom.name").String(); name != "" {
+				call.name, call.custom = name, true
+			}
+			arguments := d.Get("function.arguments").String() + d.Get("custom.input").String()
+			if call != calls[0] || call.name == "" || records[call.name] != nil || call.opened && (b.open == nil || b.open.kind != "function_call") {
 				call.arguments += arguments
 				continue
 			}
 			if !call.opened {
 				call.opened = true
-				b.call(call.id, call.name)
+				openCall(b, call)
 				b.arguments(call.arguments)
 				call.arguments = ""
 			}
@@ -968,8 +1143,12 @@ func newChatResponsesStream(chunks backend.ChatStream, request gjson.Result) *re
 	}
 	end := func() {
 		for _, call := range calls {
+			if record := records[call.name]; record != nil && !call.custom {
+				b.record(record(call.id, call.arguments))
+				continue
+			}
 			if !call.opened {
-				b.call(call.id, call.name)
+				openCall(b, call)
 			}
 			b.arguments(call.arguments)
 		}

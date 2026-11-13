@@ -392,9 +392,9 @@ As for OpenAI, every listed model is ready while the API answers, and the list i
 The adapter declares only `anthropicMessages`, so a legacy completion can't reach it, and params for it are always in Messages spelling.
 Limit: a key that isn't scoped to one workspace needs `anthropic-workspace-id` on every request, which the gateway doesn't send.
 
-Before a request reaches the API, the adapter removes the thinking blocks the gateway made, whose signature is a gateway marker (`backend.MadeByGateway`), since only Claude may write a signed one (`withoutUnsignedThinking`).
-The API refuses them, and they reach a Claude candidate whenever a conversation started elsewhere continues there.
-It also removes `display` from thinking that params turned off (`withoutDisabledDisplay`).
+Before a request reaches the API, the adapter removes what the gateway made and only Claude may write (`withoutUnsignedThinking`): thinking blocks whose signature is a gateway marker (`backend.MadeByGateway`), citations whose `encrypted_index` is `amf-gateway`, and server tool blocks whose ID starts `srvtoolu_amf_`.
+The API refuses each of them, and they reach a Claude candidate whenever a conversation started elsewhere continues there.
+It also adds the beta header `mcp-client-2025-11-20` to a request with `mcp_servers`, merged with the client's own `anthropic-beta`, since the API refuses MCP without it (verified 2026-11-10), and removes `display` from thinking that params turned off (`withoutDisabledDisplay`).
 
 ### Open WebUI
 
@@ -543,9 +543,9 @@ A Chat Completions request is translated by `toMessages` (`chat_messages.go`), w
 - `stop` becomes `stop_sequences`; function tools become tools with an `input_schema`; `tool_choice` maps `required` to `any` and a named function to `tool`; `parallel_tool_calls: false` becomes `disable_parallel_tool_use`; `reasoning_effort` becomes `output_config.effort`, and a `json_schema` `response_format` becomes `output_config.format`; `user` or `safety_identifier` becomes `metadata.user_id`.
 - Fields that only tune sampling or configure OpenAI's own services, such as `seed`, the penalties, `logit_bias`, `store`, `service_tier` and OpenAI's `metadata`, are dropped, since the API refuses any field it doesn't know (verified: "seed: Extra inputs are not permitted").
 - Any other key passes on unchanged, so a facade's params can set Messages fields such as `thinking`, `cache_control` or `top_k`; where a native `output_config` meets a translated one, its own keys win.
-- A request that asks for what Messages can't give is refused with 400 before anything is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, a custom tool, or a role or content part Messages has no counterpart for. Refused rather than dropped, because the client would otherwise go without what it asked for and not know.
+- A request that asks for what Messages can't give is refused with 400 before anything is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, a custom tool, or a role or content part Messages has no counterpart for. Refused rather than dropped, because the client would otherwise go without what it asked for and not know.
 
-A response becomes a chat completion through `chatWriter`: text blocks joined as `content`, thinking as `reasoning_content`, as llama-server reports reasoning, and `tool_use` blocks as tool calls, each input as its arguments string; other blocks, such as server tool results, are left out.
+A response becomes a chat completion through `chatWriter`: text blocks joined as `content`, thinking as `reasoning_content`, as llama-server reports reasoning, and `tool_use` blocks as tool calls, each input as its arguments string; server tool blocks have no place in a chat completion and are left out, and the answer's citations become `annotations`.
 `stop_reason` maps to `finish_reason`: `max_tokens` to `length`, `tool_use` to `tool_calls`, `refusal` to `content_filter`, anything else to `stop`.
 OpenAI's `prompt_tokens` includes the cache reads and writes that Messages counts apart from `input_tokens`, with the reads again as `cached_tokens`.
 A stream becomes chunks the same way, through the same writer, one event at a time: tool calls numbered in the order they arrive, a usage chunk last when the client set `stream_options.include_usage`, from `message_delta`'s usage, which is cumulative and repeats the input counts (verified).
@@ -575,7 +575,7 @@ Decided against: a backend-level protocols list, which would apply to every mode
 A Messages client's `metadata.user_id` becomes `safety_identifier`, which OpenAI refuses past 128 characters, and Claude Code 2.1.319 sends one of 150 (verified 2026-11-12), so a longer ID is sent as its SHA-256 in hex, which still tells one user from another.
 A Messages client gets OpenAI's reasoning as a thinking block whose signature is `amf-openai:` and the base64 of the reasoning item, requested with `include: ["reasoning.encrypted_content"]`, so the block sent back is the item again (verified on gpt-5.4-nano: the item intact is accepted, its encrypted content altered is refused); `backend.MadeByGateway` has the `anthropic` adapter remove such blocks as it removes unsigned ones.
 OpenAI accepts that `include` and `reasoning.summary` on a model that doesn't reason (verified on gpt-4.1-mini), so they are sent whatever the model.
-From Chat Completions, `logprobs` become `include: ["message.output_text.logprobs"]` and `top_logprobs`, each part's in the shape Chat Completions gives; and custom tools, `custom_tool_call` items and their `custom_tool_call_output`, and `allowed_tools`, translate both ways (each shape seen from both APIs on gpt-5.4-nano, 2026-11-09).
+From Chat Completions, `logprobs` become `include: ["message.output_text.logprobs"]` and `top_logprobs`, each part's in the shape Chat Completions gives; `web_search_options` becomes the `web_search` tool, its location flattened, and URL citations come back as `annotations` with their ranges moved onto the joined content, both APIs counting characters (verified on Norwegian text); and custom tools, `custom_tool_call` items and their `custom_tool_call_output`, and `allowed_tools`, translate both ways (each shape seen from both APIs on gpt-5.4-nano, 2026-11-09).
 Stop sequences, `n` above 1 and audio are refused, having no Responses counterpart.
 
 ### Effort
@@ -583,6 +583,45 @@ Stop sequences, `n` above 1 and audio are refused, having no Responses counterpa
 Reasoning effort levels differ between vendors (verified 2026-11-10): Claude takes `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI `none`, `low`, `medium`, `high` and `xhigh`, and `minimal` on some models.
 A level crosses as itself where both have it, else as the nearest the other has (`effort.go`): `none` and `minimal` reach Claude as `low`, and `max` reaches OpenAI as `xhigh`.
 A level neither knows passes on as sent, for the backend to accept or refuse.
+
+### Tools
+
+A tool crosses in one of three ways, by who runs it.
+A tool the client defines with its own schema reaches every backend as its function tool.
+A server tool, run on the vendor's servers, reaches a backend only where its API has a counterpart: web search on every pair, code execution and remote MCP between Responses and Messages.
+A tool the vendor defines and the client runs, shell and file editing, reaches the other vendor's model as its counterpart where the two map, and as an ordinary function with the tool's own schema where they don't.
+
+Decided (2026-11-12): a Responses `namespace` tool, a group of the client's own functions, as Codex sends its sub-agent functions, reaches Claude and Chat Completions backends as the functions it holds, each named for its namespace and its own name joined by `__`, since both APIs take only letters, digits, `_` and `-` in a tool's name (`withoutNamespaces`).
+The history's calls are renamed the same way, and a call in the reply comes back with its namespace and its own name.
+A tool choice names no namespace, so one naming a function only one namespace holds is given the joined name; a name that two namespaces hold, or a joined name that is another tool's, is refused, since their calls couldn't be told apart.
+
+A server tool has three parts, and each crosses on its own.
+The request asks for the counterpart with the settings both sides have, and a setting with no counterpart is dropped and reported.
+The record of the call, Claude's `server_tool_use` and result blocks or OpenAI's `*_call` items, goes to the client in its own protocol where that has a place for one; Chat Completions has none.
+A search's citations become the client's own, with their ranges counted in characters, as both APIs count them (verified).
+Claude's search results and citations carry encrypted fields only Claude can write, so a record or citation the gateway writes in Messages' spelling is marked, its ID starting `srvtoolu_amf_` or its `encrypted_index` `amf-gateway`, and the `anthropic` adapter removes it before Claude sees it.
+Going the other way, a record in a conversation that reaches a backend of another API is sent as text, and reported.
+Decided (2026-11-10): a Chat Completions or Responses client's web search reaches Claude as `web_search_20250305`, since the two later versions (20260209 and 20260318) filter results with code execution and returned no citations in three runs, against citations from 20250305 every time; a Messages client's own version passes on as sent.
+Decided (2026-11-12): a `web_search` with `external_web_access: false`, which limits OpenAI's search to its cached index and which Codex sends on every request, is dropped toward Claude and Chat Completions and reported, since their searches are live and nothing there narrows them to a cache; refusing it would turn Codex away from both.
+Toward Claude, an MCP tool's `require_approval` other than `never` is refused, since Claude runs MCP tools without asking.
+
+A Claude turn whose server tools run long stops with `pause_turn`, for the client to send the turn back so Claude carries on (Anthropic's server tools documentation).
+Decided (2026-11-10): for a Chat Completions or Responses client, which has no such stop, the pipeline sends the turn back itself (`translate.Resend`), with the paused part's blocks added to the assistant's turn, up to 5 times, and returns the parts as one reply with the usage summed.
+A stream goes on with the stream that comes back, its `message_start` left out and its blocks numbered on.
+It is in the pipeline, not the `anthropic` adapter, because a Messages client must get the pause, and only a translated route knows that the client can't.
+
+Shell maps between vendors: OpenAI's `shell_call` carries a list of commands, which reaches Claude's `bash` as one command a line, and the output comes back with each command's exit status (shapes seen on gpt-5.4-nano and Claude Haiku 5.5, 2026-11-10).
+File editing doesn't map: Claude's text editor views files and inserts at a line number, which OpenAI's `apply_patch` can't express without the file's contents, and `apply_patch` deletes files, which the editor can't.
+Decided (2026-11-10): each crosses as a function with its own schema and description.
+`apply_patch` reaches Claude as a tool of that name taking the operation, with the diff format OpenAI's Agents SDK applies (`apply_diff.py`) in its description, and `text_editor_20250728` reaches OpenAI as a function with its four commands.
+Claude Sonnet 5.5 and Haiku 5.5 wrote diffs in that format that applied, and gpt-5.4-nano used each editor command (verified 2026-11-10).
+Decided against: translating the editor's commands into patch operations and back, with the gateway answering a call the client can't run with a failed result and sending the turn back.
+That costs a request for each such call, and the client never sees the answer, so the model makes the same call again on the next turn.
+Decided against: rewriting a call that doesn't map into a shell command, such as `view` into `cat -n`, which shows the client a command the model never asked for.
+Decided (2026-11-10): a Chat Completions backend gets all four, `shell`, `apply_patch`, `bash` and the editor, as functions, and their calls come back as the client tool's (verified on Qwen3-0.6B through llama-server).
+A call that stands for a client tool's is sent as its record once its arguments are complete, so a stream holds it rather than streaming its arguments.
+
+Computer use is refused across vendors: the action vocabularies and coordinate rules differ, and translating them is a concept of its own.
 
 ### Token counts
 
@@ -627,4 +666,5 @@ Stock nginx can't rewrite a body by its JSON content; njs or OpenResty could, bu
 ## Open decisions
 
 - **To do: a hub form.** An intermediate form every protocol translates to and from, so a new protocol needs one translator pair instead of one per existing protocol. The direct pairs stay as routes beside it (Translation).
+- **Not checked: `web_search_options` on local servers.** A Messages or Responses client's web search reaches a Chat Completions backend as `web_search_options`, which OpenAI's search models act on; each local server is assumed to ignore it, which hasn't been checked.
 - **Not decided: finishing Open WebUI cleanup on shutdown.** The adapter stops abandoned tasks and deletes chats in the background after the response ends. `serve` waits up to 10 seconds for handlers and then exits, which can cut those calls off, leaving the task running to its end and the chat in Open WebUI. Waiting for them needs a lifecycle step that `Backend` doesn't have.

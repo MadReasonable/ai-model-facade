@@ -253,6 +253,17 @@ const UnsignedThinking = "amf-unsigned"
 // Like an unsigned block, it has to come out before Claude sees it.
 const OpenAIReasoning = "amf-openai:"
 
+// GatewayCitation is the encrypted_index of a citation the gateway made for a
+// Messages client from an OpenAI API's URL citation. Only Claude can write a
+// real one, so it has to come out before Claude sees it.
+const GatewayCitation = "amf-gateway"
+
+// GatewayServerTool prefixes the ID of a server tool block the gateway made
+// for a Messages client from an OpenAI API's record of a server tool's call,
+// such as a code_interpreter_call. Only Claude can make a real one, so the
+// call and its result have to come out before Claude sees them.
+const GatewayServerTool = "srvtoolu_amf_"
+
 // MadeByGateway reports whether a thinking block's signature is one of the
 // gateway's own, which Claude refuses. Claude's signatures are base64, which
 // has no '-', so none of them can start with "amf-".

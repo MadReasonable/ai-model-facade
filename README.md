@@ -512,8 +512,19 @@ The gateway serves two families of client APIs, each under a base path of its ow
 - **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions`, Responses at `/v1/responses`, and legacy completions at `/v1/completions`. Most clients and servers speak Chat Completions, and every backend except the Claude API serves it; of the backends only `openAi` serves Responses.
 - **Anthropic's**, under `/anthropic`: Messages at `/v1/messages`, and its token count. Clients built for Claude speak it, and only the Claude API serves it.
 
-These four protocols, Chat Completions, legacy completions, Responses and Messages, with each API's model list and the Messages token count, are everything the gateway serves.
-OpenAI's other APIs, such as embeddings, images, audio, Realtime, Batch, Files, Conversations and Moderations, and Anthropic's, such as Message Batches and Files, are unsupported.
+These four protocols, Chat Completions, legacy completions, Responses and Messages, with each API's model list and the Messages token count, are everything the gateway serves, and not every part of them is supported:
+
+- **Other APIs.** OpenAI's other APIs, such as embeddings, images, audio, Realtime, Batch, Files, Conversations and Moderations, and Anthropic's, such as Message Batches and Files, are unsupported.
+- **Kept responses.** `GET` and `DELETE /v1/responses/{id}` and its `input_items` are unsupported, and so is background mode. A `previous_response_id` the gateway never kept, or has evicted, is refused with `400`.
+- **Legacy completions** have no translation, so a candidate on the Claude API or Open WebUI, or one sent as Responses, is skipped for them.
+- **Toward the Claude API**, a request is refused with `400` for `n` above 1, `logprobs`, audio, a `json_object` `response_format`, a custom tool, a tool only OpenAI's servers run, such as file search or image generation, or an MCP tool whose `require_approval` isn't `never`.
+- **Toward a Chat Completions backend**, a request is refused with `400` for code execution, remote MCP, `container`, any other tool only Claude's or OpenAI's servers run apart from web search, or a document, image or file by file ID. Web search becomes `web_search_options`, which only search models act on; local servers ignore it.
+- **Toward OpenAI's Responses**, through `useProtocol`, a request is refused with `400` for stop sequences, `n` above 1, audio, or a tool only Claude's servers run, such as web fetch or memory.
+- **From Responses toward any other backend**, a request is refused with `400` for `background`, `conversation`, a stored `prompt`, an `item_reference`, or an image or file by file ID.
+- **Client tools.** Computer use and text editors before `text_editor_20250728` are refused toward the other vendor. A client function named like the tool that stands for the client's `shell` or `apply_patch`, and a namespaced function whose joined name is another tool's, are refused wherever the request is translated, since their calls couldn't be told apart.
+- **Open WebUI** runs only its own tools, so a client's own tools don't work through it, and neither do the tools it runs in a browser: direct tool servers, asking the user a question mid-answer, and the code interpreter on its default Pyodide engine.
+- **Thinking.** A Chat Completions client can't send Claude's thinking back, so in a tool loop Claude continues without its earlier reasoning.
+- **Dropped fields.** A field with no counterpart, where the request means the same without it, is dropped rather than refused, and named in `X-Gateway-Dropped`.
 
 The root serves the OpenAI API too, so `http://<gateway>:8088/v1` is an OpenAI client's base URL; [`api.default`](#api) can give the root to Anthropic's instead.
 A client built for Claude uses `http://<gateway>:8088/anthropic`, with the gateway's key in `x-api-key` or `Authorization`.
@@ -537,7 +548,7 @@ A Messages request that selects a candidate on any backend but the Claude API is
 - A model's reasoning comes back as a thinking block whose signature is the fixed marker `amf-unsigned`. Only Anthropic can sign one, so if that history later reaches the Claude API, the gateway removes the marked blocks first, and a conversation can move from a local model to Claude.
 - A failed tool call says so in its result's text, since a tool message has no error flag.
 
-A request that needs what only the Claude API provides is refused with `400`: a tool type it defines, whether Claude's servers run it (web search) or the client does (`bash`, `text_editor`), `mcp_servers`, `container`, or a document or image by file ID.
+A request that needs what only the Claude API provides is refused with `400`: a tool that only Claude's servers run, other than web search (see [Tools](#tools)), `mcp_servers`, `container`, or a document or image by file ID.
 
 Open WebUI is one of these backends, so a Messages client gets its server-side tools through a facade on `openWebUi`.
 It sees the final answer rather than those tool calls, as a Chat Completions client does.
@@ -555,7 +566,8 @@ A Chat Completions request that selects a candidate on an `anthropic` backend is
 - An API error keeps its status and `Retry-After`, with its message in OpenAI's error shape.
 
 Fields that only tune sampling or configure OpenAI's own services, such as `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `store` and `service_tier`, are dropped, since the Claude API refuses fields it doesn't know.
-A request that asks for what the Claude API can't give is refused with `400` before it is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, OpenAI's web search, or a tool that isn't a function.
+A request that asks for what the Claude API can't give is refused with `400` before it is sent: `n` above 1, `logprobs`, audio, a `json_object` `response_format`, or a custom tool.
+`web_search_options` becomes Claude's web search, as [Tools](#tools) describes.
 
 A Chat Completions client can't send thinking back, since Chat Completions has no place for the signature it needs, so in a tool loop Claude continues without its earlier reasoning.
 
@@ -575,7 +587,7 @@ Claude accepts its thinking back only with the signature it was made with, so th
 Any other reasoning item a request carries is dropped, since only the backend that made it can read it.
 
 Fields that only tune OpenAI's own services or what it returns beyond the response, such as `include`, `metadata`, `service_tier` and `prompt_cache_key`, are dropped.
-A request that needs OpenAI's servers is refused with `400`: a tool that isn't a function, such as web search or file search, `background`, `conversation`, a stored `prompt`, an `item_reference`, or an image or file by file ID.
+A request that needs OpenAI's servers is refused with `400`: a tool the backend has no counterpart for, such as file search (see [Tools](#tools)), `background`, `conversation`, a stored `prompt`, an `item_reference`, or an image or file by file ID.
 
 #### Conversations
 
@@ -609,6 +621,7 @@ A Chat Completions or Messages request for such a candidate is translated to Res
 - Tool calls and their results, images by URL or base64, inline files and, from Messages, text documents translate both ways.
 - `max_tokens` or `max_completion_tokens`, `reasoning_effort` or `output_config.effort`, `response_format` or `output_config.format`, `verbosity`, `tool_choice` and `parallel_tool_calls` translate to their Responses counterparts, and other unknown keys pass on unchanged.
 - From Chat Completions, `logprobs` and `top_logprobs` translate, and the log probabilities come back in Chat Completions' shape, streamed or not.
+- From Chat Completions, `web_search_options` becomes Responses' `web_search` tool, with the same settings, and its citations come back as the message's `annotations`.
 - From Chat Completions, custom tools, their calls and outputs, and a `tool_choice` naming one or listing `allowed_tools`, translate both ways.
 - Tools are sent not strict unless the client says otherwise, since Responses makes a tool strict by default, which needs every property required, and neither of the other APIs does.
 - The request isn't kept at OpenAI, unless a Chat Completions client set `store`, since both clients send their conversation every turn.
@@ -619,7 +632,62 @@ Before a Claude candidate sees that history, the gateway removes those blocks, a
 
 Fields with no Responses counterpart that only tune sampling or Claude are dropped: `seed`, `presence_penalty`, `frequency_penalty` and `logit_bias`, and `top_k`, `cache_control` and a thinking budget.
 Thinking can't be turned off through Responses, where a reasoning model always reasons, so `thinking: {type: disabled}` is dropped too.
-A request that asks for what Responses can't give is refused with `400`: stop sequences, `n` above 1, audio, `web_search_options`, or a tool that is neither a function nor, from Chat Completions, a custom tool.
+A request that asks for what Responses can't give is refused with `400`: stop sequences, `n` above 1, audio, or a tool Responses has no counterpart for (see [Tools](#tools)).
+
+#### Tools
+
+A tool crosses to another API in one of three ways, decided by who runs it: the client, the vendor's servers, or the client following a schema the vendor defines.
+
+**Functions.**
+A tool the client defines with its own schema, a function in OpenAI's APIs or a tool with an `input_schema` in Messages, reaches every backend as that backend's function tool, and its calls and results translate both ways, streamed or not.
+OpenAI's custom tools, which take free text instead of JSON, cross between Chat Completions and Responses only, and are refused toward the Claude API, which has no counterpart.
+A Responses `namespace` tool groups the client's own functions under one name, as Codex groups its sub-agent functions.
+Toward Claude and Chat Completions, which have no namespaces, each function it holds becomes a function named the namespace's name and its own joined by `__`, such as `multi_agent_v1__close_agent`, and a call of it comes back with its `namespace` and its own name.
+
+**Server tools.**
+Web search, code execution and remote MCP run on the vendor's servers, so each reaches a backend only where its API has a counterpart:
+
+| Tool | Claude API | OpenAI Responses | Chat Completions backend |
+|---|---|---|---|
+| Web search | `web_search_20250305` | `web_search` | `web_search_options` |
+| Code execution | `code_execution_20260120` | `code_interpreter` | refused |
+| Remote MCP | `mcp_servers` and `mcp_toolset` | `mcp` | refused |
+
+A setting both sides have crosses, such as a search's location and allowed domains, and one with no counterpart, such as Claude's `max_uses` or a `code_interpreter` container other than `auto`, is dropped and reported in [`X-Gateway-Dropped`](#dropped-fields).
+A Chat Completions or Responses client's web search reaches Claude as `web_search_20250305`, since the two later versions filter results with code execution and returned no citations in three runs, against citations from `web_search_20250305` every time (2026-11-10); a Messages client's own version is sent as it is.
+A `web_search` tool with `external_web_access: false`, which limits OpenAI's search to its cached index, as Codex sends it, is dropped toward Claude and Chat Completions and reported, since their searches are live.
+`web_search_options` is acted on only by models that search, such as OpenAI's search models; other Chat Completions servers ignore it (not checked on each local server).
+Toward the Claude API, an MCP tool's `require_approval` must be `never`, since Claude runs MCP tools without asking, and the gateway adds the beta header the API needs for MCP, `mcp-client-2025-11-20`.
+A Chat Completions client can ask only for web search, since its API has no code execution or MCP.
+
+The record of a server tool's call comes back in the client's API: as `web_search_call`, `code_interpreter_call` and `mcp_call` items to a Responses client, and as `server_tool_use` blocks and their results to a Messages client.
+Chat Completions has no place for a record, so its client gets the answer's text.
+A search's citations become the client's own, `url_citation` annotations for an OpenAI client and citations on text blocks for a Messages client, with their ranges measured in the text.
+The Claude API accepts only search results and citations it made, which carry encrypted fields only it can write, so the records and citations the gateway writes for a Messages client are marked, and removed before that history reaches the Claude API; the answer's text stays.
+A record in a conversation that reaches a backend of another API is sent as text, and reported as dropped.
+
+A Claude turn whose server tools run long stops with `stop_reason: pause_turn`, for the client to send the turn back so Claude carries on.
+A Messages client gets the pause, and sends the turn back itself.
+A Chat Completions or Responses client has no such stop, so the gateway sends the turn back for it, up to 5 times, and returns the parts as one reply with their usage summed; after the fifth, the pause ends the reply.
+
+Web fetch, file search, image generation, memory, Claude's tool search and the other tools only one vendor runs are refused when the backend's API is the other's.
+
+**Tools the client runs to a vendor's schema.**
+OpenAI's `shell` and `apply_patch`, and Claude's `bash` and text editor, are defined by a vendor and run by the client.
+Each reaches the other vendor's model as that vendor's counterpart where the two map, and otherwise as an ordinary function with the tool's own schema and description, so the client gets back the calls it knows how to run:
+
+| Client's tool | Claude API | OpenAI Responses | Chat Completions backend |
+|---|---|---|---|
+| `shell` | Claude's `bash` | itself | function `shell` |
+| `apply_patch` | tool `apply_patch` | itself | function `apply_patch` |
+| `bash` | itself | OpenAI's `shell` | function `bash` |
+| `text_editor_20250728` | itself | function `str_replace_based_edit_tool` | function `str_replace_based_edit_tool` |
+
+Shell maps: a list of commands crosses as one bash command a line, and the output comes back with each command's exit status.
+File editing doesn't: Claude's editor views files and inserts at a line number, which a patch can't express, and a patch deletes files, which the editor can't, so each crosses as a function.
+Claude Sonnet 5.5 and Haiku 5.5 wrote `apply_patch` diffs that applied, gpt-5.4-nano used each of the editor's commands, and Qwen3-0.6B on llama-server called all four tools correctly (verified 2026-11-10).
+A client function named like the tool that stands for its `shell` or `apply_patch` (`bash` toward Claude, `shell` toward a Chat Completions backend, or `apply_patch`) is refused, since its calls couldn't be told from the client tool's.
+Text editors before `text_editor_20250728`, which serve Claude models before Claude 4, are refused, and so is computer use, whose actions and screen coordinates differ between vendors.
 
 #### Dropped fields
 
@@ -826,8 +894,53 @@ Its context limit is set for Claude's models, so set `CLAUDE_CODE_MAX_CONTEXT_TO
 Claude Code's own instructions and tool definitions take about 18,000 tokens (Claude Code 2.1.319, 2026-11-12), so a model loaded with a smaller context can't take any of its requests; llama-server refuses them with `400`.
 
 Each request is translated to Chat Completions, so Claude Code's thinking settings and prompt caching are dropped and named in [`X-Gateway-Dropped`](#dropped-fields).
-A tool that only the Claude API defines, such as its web search, is refused with `400`; see [Messages on a Chat Completions backend](#messages-on-a-chat-completions-backend).
+A tool that only Claude's servers run reaches a local model only where Chat Completions has a counterpart: Claude's web search becomes `web_search_options`, which local servers ignore, so a search request is answered without searching, and the others are refused with `400`; see [Tools](#tools).
 To fall back to Claude when no local model is loaded, add a candidate on an `anthropic` backend at the end of the list; a conversation can move between them, since the gateway removes local thinking blocks before the Claude API sees them.
+
+### Codex on Claude
+
+Codex speaks OpenAI's Responses API, so a facade on the Claude API serves it through the translation to Messages, and Codex runs on Claude with no change to Codex.
+
+```yaml
+backends:
+  claude:
+    type: anthropic
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_API_KEY}
+
+models:
+  codex:
+    backend: claude
+    candidates:
+      - model: claude-sonnet-5-5
+```
+
+Codex reads its model providers from `~/.codex/config.toml`, so the gateway is added there as one, and made the default:
+
+```toml
+model = "codex"
+model_provider = "ai-model-facade"
+
+[model_providers.ai-model-facade]
+name = "ai-model-facade"
+base_url = "http://localhost:8088/v1"
+wire_api = "responses"
+env_key = "AMF_API_KEY"
+```
+
+```bash
+export AMF_API_KEY=<a key from server.apiKeys>
+codex
+```
+
+Codex sends the variable that `env_key` names as `Authorization: Bearer`; if the gateway has no `apiKeys`, any value works.
+Codex warns that it has no metadata for the model `codex`, since a facade isn't a model it knows, and uses its defaults.
+
+Codex's own tools, such as `exec_command` for running commands, are functions, so they reach Claude as its function tools, and its sub-agent functions come in a `namespace`, which reaches Claude as functions named for it; see [Tools](#tools).
+Claude's thinking comes back as reasoning items whose `encrypted_content` carries the signed thinking, and Codex sends them back with the rest of its conversation, so Claude keeps its reasoning through a task.
+Codex sends its entire conversation every turn, with `store: false`, so the gateway keeps nothing for it.
+Its web search is limited to OpenAI's cached index, which Claude has no counterpart for, so the tool is dropped and Codex has no web search on Claude; Codex's `client_metadata`, identifiers only OpenAI reads, is dropped too, and both are named in [`X-Gateway-Dropped`](#dropped-fields).
+Codex 0.167.2 created, ran and edited a script this way on Claude Haiku 5.5 (verified 2026-11-12).
 
 ### Evaluating models
 

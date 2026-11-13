@@ -94,8 +94,9 @@ They skip without `AMF_LIVE` too; run them with:
 
     AMF_LIVE=http://127.0.0.1:18090 go test ./internal/gateway/ -run Live
 
-Its checks on the hosted APIs, in `live_messages_test.go` and `live_responses_test.go`, serve facades on the real Claude and OpenAI APIs, so they skip without the key of each API they reach, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, rather than `AMF_LIVE`, and need no Docker.
+Its checks on the hosted APIs, in `live_messages_test.go`, `live_responses_test.go` and `live_tools_test.go`, serve facades on the real Claude and OpenAI APIs, so they skip without the key of each API they reach, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, rather than `AMF_LIVE`, and need no Docker.
 `ANTHROPIC_LIVE_MODEL` and `OPENAI_LIVE_MODEL` name their models, and a run costs a few tokens.
+The tool checks cost more, since each server tool they run is billed as a search or as seconds of a container, and the MCP check needs DeepWiki's public server at `https://mcp.deepwiki.com/mcp`.
 Without `AMF_LIVE`, this runs only the checks on the hosted APIs:
 
     ANTHROPIC_API_KEY=... OPENAI_API_KEY=... go test ./internal/gateway/ -run Live

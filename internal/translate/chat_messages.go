@@ -81,7 +81,7 @@ func toMessages(body []byte) ([]byte, bool, droppedFields, error) {
 	if err != nil {
 		return nil, false, nil, err
 	}
-	tools, err := messagesToolsFromChat(req, choice)
+	tools, err := messagesToolsFromChat(req, choice, &gone)
 	if err != nil {
 		return nil, false, nil, err
 	}
@@ -113,9 +113,9 @@ func toMessages(body []byte) ([]byte, bool, droppedFields, error) {
 			place("metadata", metadataOf(req))
 		case k == "stop":
 			place("stop_sequences", stopSequencesOf(value))
-		case k == "tools" || k == "functions":
+		case k == "tools" || k == "functions" || k == "web_search_options":
 			place("tools", tools)
-		case k == "stream_options" || k == "n" || k == "logprobs" || k == "modalities" || k == "audio" || k == "web_search_options":
+		case k == "stream_options" || k == "n" || k == "logprobs" || k == "modalities" || k == "audio":
 			// checked by checkUnsupported, so only a harmless value gets here,
 			// and stream_options is read for include_usage
 		case dropped[k]:
@@ -133,8 +133,8 @@ func toMessages(body []byte) ([]byte, bool, droppedFields, error) {
 }
 
 // checkUnsupported refuses the fields that ask for something Messages can't
-// give: several choices, log probabilities, audio, a JSON object without a
-// schema, or OpenAI's web search.
+// give: several choices, log probabilities, audio, or a JSON object without a
+// schema.
 func checkUnsupported(req gjson.Result) error {
 	if n := req.Get("n"); n.Exists() && n.Type != gjson.Null && n.Int() != 1 {
 		return refuse("the Claude API returns one choice per request; 'n' must be 1, not %s", n.Raw)
@@ -152,9 +152,6 @@ func checkUnsupported(req gjson.Result) error {
 	}
 	if t := req.Get("response_format.type").String(); t != "" && t != "text" && t != "json_schema" {
 		return refuse("the Claude API constrains output only to a JSON schema; response_format '%s' has no equivalent", t)
-	}
-	if req.Get("web_search_options").Exists() {
-		return refuse("'web_search_options' is OpenAI's web search; on the Claude API, add its web search tool through the facade's params")
 	}
 	return nil
 }
@@ -250,9 +247,12 @@ func messagesChoiceFromChat(req gjson.Result, choice chatChoice) (string, error)
 }
 
 // messagesToolsFromChat turns function tools, the legacy functions included,
-// into Messages tools. A tool_choice listing allowed tools narrows the tools
-// to those, Claude having no such list. Claude has no custom tools.
-func messagesToolsFromChat(req gjson.Result, choice chatChoice) (string, error) {
+// into Messages tools, and web_search_options into Claude's web search tool,
+// in the version whose results come back with citations (verified
+// 2026-11-10: the later versions filter results with code execution and
+// returned none). A tool_choice listing allowed tools narrows the tools to
+// those, Claude having no such list. Claude has no custom tools.
+func messagesToolsFromChat(req gjson.Result, choice chatChoice, gone *droppedFields) (string, error) {
 	tools, err := readChatTools(req)
 	if err != nil {
 		return "", err
@@ -281,6 +281,21 @@ func messagesToolsFromChat(req gjson.Result, choice chatChoice) (string, error) 
 			block = setRaw(block, "strict", tool.strict.Raw)
 		}
 		out = append(out, block)
+	}
+	if options := req.Get("web_search_options"); options.IsObject() {
+		search := `{"type":"web_search_20250305","name":"web_search"}`
+		if location := options.Get("user_location"); location.IsObject() {
+			flat := set("{}", "type", location.Get("type").String())
+			location.Get("approximate").ForEach(func(key, value gjson.Result) bool {
+				flat = setRaw(flat, pathKey(key.String()), value.Raw)
+				return true
+			})
+			search = setRaw(search, "user_location", flat)
+		}
+		if options.Get("search_context_size").Exists() {
+			gone.add("web_search_options.search_context_size")
+		}
+		out = append(out, search)
 	}
 	if out == nil {
 		return "", nil
@@ -452,8 +467,9 @@ func messagesToolResultFromChat(m chatMessage) ([]string, error) {
 }
 
 // finishReason maps a Messages stop_reason to Chat Completions'. A refusal
-// is a content filter's decision in OpenAI's terms; pause_turn, which only
-// server tools cause, and any reason added later end the reply as stop.
+// is a content filter's decision in OpenAI's terms; pause_turn, which reaches
+// a client only once the gateway has sent the turn back maxResends times
+// (Resend), and any reason added later end the reply as stop.
 func finishReason(stop string) string {
 	switch stop {
 	case "max_tokens", "model_context_window_exceeded":
@@ -486,10 +502,11 @@ func usageOf(usage func(path string) gjson.Result) map[string]any {
 }
 
 // completion turns a Messages response into a chat completion: text blocks
-// joined as content, thinking as reasoning_content, as llama-server reports
-// reasoning, and tool_use blocks as tool calls, each input as its arguments
-// string. Other blocks, such as server tool results, have no place in a chat
-// completion and are left out.
+// joined as content, with a text block's citations as annotations over its
+// text, thinking as reasoning_content, as llama-server reports reasoning, and
+// tool_use blocks as tool calls, each input as its arguments string. Other
+// blocks, such as server tool results, have no place in a chat completion and
+// are left out.
 func completion(msg gjson.Result, legacy bool, created int64) []byte {
 	b := newChatWriter(false, false)
 	b.legacy = legacy
@@ -497,7 +514,9 @@ func completion(msg gjson.Result, legacy bool, created int64) []byte {
 	for _, block := range msg.Get("content").Array() {
 		switch block.Get("type").String() {
 		case "text":
+			start := b.sent()
 			b.text(block.Get("text").String(), nil)
+			annotateCitations(b, block.Get("citations").Array(), start)
 		case "thinking":
 			b.reason(block.Get("thinking").String())
 		case "tool_use":
@@ -506,6 +525,17 @@ func completion(msg gjson.Result, legacy bool, created int64) []byte {
 	}
 	b.finish(finishReason(msg.Get("stop_reason").String()), usageOf(msg.Get("usage").Get))
 	return b.body()
+}
+
+// annotateCitations adds a text block's web citations as annotations over
+// its text, from start to what has been sent since. Citations of a document
+// the client sent have no Chat Completions counterpart.
+func annotateCitations(b *chatWriter, citations []gjson.Result, start int) {
+	for _, citation := range citations {
+		if url := citation.Get("url").String(); url != "" {
+			b.annotate(url, citation.Get("title").String(), start, b.sent())
+		}
+	}
 }
 
 // openAIError turns a Claude API error body into OpenAI's error shape,
@@ -554,6 +584,8 @@ func (r *messagesReply) Result(result backend.ChatResult) backend.ChatResult {
 //     reasoning_content or the call's arguments;
 //   - a tool_use block's start, a chunk opening the tool call, numbered in
 //     the order the calls arrive, as OpenAI numbers them;
+//   - a text block's citations, which arrive ahead of its text, a chunk of
+//     annotations over its text once the block stops;
 //   - message_stop, the finish chunk, with the stop reason message_delta gave,
 //     then a usage chunk with no choices if the client set
 //     stream_options.include_usage.
@@ -570,13 +602,15 @@ type chunkStream struct {
 
 	startUsage, deltaUsage gjson.Result
 	stop                   string
-	calls                  map[int64]int // block index -> tool call index
+	calls                  map[int64]int            // block index -> tool call index
+	starts                 map[int64]int            // text block index -> content characters before it
+	citations              map[int64][]gjson.Result // text block index -> its citations
 }
 
 func newChunkStream(events backend.ChatStream, includeUsage, legacy bool, created int64) *chunkStream {
 	reply := newChatWriter(true, includeUsage)
 	reply.legacy = legacy
-	return &chunkStream{events: events, reply: reply, created: created, calls: map[int64]int{}}
+	return &chunkStream{events: events, reply: reply, created: created, calls: map[int64]int{}, starts: map[int64]int{}, citations: map[int64][]gjson.Result{}}
 }
 
 func (s *chunkStream) Next() ([]byte, error) {
@@ -613,6 +647,8 @@ func (s *chunkStream) translate(event gjson.Result) {
 		switch block.Get("type").String() {
 		case "tool_use":
 			s.calls[index] = s.reply.call("function", block.Get("id").String(), block.Get("name").String())
+		case "text":
+			s.starts[index] = s.reply.sent()
 		}
 	case "content_block_delta":
 		delta := event.Get("delta")
@@ -625,6 +661,12 @@ func (s *chunkStream) translate(event gjson.Result) {
 			if call, ok := s.calls[index]; ok {
 				s.reply.arguments(call, delta.Get("partial_json").String())
 			}
+		case "citations_delta":
+			s.citations[index] = append(s.citations[index], delta.Get("citation"))
+		}
+	case "content_block_stop":
+		if citations := s.citations[index]; len(citations) > 0 {
+			annotateCitations(s.reply, citations, s.starts[index])
 		}
 	case "message_delta":
 		s.deltaUsage = event.Get("usage")
@@ -697,8 +739,12 @@ func toChat(body []byte) ([]byte, droppedFields, error) {
 			out.add(`"stop"`, value.Raw)
 		case k == "tools":
 			var tools string
-			if tools, failed = chatTools(value); tools != "" {
+			var search string
+			if tools, search, failed = chatTools(value, &gone); tools != "" {
 				out.add(`"tools"`, tools)
+			}
+			if search != "" {
+				out.add(`"web_search_options"`, search)
 			}
 		case k == "tool_choice":
 			var choice, parallel string
@@ -876,6 +922,8 @@ func chatAssistantMessage(t messagesTurn, gone *droppedFields) (string, error) {
 			calls = append(calls, set(call, "function.arguments", arguments))
 		case b.kind == "thinking" || b.kind == "redacted_thinking":
 			gone.add("thinking")
+		case isServerToolBlock(b.kind):
+			text = append(text, serverToolText(b))
 		default:
 			return "", refuseMessages("%s: a Chat Completions model can't take a '%s' block", t.where, b.kind)
 		}
@@ -895,11 +943,34 @@ func chatAssistantMessage(t messagesTurn, gone *droppedFields) (string, error) {
 // chatTools turns client tools into function tools. The others are tool types
 // only the Claude API defines. Claude's servers run some, such as web search,
 // and the client runs others, such as bash, but none has a schema to send on.
-func chatTools(tools gjson.Result) (string, error) {
-	var out []string
+func chatTools(tools gjson.Result, gone *droppedFields) (out, search string, err error) {
+	var list []string
 	for i, tool := range tools.Array() {
+		if isClaudeWebSearch(tool) {
+			search = "{}"
+			if location := claudeSearchLocation(tool); location.IsObject() {
+				nested := set("{}", "type", location.Get("type").String())
+				location.ForEach(func(key, value gjson.Result) bool {
+					if key.String() != "type" {
+						nested = setRaw(nested, "approximate."+pathKey(key.String()), value.Raw)
+					}
+					return true
+				})
+				search = setRaw(search, "user_location", nested)
+			}
+			reportSearchSettings(tool, gone, "max_uses", "allowed_domains", "blocked_domains")
+			continue
+		}
+		client, err := clientToolFunction(tool, i)
+		if err != nil {
+			return "", "", err
+		}
+		if client != "" {
+			list = append(list, setRaw(`{"type":"function"}`, "function", client))
+			continue
+		}
 		if kind := tool.Get("type").String(); kind != "" && kind != "custom" {
-			return "", refuseMessages("tools[%d]: only the Claude API defines tool type '%s', and this model is served through Chat Completions; a tool sent to it needs its own 'input_schema'", i, kind)
+			return "", "", refuseMessages("tools[%d]: only the Claude API defines tool type '%s', and this model is served through Chat Completions; a tool sent to it needs its own 'input_schema'", i, kind)
 		}
 		function := set(`{}`, "name", tool.Get("name").String())
 		if description := tool.Get("description"); description.Exists() {
@@ -911,9 +982,12 @@ func chatTools(tools gjson.Result) (string, error) {
 		if strict := tool.Get("strict"); strict.Exists() {
 			function = setRaw(function, "strict", strict.Raw)
 		}
-		out = append(out, setRaw(`{"type":"function"}`, "function", function))
+		list = append(list, setRaw(`{"type":"function"}`, "function", function))
 	}
-	return "[" + strings.Join(out, ",") + "]", nil
+	if list != nil {
+		out = "[" + strings.Join(list, ",") + "]"
+	}
+	return out, search, nil
 }
 
 // chatToolChoice returns the Chat Completions tool_choice and
@@ -1016,12 +1090,34 @@ func messageOf(completion gjson.Result) []byte {
 		b.sign(backend.UnsignedThinking)
 	}
 	b.text(message.Get("content").String())
+	citeAnnotations(b, message.Get("annotations").Array(), 0)
 	for _, call := range message.Get("tool_calls").Array() {
 		b.useTool(call.Get("id").String(), call.Get("function.name").String())
 		b.input(call.Get("function.arguments").String())
 	}
 	b.finish(stopReason(choice.Get("finish_reason").String()), messagesUsage(completion.Get("usage")))
 	return b.body()
+}
+
+// citeAnnotations adds URL citations to the open text block, each citing the
+// text in its range, which partStart moves to the block's text. A citation
+// whose text block has closed can't be added: Messages can't reopen a block.
+func citeAnnotations(b *messagesWriter, annotations []gjson.Result, partStart int) {
+	text := []rune(b.openText())
+	for _, a := range annotations {
+		c := a
+		if a.Get("url_citation").Exists() {
+			c = a.Get("url_citation")
+		} else if a.Get("type").String() != "url_citation" {
+			continue
+		}
+		start, end := int(c.Get("start_index").Int())+partStart, int(c.Get("end_index").Int())+partStart
+		cited := ""
+		if 0 <= start && start <= end && end <= len(text) {
+			cited = string(text[start:end])
+		}
+		b.cite(c.Get("url").String(), c.Get("title").String(), cited)
+	}
 }
 
 // eventStream turns Chat Completions chunks into Messages events, as messageOf
@@ -1057,6 +1153,7 @@ type eventStream struct {
 type toolCall struct {
 	chunkIndex int64
 	id, name   string
+	custom     bool // a custom tool's call, whose arguments are its input
 	arguments  string
 	opened     bool
 }
@@ -1120,13 +1217,14 @@ func (s *eventStream) translate(chunk gjson.Result) {
 	}
 }
 
-// write sends a delta's reasoning and content.
+// write sends a delta's reasoning, content and citations.
 func (s *eventStream) write(delta gjson.Result) {
 	if reasoning := reasoningOf(delta); reasoning != "" {
 		s.reply.think(reasoning)
 		s.reply.sign(backend.UnsignedThinking)
 	}
 	s.reply.text(delta.Get("content").String())
+	citeAnnotations(s.reply, delta.Get("annotations").Array(), 0)
 }
 
 // addToToolCall sends the first call's arguments as they come, and keeps the

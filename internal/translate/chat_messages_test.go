@@ -236,8 +236,9 @@ func TestMessagesToChat_GathersSystemMessages(t *testing.T) {
 // What only the Claude API provides is refused with a 400 in Anthropic's shape.
 func TestMessagesToChat_RefusesWhatChatCompletionsCantServe(t *testing.T) {
 	for _, body := range []string{
-		`{"tools":[{"type":"web_search_20260209","name":"web_search"}],"messages":[]}`,
-		`{"tools":[{"type":"bash_20250124","name":"bash"}],"messages":[]}`,
+		`{"tools":[{"type":"web_fetch_20260209","name":"web_fetch"}],"messages":[]}`,
+		`{"tools":[{"type":"computer_20250124","name":"computer","display_width_px":1024,"display_height_px":768}],"messages":[]}`,
+		`{"tools":[{"type":"text_editor_20250124","name":"str_replace_editor"}],"messages":[]}`,
 		`{"mcp_servers":[{}],"messages":[]}`,
 		`{"container":"c","messages":[]}`,
 		`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"u"}}]}]}`,
@@ -460,5 +461,80 @@ func TestChatToMessages_NarrowsToolsToTheAllowedOnes(t *testing.T) {
 	out, _, err := chatToMessages{}.Request([]byte(body))
 	if err != nil || gjson.GetBytes(out, "tools.#.name").Raw != `["b"]` || gjson.GetBytes(out, "tool_choice").Raw != `{"type":"any"}` {
 		t.Errorf("got %s, %v", out, err)
+	}
+}
+
+// web_search_options becomes Claude's web search tool, in the version that
+// returns citations, with the user's location flattened; the context size has
+// no counterpart.
+func TestChatToMessages_AsksClaudeToSearchTheWeb(t *testing.T) {
+	body := `{"web_search_options":{"search_context_size":"low","user_location":{"type":"approximate","approximate":{"country":"NO","city":"Oslo"}}},"messages":[]}`
+	out, reply, err := chatToMessages{}.Request([]byte(body))
+	if err != nil || gjson.GetBytes(out, "tools").Raw != `[{"type":"web_search_20250305","name":"web_search","user_location":{"type":"approximate","country":"NO","city":"Oslo"}}]` || strings.Join(reply.Dropped(), ",") != "web_search_options.search_context_size" {
+		t.Errorf("got %s, %v, %v", out, reply, err)
+	}
+}
+
+// Claude's web citations come back as annotations over the text they cite,
+// whole and streamed, its server tool blocks are left out, and a server
+// tool's input deltas open no tool call.
+func TestChatToMessages_RepliesWithCitations(t *testing.T) {
+	_, reply, _ := chatToMessages{}.Request([]byte(`{"messages":[]}`))
+	citation := `{"type":"web_search_result_location","url":"https://x","title":"X","cited_text":"..."}`
+	message := `{"id":"m","model":"c","stop_reason":"end_turn","content":[{"type":"server_tool_use","id":"s","name":"web_search","input":{"query":"q"}},{"type":"web_search_tool_result","tool_use_id":"s","content":[]},` +
+		`{"type":"text","text":"Oslé "},{"type":"text","text":"is big.","citations":[` + citation + `]}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	got := gjson.ParseBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(message)}}).Response.Body)
+	if a := got.Get("choices.0.message.annotations.0.url_citation"); a.Get("start_index").Int() != 5 || a.Get("end_index").Int() != 12 || a.Get("url").String() != "https://x" || got.Get("choices.0.message.tool_calls").Exists() {
+		t.Errorf("completion %s", got.Raw)
+	}
+	events, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"type":"message_start","message":{"id":"m","model":"c","usage":{"input_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"q\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Oslé "}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":2,"delta":{"type":"citations_delta","citation":` + citation + `}}`,
+		`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"is big."}}`,
+		`{"type":"content_block_stop","index":2}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+		`{"type":"message_stop"}`,
+	}}}).Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var annotations []string
+	for _, e := range events {
+		if e.Get("choices.0.delta.tool_calls").Exists() {
+			t.Errorf("a tool call was opened: %s", e.Raw)
+		}
+		if a := e.Get("choices.0.delta.annotations.0.url_citation"); a.Exists() {
+			annotations = append(annotations, a.Get("start_index").String()+"-"+a.Get("end_index").String())
+		}
+	}
+	if strings.Join(annotations, ",") != "5-12" {
+		t.Errorf("annotations %v", annotations)
+	}
+}
+
+// The tools a Claude client runs that the Claude API defines, bash and the
+// text editor, reach a Chat backend as functions of their names with their
+// commands, and their calls come back as the tool_use the client runs.
+func TestMessagesToChat_OffersClientToolsAsFunctions(t *testing.T) {
+	out, reply, err := messagesToChat{}.Request([]byte(`{"tools":[{"type":"bash_20250124","name":"bash"},{"type":"text_editor_20250728","name":"str_replace_based_edit_tool"}],"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := gjson.GetBytes(out, "tools")
+	if tools.Get("0.function.name").String() != "bash" || tools.Get("0.function.parameters.properties.command.type").String() != "string" ||
+		tools.Get("1.function.name").String() != "str_replace_based_edit_tool" || tools.Get("1.function.parameters.properties.command.enum.#").Int() != 4 || tools.Get("1.function.description").String() == "" {
+		t.Errorf("tools %s", tools.Raw)
+	}
+	completion := `{"id":"c","model":"m","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}`
+	message := gjson.ParseBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(completion)}}).Response.Body)
+	if use := message.Get("content.0"); use.Get("type").String() != "tool_use" || use.Get("name").String() != "bash" || use.Get("input.command").String() != "ls" {
+		t.Errorf("reply %s", message.Raw)
 	}
 }

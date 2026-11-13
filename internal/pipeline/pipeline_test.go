@@ -13,19 +13,27 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/mergepatch"
 )
 
-// fakeBackend accepts protocols and answers every request with reply,
-// keeping what it was sent.
+// fakeBackend accepts protocols and answers each request with the next of
+// replies, then with reply, keeping what it was last sent and how many
+// requests it had.
 type fakeBackend struct {
 	protocols []backend.Protocol
+	replies   []string
 	reply     string
 	sent      backend.ChatRequest
+	sends     int
 }
 
 func (f *fakeBackend) ListModels(ctx context.Context) ([]backend.ModelInfo, error) { return nil, nil }
 func (f *fakeBackend) Protocols() []backend.Protocol                               { return f.protocols }
 func (f *fakeBackend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
 	f.sent = req
-	return backend.ChatResult{Response: &backend.ChatResponse{Status: http.StatusOK, Body: []byte(f.reply)}}, nil
+	f.sends++
+	reply := f.reply
+	if len(f.replies) > 0 {
+		reply, f.replies = f.replies[0], f.replies[1:]
+	}
+	return backend.ChatResult{Response: &backend.ChatResponse{Status: http.StatusOK, Body: []byte(reply)}}, nil
 }
 
 // hook records what it was given and what its turn saw.
@@ -121,4 +129,29 @@ type refuser struct{}
 
 func (refuser) Prepare(ctx context.Context, body []byte, winner Winner) ([]byte, Turn, []string, error) {
 	return nil, nil, nil, &Error{Status: http.StatusBadRequest, Type: "invalid_request_error", Message: "no"}
+}
+
+// A paused Claude reply is sent back for a client of another protocol, which
+// gets one reply, and passed on to a Messages client, which sends it back
+// itself.
+func TestServe_SendsAPausedTurnBackForOtherProtocols(t *testing.T) {
+	paused := `{"id":"m1","content":[{"type":"server_tool_use","id":"s1","name":"web_search","input":{"query":"q"}},{"type":"web_search_tool_result","tool_use_id":"s1","content":[]}],"stop_reason":"pause_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	ended := `{"id":"m2","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`
+	for _, c := range []struct {
+		protocol backend.Protocol
+		sends    int
+	}{{backend.OpenAIChat, 2}, {backend.AnthropicMessages, 1}} {
+		claude := &fakeBackend{protocols: []backend.Protocol{backend.AnthropicMessages}, replies: []string{paused}, reply: ended}
+		sel := Selected{Backend: claude, BackendName: "claude", Model: "claude-a", Accepted: claude.protocols, Params: func(backend.Protocol) []mergepatch.Patch { return nil }}
+		reply, err := (&Pipeline{}).Serve(context.Background(), c.protocol, []byte(`{"model":"f","max_tokens":9,"messages":[{"role":"user","content":"hi"}]}`), backend.Client{}, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claude.sends != c.sends {
+			t.Errorf("%s: sent %d times", c.protocol, claude.sends)
+		}
+		if c.protocol == backend.OpenAIChat && gjson.GetBytes(reply.Chat.Response.Body, "choices.0.message.content").String() != "ok" {
+			t.Errorf("%s: replied %s", c.protocol, reply.Chat.Response.Body)
+		}
+	}
 }

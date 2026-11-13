@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -65,6 +66,76 @@ func TestToResponses_EndsABrokenStreamWithAnError(t *testing.T) {
 		}
 		if _, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: responsesStreamOf("")[:3]}}).Stream); !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Errorf("%s: early end: got %v", name, err)
+		}
+	}
+}
+
+// A namespace groups a client's functions, which a backend without
+// namespaces gets as functions named for their namespace too. The history's
+// calls and a tool choice name them that way, and a call comes back with its
+// namespace and its own name, whole and streamed, through both translators.
+func TestResponses_FlattenNamespacesForOtherBackends(t *testing.T) {
+	request := `{"tool_choice":{"type":"function","name":"close"},"tools":[{"type":"function","name":"top"},` +
+		`{"type":"namespace","name":"agents","description":"Manage agents.","tools":[{"type":"function","name":"close","description":"Close one.","parameters":{"type":"object"}}]}],` +
+		`"input":[{"type":"function_call","call_id":"c1","namespace":"agents","name":"close","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"closed"}]}`
+	out, reply, err := responsesToMessages{}.Request([]byte(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(out, "tools.#.name").Raw; got != `["top","agents__close"]` || gjson.GetBytes(out, "tools.1.description").String() != "Manage agents.\n\nClose one." ||
+		gjson.GetBytes(out, "messages.0.content.0.name").String() != "agents__close" || gjson.GetBytes(out, "tool_choice.name").String() != "agents__close" {
+		t.Errorf("to Messages: %s", out)
+	}
+	message := `{"id":"m","model":"c","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"agents__close","input":{}}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	call := gjson.GetBytes(reply.Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 200, Body: []byte(message)}}).Response.Body, "output.0")
+	if call.Get("name").String() != "close" || call.Get("namespace").String() != "agents" {
+		t.Errorf("from Messages: %s", call.Raw)
+	}
+
+	out, reply, err = responsesToChat{}.Request([]byte(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(out, "tools.#.function.name").Raw; got != `["top","agents__close"]` || gjson.GetBytes(out, "messages.0.tool_calls.0.function.name").String() != "agents__close" {
+		t.Errorf("to Chat: %s", out)
+	}
+	events, err := eventsOf(t, reply.Result(backend.ChatResult{Stream: &chunks{end: io.EOF, data: []string{
+		`{"model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","type":"function","function":{"name":"agents__close","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	}}}).Stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call := events[len(events)-1].Get("response.output.0"); call.Get("name").String() != "close" || call.Get("namespace").String() != "agents" {
+		t.Errorf("from Chat, streamed: %s", call.Raw)
+	}
+}
+
+// A namespaced name that is another tool's name, and a tool choice naming a
+// tool two namespaces hold, can't be told apart, and are refused.
+func TestResponses_RefuseNamespacesThatClash(t *testing.T) {
+	agents := `{"type":"namespace","name":"agents","description":"d","tools":[{"type":"function","name":"close"}]}`
+	for _, body := range []string{
+		`{"tools":[{"type":"function","name":"agents__close"},` + agents + `],"input":"hi"}`,
+		`{"tool_choice":{"type":"function","name":"close"},"tools":[` + agents + `,{"type":"namespace","name":"jobs","description":"d","tools":[{"type":"function","name":"close"}]}],"input":"hi"}`,
+	} {
+		for name, translator := range map[string]Translator{"chat": responsesToChat{}, "messages": responsesToMessages{}} {
+			if _, _, err := translator.Request([]byte(body)); err == nil {
+				t.Errorf("%s: %s: not refused", name, body)
+			}
+		}
+	}
+}
+
+// A search limited to OpenAI's cached index is dropped and reported toward a
+// backend whose search is live, rather than searching more widely than the
+// client allowed.
+func TestResponses_DropACacheOnlySearch(t *testing.T) {
+	body := `{"tools":[{"type":"web_search","external_web_access":false}],"input":"hi"}`
+	for name, translator := range map[string]Translator{"chat": responsesToChat{}, "messages": responsesToMessages{}} {
+		out, reply, err := translator.Request([]byte(body))
+		if err != nil || gjson.GetBytes(out, "tools").Exists() || gjson.GetBytes(out, "web_search_options").Exists() || !slices.Contains(reply.Dropped(), "tools.web_search") {
+			t.Errorf("%s: %s, dropped %v, %v", name, out, reply.Dropped(), err)
 		}
 	}
 }

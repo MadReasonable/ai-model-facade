@@ -75,7 +75,7 @@ Converts a request and its reply between protocols, for a request whose protocol
 The code is in two layers.
 Each protocol has a module, `chat.go`, `messages.go` and `responses.go`, which reads that protocol's requests into small values and writes its replies through one writer used streamed and not (`chatWriter`, `messagesWriter`, `responseBuilder`), so every translator answering a client of that protocol produces the same shapes.
 Each pair of protocols has a file, `chat_messages.go`, `chat_responses.go` and `messages_responses.go`, holding the two translators between them, built on the two modules.
-`effort.go` and `estimate.go` hold the effort levels and the token estimate the pairs share.
+`Resend` sends a Claude turn back after `pause_turn` for a client whose protocol has no such stop, and `effort.go` and `estimate.go` hold the effort levels and the token estimate the pairs share.
 It runs before params, which are written in the protocol the adapter receives.
 
 ### `internal/history`
@@ -101,7 +101,7 @@ The contracts between the gateway and its adapters.
 `Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
 `ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages and Responses, which send no `[DONE]`.
 Further optional capabilities are found by type assertion: `TokenCounter`, a backend's own Messages token count; `Tokenizer`, counting raw text with a model's tokenizer; and `ResponsesKeeper`, a backend that keeps Responses conversations and can read one back.
-The markers the translators put on what the gateway made, such as unsigned thinking, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
+The markers the translators put on what the gateway made, such as unsigned thinking and its own search records, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 
 ### `internal/backend/openaihttp`
@@ -114,7 +114,7 @@ Rules about backend state are implemented here once, not in each adapter.
 
 One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged; `llamaswap` and `llamaserver` also forward a token count, and `localai` tokenizes text for one.
-`anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, and removes what the gateway made that only Claude may write.
+`anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, removes what the gateway made that only Claude may write, and adds the MCP beta header where a request needs it.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
 A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
 
@@ -130,6 +130,6 @@ Fake llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI an
 - A new rule about how backend state is read or reused: `openaihttp.StateCache`.
 - A new endpoint or response header: `internal/gateway/server.go`, or `family.go` for a family's own endpoints.
 - A new protocol: a descriptor in `internal/protocols`, a module in `internal/translate`, and a translator for each pair it joins.
-- A field that crosses a translation differently: the pair's file, or the protocol's module if every pair from or to it shares the change.
+- A field or tool that crosses a translation differently: the pair's file, or the protocol's module if every pair from or to it shares the change.
 - A new step every request takes after selection: `internal/pipeline`.
 - A new kind of backend: a package under `internal/backend`, and a fake in `internal/testkit` for its tests.

@@ -345,3 +345,21 @@ func TestLive_ResponsesOnALocalModel(t *testing.T) {
 		})
 	}
 }
+
+// The tools a client runs to a vendor's schema reach a local model as
+// functions, and its calls come back as the client's own tools': OpenAI's
+// shell to a Responses client, and Claude's bash to a Messages client.
+func TestLive_ClientToolsReachALocalModel(t *testing.T) {
+	gw := startDevGateway(t, `
+  toolServer: {backend: llamaServer, candidates: [{model: llamaServer-llm-1, loadIfNone: true}]}
+`, "llamaServer")
+	question := "Use the shell to list the files in the current directory."
+	response := liveRespond(t, gw.gateway, `{"model":"toolServer","max_output_tokens":1500,"tool_choice":"required","tools":[{"type":"shell"}],"input":`+quoted(question)+`}`, false)
+	if call := gjson.Get(response, `output.#(type=="shell_call")`); len(call.Get("action.commands").Array()) == 0 {
+		t.Errorf("Responses: %s", response)
+	}
+	r := messagesRequest(t, gw.gateway, liveMessagesPath, "", `{"model":"toolServer","max_tokens":1500,"tool_choice":{"type":"any"},"tools":[{"type":"bash_20250124","name":"bash"}],"messages":`+userTurn(question)+`}`, nil)
+	if use := gjson.Get(r.body, `content.#(type=="tool_use")`); r.StatusCode != http.StatusOK || use.Get("name").String() != "bash" || use.Get("input.command").String() == "" {
+		t.Errorf("Messages: got %d %s", r.StatusCode, r.body)
+	}
+}
