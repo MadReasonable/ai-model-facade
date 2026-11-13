@@ -15,7 +15,7 @@ A facade decides which candidate answers; everything after that choice is the sa
 ```
 client -> front end -> facade -> selector -> pipeline -> backend adapter -> backend
           gateway    virtualmodel selector  pipeline    backend/...
-                                            translate, mergepatch
+                                            translate, mergepatch, history
 ```
 
 The front end parses nothing but what it must, the facade decides the policy, and the selector picks one model from the backends' current state.
@@ -64,7 +64,8 @@ A new behaviour is a new type here, so existing config entries never change mean
 
 ### `internal/pipeline`
 
-Runs a request after selection, the same way for every facade type: the route to the backend (`translate.Route`), translation, params in the protocol the backend receives, the model rewritten to the candidate's ID, the backend call, and the reply translated back.
+Runs a request after selection, the same way for every facade type: the route to the backend (`translate.Route`), the request protocol's hook, translation, params in the protocol the backend receives, the model rewritten to the candidate's ID, the backend call, and the reply translated back and shown to the hook.
+A hook is a protocol's own work around a request; Responses has one, the conversation store.
 `pipeline.Error` is the one error type a request fails with, given the client's family's shape by the front end.
 
 ### `internal/translate`
@@ -76,6 +77,12 @@ Each protocol has a module, `chat.go`, `messages.go` and `responses.go`, which r
 Each pair of protocols has a file, `chat_messages.go`, `chat_responses.go` and `messages_responses.go`, holding the two translators between them, built on the two modules.
 `effort.go` and `estimate.go` hold the effort levels and the token estimate the pairs share.
 It runs before params, which are written in the protocol the adapter receives.
+
+### `internal/history`
+
+Keeps Responses conversations, so a request that names an earlier response in `previous_response_id` can be served by any candidate.
+It is the pipeline's hook for Responses: after selection, `Store.Prepare` expands the conversation into the request's input, or passes the ID on to a service that keeps the conversation itself, and `Turn.Record` keeps the new turn from the reply, in the client's protocol.
+The store belongs to the process, not to a gateway: `Live.Reload` builds the new gateway around the old one's store.
 
 ### `internal/selector`
 
@@ -93,7 +100,7 @@ It walks the patch, not the body, so keys the config doesn't mention are never t
 The contracts between the gateway and its adapters.
 `Backend` (`ListModels`, `Chat`, `Protocols`) is what every adapter implements; `ModelStateProvider` (`LoadedModels`) is an optional capability, found through `backend.Has`.
 `ChatResult` carries either a complete `ChatResponse` or a `ChatStream`, and `SSEStream` parses a backend's event stream; `EndingStream` ends one at its last event, for Messages and Responses, which send no `[DONE]`.
-Further optional capabilities are found by type assertion: `TokenCounter`, a backend's own Messages token count; and `Tokenizer`, counting raw text with a model's tokenizer.
+Further optional capabilities are found by type assertion: `TokenCounter`, a backend's own Messages token count; `Tokenizer`, counting raw text with a model's tokenizer; and `ResponsesKeeper`, a backend that keeps Responses conversations and can read one back.
 The markers the translators put on what the gateway made, such as unsigned thinking, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 

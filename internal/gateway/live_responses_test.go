@@ -215,6 +215,41 @@ func TestLive_ResponsesServeOtherClientsThroughUseProtocol(t *testing.T) {
 	}
 }
 
+// A conversation crosses APIs by previous_response_id: OpenAI keeps its own
+// turns and resolves its own ID, the gateway reads them back from OpenAI when
+// Claude continues the conversation, and keeps Claude's turn, which it sends
+// to OpenAI in full when OpenAI continues it again.
+func TestLive_ResponsesConversationCrossesAPIs(t *testing.T) {
+	gw := startHostedGateway(t, `
+  kept: {backend: gpt, candidates: [{model: "${GPT_MODEL}", responsesHistory: service}]}
+  claude: {backend: claude, candidates: [{model: "${CLAUDE_MODEL}"}]}
+`, "claude", "gpt")
+	turn := func(facade, previous, input string) string {
+		t.Helper()
+		body := `{"model":"` + facade + `","max_output_tokens":300,"input":` + quoted(input)
+		if previous != "" {
+			body += `,"previous_response_id":` + quoted(previous)
+		}
+		if facade == "kept" {
+			body += `,"reasoning":{"effort":"low"}`
+		}
+		return liveRespond(t, gw, body+"}", false)
+	}
+	answer := func(response string) string {
+		return strings.ToLower(gjson.Get(response, `output.#(type=="message").content.0.text`).String())
+	}
+	first := turn("kept", "", "Remember the code word plum. Reply with OK.")
+	second := turn("kept", gjson.Get(first, "id").String(), "Remember the second code word pear. Reply with OK.")
+	third := turn("claude", gjson.Get(second, "id").String(), "What were the two code words? Answer with just the words.")
+	if got := answer(third); !strings.Contains(got, "plum") || !strings.Contains(got, "pear") {
+		t.Errorf("Claude answered %q", got)
+	}
+	fourth := turn("kept", gjson.Get(third, "id").String(), "Repeat the first code word. Answer with just the word.")
+	if got := answer(fourth); !strings.Contains(got, "plum") {
+		t.Errorf("OpenAI answered %q", got)
+	}
+}
+
 // OpenAI refuses a safety_identifier longer than 128 characters, and Claude
 // Code sends a user_id of 150, so a long user_id reaches OpenAI hashed.
 func TestLive_ResponsesTakeALongUserIDFromMessages(t *testing.T) {

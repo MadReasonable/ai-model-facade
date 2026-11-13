@@ -13,6 +13,12 @@ package openai
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
@@ -55,6 +61,65 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 // Protocols adds Responses to what the embedded client forwards.
 func (b *Backend) Protocols() []backend.Protocol {
 	return []backend.Protocol{backend.OpenAIChat, backend.OpenAIResponses, backend.OpenAICompletions}
+}
+
+// inputItemsPage is the most input_items returns at once.
+const inputItemsPage = 100
+
+// ResponsesHistory reads a kept response's output and its input_items, which
+// hold the input of every earlier turn too, oldest first with order=asc and
+// paged after the last item's ID (verified 2026-11-09 on gpt-5.4-nano). Items
+// keep their IDs, which the API accepts back as input.
+func (b *Backend) ResponsesHistory(ctx context.Context, id string, client backend.Client) ([]byte, error) {
+	path := "/v1/responses/" + url.PathEscape(id)
+	response, err := b.get(ctx, path, client)
+	if err != nil {
+		return nil, err
+	}
+	var items []string
+	after := ""
+	for {
+		query := url.Values{"order": {"asc"}, "limit": {fmt.Sprint(inputItemsPage)}}
+		if after != "" {
+			query.Set("after", after)
+		}
+		page, err := b.get(ctx, path+"/input_items?"+query.Encode(), client)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range gjson.GetBytes(page, "data").Array() {
+			items = append(items, item.Raw)
+		}
+		after = gjson.GetBytes(page, "last_id").String()
+		if !gjson.GetBytes(page, "has_more").Bool() || after == "" {
+			break
+		}
+	}
+	for _, item := range gjson.GetBytes(response, "output").Array() {
+		items = append(items, item.Raw)
+	}
+	return []byte("[" + strings.Join(items, ",") + "]"), nil
+}
+
+// get reads one of the API's own objects on a client's behalf, so that with
+// passthroughAuth it is read with the key that made it.
+func (b *Backend) get(ctx context.Context, path string, client backend.Client) ([]byte, error) {
+	resp, err := b.Do(ctx, http.MethodGet, path, nil, "application/json", client)
+	if err != nil {
+		return nil, err
+	}
+	body, err := openaihttp.ReadBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		message := gjson.GetBytes(body, "error.message").String()
+		if message == "" {
+			message = strings.TrimSpace(string(body))
+		}
+		return nil, fmt.Errorf("GET %s: %s: %s", path, resp.Status, message)
+	}
+	return body, nil
 }
 
 // ListModels returns every model the API lists, and keeps them as its state.

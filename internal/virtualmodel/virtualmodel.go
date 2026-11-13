@@ -10,6 +10,7 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/pipeline"
 )
 
 // Result describes a handled request. Target, Checked and Reason are filled
@@ -91,7 +92,10 @@ type Env struct {
 	// that depend on a backend being up and current, such as a candidate ID
 	// it doesn't list: serve starts anyway, check fails.
 	Check func(backend.ListingCheck)
-	Log   *slog.Logger
+	// Pipeline runs a request after selection, the same for every facade
+	// type.
+	Pipeline *pipeline.Pipeline
+	Log      *slog.Logger
 }
 
 // Build validates an entry and returns its handler.

@@ -694,6 +694,8 @@ func messagesFromResponses(body []byte) ([]byte, droppedFields, error) {
 		case k == "input" || k == "instructions":
 			place("system", system)
 			place("messages", messages)
+		case k == "store", k == "previous_response_id":
+			// the gateway's
 		case k == "max_output_tokens":
 			place("max_tokens", value.Raw)
 		case k == "reasoning" || k == "text" || k == "output_config":

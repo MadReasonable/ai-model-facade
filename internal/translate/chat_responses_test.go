@@ -37,7 +37,7 @@ func TestResponsesToChat_TranslatesARequest(t *testing.T) {
 	if string(out) != want {
 		t.Errorf("got  %s\nwant %s", out, want)
 	}
-	if got := strings.Join(reply.Dropped(), ","); got != "reasoning,store,reasoning.summary" {
+	if got := strings.Join(reply.Dropped(), ","); got != "reasoning,reasoning.summary" {
 		t.Errorf("dropped %s", got)
 	}
 }

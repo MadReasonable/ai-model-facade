@@ -24,10 +24,18 @@ type Config struct {
 }
 
 type Server struct {
-	Listen       string   `yaml:"listen"`
-	APIKeys      []APIKey `yaml:"apiKeys"`
-	UnknownKeys  string   `yaml:"unknownKeys"` // reject (default) | allow
-	TargetHeader string   `yaml:"targetHeader"`
+	Listen       string    `yaml:"listen"`
+	APIKeys      []APIKey  `yaml:"apiKeys"`
+	UnknownKeys  string    `yaml:"unknownKeys"` // reject (default) | allow
+	TargetHeader string    `yaml:"targetHeader"`
+	Responses    Responses `yaml:"responses"`
+}
+
+// Responses limits the conversations the gateway keeps for Responses clients
+// that name an earlier response in previous_response_id.
+type Responses struct {
+	MaxBytes      int64   `yaml:"maxBytes"`      // default 256 MiB
+	MaxAgeMinutes float64 `yaml:"maxAgeMinutes"` // since a conversation's last turn; default 1440
 }
 
 type APIKey struct {
@@ -111,6 +119,22 @@ func checkBasePath(family, basePath string) error {
 	return nil
 }
 
+func (r *Responses) applyDefaults() error {
+	if r.MaxBytes < 0 {
+		return fmt.Errorf("server.responses.maxBytes: %d is negative", r.MaxBytes)
+	}
+	if r.MaxAgeMinutes < 0 {
+		return fmt.Errorf("server.responses.maxAgeMinutes: %g is negative", r.MaxAgeMinutes)
+	}
+	if r.MaxBytes == 0 {
+		r.MaxBytes = 256 << 20
+	}
+	if r.MaxAgeMinutes == 0 {
+		r.MaxAgeMinutes = 24 * 60
+	}
+	return nil
+}
+
 // UnknownClient is the client name logged for a key not in server.apiKeys.
 const UnknownClient = "unknown"
 
@@ -158,6 +182,9 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 		cfg.Server.TargetHeader = "X-Gateway-Target"
 	}
 	if err := cfg.API.applyDefaults(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Server.Responses.applyDefaults(); err != nil {
 		return nil, err
 	}
 	for i, k := range cfg.Server.APIKeys {

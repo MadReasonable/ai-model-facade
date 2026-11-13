@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -12,7 +13,8 @@ import (
 )
 
 // responsesConfig is a facade that prefers a local model on llama-swap and
-// falls back to a model on OpenAI's API.
+// falls back to a model on OpenAI's API, which keeps its own conversations
+// when the candidate says so.
 const responsesConfig = `
 server: {listen: "127.0.0.1:0"}
 backends:
@@ -41,8 +43,80 @@ func (gw *gateway) respond(t *testing.T, body string) response {
 	return r
 }
 
+// A conversation continues on whichever candidate is selected: a turn served
+// by a local model through Chat Completions is sent to OpenAI as input, with
+// no previous_response_id OpenAI couldn't resolve, and back on the local
+// model the entire conversation is its messages.
+func TestResponses_ContinueAConversationOnAnotherCandidate(t *testing.T) {
+	gw, swap, openAI := startResponses(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	first := gw.respond(t, `{"model":"ask","input":"one"}`)
+	if req, _ := swap.Last("POST /v1/chat/completions"); gjson.Get(req.Body, "messages").Raw != `[{"role":"user","content":"one"}]` {
+		t.Errorf("first turn sent %s", req.Body)
+	}
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "")
+	second := gw.respond(t, `{"model":"ask","previous_response_id":"`+gjson.Get(first.body, "id").String()+`","input":"two"}`)
+	req, _ := openAI.Last("POST /v1/responses")
+	if gjson.Get(req.Body, "previous_response_id").Exists() || gjson.Get(req.Body, "input.#.role").Raw != `["user","assistant","user"]` || gjson.Get(req.Body, "input.1.content.0.text").String() != "ok" {
+		t.Errorf("second turn sent %s", req.Body)
+	}
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw.respond(t, `{"model":"ask","previous_response_id":"`+gjson.Get(second.body, "id").String()+`","input":"three"}`)
+	req, _ = swap.Last("POST /v1/chat/completions")
+	if got := gjson.Get(req.Body, "messages.#.content").Raw; got != `["one","ok","two","ok","three"]` {
+		t.Errorf("third turn sent %s", req.Body)
+	}
+}
+
+// A candidate whose service keeps its conversations is passed the service's
+// own response ID, and the gateway reads the conversation from the service
+// only when another candidate continues it.
+func TestResponses_LetTheServiceKeepItsConversations(t *testing.T) {
+	gw, swap, openAI := startResponses(t, "{model: gpt-a, backend: openAi}", "{model: gpt-a, backend: openAi, responsesHistory: service}")
+	first := gw.respond(t, `{"model":"ask","input":"one"}`)
+	id := gjson.Get(first.body, "id").String()
+	second := gw.respond(t, `{"model":"ask","previous_response_id":"`+id+`","input":"two"}`)
+	if req, _ := openAI.Last("POST /v1/responses"); gjson.Get(req.Body, "previous_response_id").String() != id || gjson.Get(req.Body, "input").String() != "two" {
+		t.Errorf("second turn sent %s", req.Body)
+	}
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw.respond(t, `{"model":"ask","previous_response_id":"`+gjson.Get(second.body, "id").String()+`","input":"three"}`)
+	if openAI.Count("GET /v1/responses/"+gjson.Get(second.body, "id").String()+"/input_items") != 1 {
+		t.Errorf("input_items not read: %v", openAI.Keys())
+	}
+	req, _ := swap.Last("POST /v1/chat/completions")
+	if got := gjson.Get(req.Body, "messages.#.content").Raw; got != `["one","ok","two","ok","three"]` {
+		t.Errorf("third turn sent %s", req.Body)
+	}
+}
+
+// Only a backend that keeps conversations can be told to.
+func TestResponses_RefuseAServiceThatKeepsNoConversations(t *testing.T) {
+	cfg, err := parseConfigErr(edit(t, responsesConfig, "{model: qwen3.6-35b-a3b:q8_0, backend: llamaSwap}", "{model: qwen3.6-35b-a3b:q8_0, backend: llamaSwap, responsesHistory: service}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(context.Background(), cfg, discard); err == nil || !strings.Contains(err.Error(), "backend 'llamaSwap' keeps no Responses conversations") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// An unknown previous_response_id is refused as OpenAI refuses it, and a
+// response made with store false can't be continued.
+func TestResponses_RefuseAnUnknownPreviousResponse(t *testing.T) {
+	gw, swap, _ := startResponses(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	unstored := gw.respond(t, `{"model":"ask","input":"one","store":false}`)
+	for _, id := range []string{"resp_unknown", gjson.Get(unstored.body, "id").String()} {
+		r := gw.do(t, http.MethodPost, "/v1/responses", "", `{"model":"ask","previous_response_id":"`+id+`","input":"two"}`)
+		if r.StatusCode != http.StatusBadRequest || gjson.Get(r.body, "error.type").String() != "invalid_request_error" || !strings.Contains(gjson.Get(r.body, "error.message").String(), id) {
+			t.Errorf("%s: got %d %s", id, r.StatusCode, r.body)
+		}
+	}
+}
+
 // A translated stream keeps Responses' framing, each event with its event
-// line and no [DONE].
+// line and no [DONE], and its turn can be continued.
 func TestResponses_StreamInTheirOwnFraming(t *testing.T) {
 	gw, swap, _ := startResponses(t)
 	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
@@ -52,9 +126,34 @@ func TestResponses_StreamInTheirOwnFraming(t *testing.T) {
 		t.Fatalf("got %d %s", r.StatusCode, r.body)
 	}
 	events := strings.Split(strings.TrimSpace(r.body), "\n\n")
+	last := strings.TrimPrefix(strings.SplitN(events[len(events)-1], "\n", 2)[1], "data: ")
 	if !strings.HasPrefix(events[len(events)-1], "event: response.completed\n") {
 		t.Fatalf("last event %s", events[len(events)-1])
 	}
+	swap.SetReply(testkit.Reply{})
+	gw.respond(t, `{"model":"ask","previous_response_id":"`+gjson.Get(last, "response.id").String()+`","input":"two"}`)
+	if req, _ := swap.Last("POST /v1/chat/completions"); gjson.Get(req.Body, "messages.#.content").Raw != `["one","hi","two"]` {
+		t.Errorf("next turn sent %s", req.Body)
+	}
+}
+
+// A reload keeps the conversations, even with every facade rebuilt.
+func TestResponses_SurviveAReload(t *testing.T) {
+	swap, openAI := newSwap(t), testkit.NewOpenAI(t, "gpt-a")
+	vars := map[string]string{"SWAP_URL": swap.URL, "OPENAI_URL": openAI.URL}
+	g, err := Build(context.Background(), parseConfig(t, responsesConfig, vars), discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := NewLive(g, discard)
+	srv := httptest.NewServer(live)
+	t.Cleanup(srv.Close)
+	gw := &gateway{Server: srv, g: g}
+	first := gw.respond(t, `{"model":"ask","input":"one"}`)
+	if _, err := live.Reload(context.Background(), parseConfig(t, edit(t, responsesConfig, "  ask:", "  asked:"), vars)); err != nil {
+		t.Fatal(err)
+	}
+	gw.respond(t, `{"model":"asked","previous_response_id":"`+gjson.Get(first.body, "id").String()+`","input":"two"}`)
 }
 
 // A stream from a backend that speaks Responses ends at its last event, since

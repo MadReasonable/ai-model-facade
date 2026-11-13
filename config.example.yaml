@@ -32,6 +32,12 @@ server:
   #     key: ${GATEWAY_KEY_OPEN_WEBUI}
   # unknownKeys: reject             # or allow: accept an unlisted key, logged by fingerprint
   targetHeader: X-Gateway-Target    # response header naming the model that answered
+  # The gateway keeps the conversations of Responses clients, which may send
+  # only their new input and name the response they follow. Past maxBytes,
+  # the least recently used conversations are evicted.
+  # responses:
+  #   maxBytes: 268435456             # 256 MiB
+  #   maxAgeMinutes: 1440             # since a conversation's last turn
 
 logging:
   level: info                       # debug | info | warning | error
@@ -112,10 +118,11 @@ backends:
   # OpenAI's API takes them too, and so does another hosted API that serves
   # Chat Completions, such as OpenRouter's, at its own baseUrl. Every model
   # it lists counts as loaded while it answers, so put its candidates after
-  # the local ones. OpenAI's Responses API reaches it untranslated. A model it
-  # serves only through Responses, such as a codex model, needs
-  # `useProtocol: openAiResponses` on its candidate to serve Chat Completions
-  # and Messages clients.
+  # the local ones. OpenAI's Responses API reaches it untranslated, and OpenAI
+  # keeps those conversations itself, so a candidate on it can set
+  # `responsesHistory: service` to leave them there. A model it serves only
+  # through Responses, such as a codex model, needs `useProtocol: openAiResponses`
+  # on its candidate to serve Chat Completions and Messages clients.
   # openAi:
   #   type: openAi
   #   baseUrl: https://api.openai.com

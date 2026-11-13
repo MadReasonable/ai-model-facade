@@ -4,11 +4,14 @@
 //
 //  1. Route: the protocol the backend is sent, the client's own if it accepts
 //     it, else one a translator reaches.
-//  2. Translation, on a translated route.
-//  3. Params in the protocol the backend receives, then the model rewritten
+//  2. The request's protocol's hook, if it has one: the Responses
+//     conversation store expands a conversation the request continues.
+//  3. Translation, on a translated route.
+//  4. Params in the protocol the backend receives, then the model rewritten
 //     to the candidate's ID.
-//  4. The backend call.
-//  5. The reply translated back.
+//  5. The backend call.
+//  6. The reply translated back, then shown to the hook, which records the
+//     turn.
 package pipeline
 
 import (
@@ -57,6 +60,43 @@ type Selected struct {
 	// Params returns the patches for a body in protocol, in the order they
 	// apply.
 	Params func(protocol backend.Protocol) []mergepatch.Patch
+	// Service is the backend when the candidate leaves its Responses
+	// conversations there (responsesHistory: service), else nil.
+	Service backend.ResponsesKeeper
+}
+
+// Hook is a protocol's own work around a request. Only Responses has one:
+// the conversation store.
+type Hook interface {
+	// Prepare returns the body the winner is sent and the client's fields it
+	// left out, and the Turn that sees the reply.
+	Prepare(ctx context.Context, body []byte, winner Winner) ([]byte, Turn, []string, error)
+}
+
+// Turn sees a request's reply, in the client's protocol, and returns it as
+// the client gets it.
+type Turn interface {
+	Record(result backend.ChatResult) backend.ChatResult
+}
+
+// Winner is what a hook needs to know about the selected candidate.
+type Winner struct {
+	Backend string // its backend's name
+	// Native means the request reaches the backend in its own protocol,
+	// without translation.
+	Native bool
+	// Service is the winner's backend when the candidate keeps its
+	// conversations there, else nil.
+	Service backend.ResponsesKeeper
+	// Backends finds the backend that served an earlier turn.
+	Backends map[string]backend.Backend
+	Client   backend.Client
+}
+
+// Pipeline holds what every request's run after selection shares.
+type Pipeline struct {
+	Hooks    map[backend.Protocol]Hook
+	Backends map[string]backend.Backend
 }
 
 // Reply is a request's result as the client gets it, and the client's fields
@@ -67,12 +107,26 @@ type Reply struct {
 }
 
 // Serve runs a request in protocol on the selected candidate.
-func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client, sel Selected) (Reply, error) {
+func (p *Pipeline) Serve(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client, sel Selected) (Reply, error) {
 	to, translator, ok := translate.Route(protocol, sel.Accepted)
 	if !ok {
 		return Reply{}, &Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("backend '%s' can't be reached from %s", sel.BackendName, protocol)}
 	}
 	var reply Reply
+	var turn Turn
+	if hook := p.Hooks[protocol]; hook != nil {
+		winner := Winner{Backend: sel.BackendName, Native: to == protocol, Service: sel.Service, Backends: p.Backends, Client: client}
+		var dropped []string
+		var err error
+		if body, turn, dropped, err = hook.Prepare(ctx, body, winner); err != nil {
+			var failed *Error
+			if errors.As(err, &failed) {
+				return Reply{}, failed
+			}
+			return Reply{}, gatewayError(err)
+		}
+		reply.drop(dropped)
+	}
 	var back translate.Reply
 	if translator != nil {
 		var err error
@@ -96,6 +150,9 @@ func Serve(ctx context.Context, protocol backend.Protocol, body []byte, client b
 	}
 	if back != nil {
 		reply.Chat = back.Result(reply.Chat)
+	}
+	if turn != nil {
+		reply.Chat = turn.Record(reply.Chat)
 	}
 	return reply, nil
 }

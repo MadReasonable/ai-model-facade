@@ -61,7 +61,8 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/protocols`: one descriptor per protocol (path, family, stream framing, stream error event). Code reads the descriptor rather than switching on the protocol.
 - `internal/gateway`: building and reloading a gateway, the API families (`family.go`), and the front end. The front end does HTTP and SSE framing only; selection belongs to the facade, and everything after it to the pipeline.
 - `internal/virtualmodel`: facade types, which select a candidate and hand it to the pipeline. A new behaviour is a new type with its own schema, validator and handler, never a change to `candidates`.
-- `internal/pipeline`: the run after selection, the same for every facade type: route, translation, params, model, backend call, reply translated back.
+- `internal/pipeline`: the run after selection, the same for every facade type: route, the protocol's hook, translation, params, model, backend call, reply translated back.
+- `internal/history`: the Responses conversation store, held across reloads; the pipeline's hook for Responses.
 - `internal/selector`: the selection order (`FirstLoaded`) and how patterns and aliases match.
 - `internal/mergepatch`: params compiled from YAML and applied to raw bodies.
 - `internal/translate`: converting a request and its reply between protocols: a module per protocol (`chat.go`, `messages.go`, `responses.go`) that reads its requests and writes its replies, and a file per pair holding its translators. A new pair is a translator registered in `translate.direct`.

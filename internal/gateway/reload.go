@@ -42,8 +42,9 @@ func (l *Live) Gateway() *Gateway {
 }
 
 // Reload builds a gateway from cfg and, only if that fully succeeds, swaps
-// it in. On any error the running gateway is untouched. server.listen can't
-// change without a restart, because the port is already bound.
+// it in, with the Responses conversations of the one it replaces. On any
+// error the running gateway is untouched. server.listen can't change without
+// a restart, because the port is already bound.
 func (l *Live) Reload(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -51,10 +52,11 @@ func (l *Live) Reload(ctx context.Context, cfg *config.Config) (*Gateway, error)
 	if cfg.Server.Listen != old.Config.Server.Listen {
 		return nil, fmt.Errorf("server.listen changed from '%s' to '%s'; restart to apply", old.Config.Server.Listen, cfg.Server.Listen)
 	}
-	g, err := Build(ctx, cfg, l.log)
+	g, err := build(ctx, cfg, l.log, old.history)
 	if err != nil {
 		return nil, err
 	}
+	g.history.SetLimits(historyLimits(cfg))
 	l.current.Store(&live{gateway: g, handler: g.Handler(l.log)})
 	g.start(l.log)
 	old.stop()

@@ -566,8 +566,8 @@ func chatFromResponses(body []byte) ([]byte, droppedFields, error) {
 		case k == "input":
 			out.add(`"messages"`, messages)
 			placedMessages = true
-		case k == "instructions":
-			// in messages
+		case k == "instructions", k == "store", k == "previous_response_id":
+			// instructions are in messages; the others are the gateway's
 		case k == "max_output_tokens":
 			out.add(`"max_tokens"`, value.Raw)
 		case k == "reasoning":

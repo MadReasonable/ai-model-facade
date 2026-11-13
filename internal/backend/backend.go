@@ -333,6 +333,16 @@ type Tokenizer interface {
 	Tokenize(ctx context.Context, model, text string, client Client) (int, error)
 }
 
+// ResponsesKeeper is an optional backend capability: a Responses API that
+// keeps the responses it serves, so a request to it may name one in
+// previous_response_id, and the conversation up to one can be read back.
+type ResponsesKeeper interface {
+	// ResponsesHistory returns the conversation up to and including the
+	// response with this ID, as a JSON array of Responses input items: all of
+	// its input, earlier turns included, then its output.
+	ResponsesHistory(ctx context.Context, id string, client Client) ([]byte, error)
+}
+
 // ModelStateProvider is an optional backend capability.
 type ModelStateProvider interface {
 	// LoadedModels returns the models that are ready, plus those still

@@ -46,16 +46,16 @@ A request passes through these stages, each a separate package:
 ```
 client -> front end -> facade -> selector -> pipeline -> backend adapter -> backend
           (gateway)  (virtualmodel) (selector) (pipeline)  (backend/...)
-                                              translate, mergepatch
+                                              translate, mergepatch, history
 ```
 
 The front end (`internal/gateway`) serves each API family's endpoints, built from the protocols' descriptors (`internal/protocols`), and does HTTP and SSE framing only.
 A facade (`internal/virtualmodel`) owns its policy: which selector, which params, which backends.
 The selector (`internal/selector`) turns backend state into one chosen model.
-The pipeline (`internal/pipeline`) runs everything after the choice, the same for every facade type: the route to the backend, translation (`internal/translate`), params as byte edits (`internal/mergepatch`), the model rewritten, the backend call, and the reply translated back.
+The pipeline (`internal/pipeline`) runs everything after the choice, the same for every facade type: the route to the backend, the request protocol's hook, translation (`internal/translate`), params as byte edits (`internal/mergepatch`), the model rewritten, the backend call, and the reply translated back.
 An adapter (`internal/backend/...`) forwards the request and returns either a complete response or a stream of SSE payloads; the front end relays both.
 
-Decided: the pipeline is a package of its own, not part of the facade type, so a new facade type decides only which candidate answers and inherits translation and params unchanged.
+Decided: the pipeline is a package of its own, not part of the facade type, so a new facade type decides only which candidate answers and inherits translation, params and the conversation store unchanged.
 
 ### Interfaces
 
@@ -66,7 +66,7 @@ Three interfaces separate the stages, and each one is where a kind of extension 
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
 Further capabilities follow the same pattern: an interface a backend may implement, found by type assertion (`backend.Has`), and required by the selectors or facade types that need it.
-`backend.TokenCounter` (the backend's own Messages count) and `backend.Tokenizer` (raw text counted with a model's tokenizer) are two of them.
+`backend.TokenCounter` (the backend's own Messages count), `backend.Tokenizer` (raw text counted with a model's tokenizer) and `backend.ResponsesKeeper` (a backend that keeps Responses conversations) are three of them.
 A backend that refers to other backends, as the Open WebUI adapter's `links` do, implements `Link`, which the gateway calls once every backend exists.
 
 ### Facade types
@@ -358,7 +358,7 @@ A bare name is not mapped to `name:latest`, which would be implicit matching by 
 ### OpenAI
 
 OpenAI's API serves Chat Completions, Responses and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl` (Responses not checked on any API but OpenAI's).
-The adapter declares Responses, so a Responses request reaches it untranslated, and OpenAI resolves its `previous_response_id` itself.
+The adapter declares Responses, so a Responses request reaches it untranslated, and implements `backend.ResponsesKeeper`, reading a kept response's conversation back for the store (Responses conversations).
 Chat Completions has two names for the token limit, and no one name works everywhere (verified 2026-11-08): OpenAI's models from `gpt-5` on, and `o3`, refuse `max_tokens` even beside the other; Ollama 0.40.8 ignores `max_completion_tokens` with a 200; llama-swap v263, llama-server b11580, LM Studio and LocalAI honour either; Open WebUI v0.12.3 takes `max_tokens` for every connection tried. So `openAi` sends `max_completion_tokens`, `ollama` and `openWebUi` send `max_tokens`, renaming in place (`openaihttp.UseMaxCompletionTokens`, `UseMaxTokens`), and the translator sends `max_tokens`. With both names, `max_completion_tokens`' value wins, as on the backends that honour both.
 Everything here is from OpenAI's API documentation; the testkit's live claim, run with `OPENAI_API_KEY` set, checked the model list, a chat and the refusal of an unknown model against the API.
 
@@ -492,6 +492,31 @@ Only the `openWebUi` adapter writes it back into the body, because a strict Open
 Open WebUI's OpenAI-connection path forwards unknown body fields (source), so the field reaches the next gateway.
 A loop is caught on its first repeat, with no hop limit to choose, and a chain of different facades passes.
 
+## Responses conversations
+
+A Responses client may send only its new input and name the response it follows in `previous_response_id`, leaving the service to supply the conversation.
+Only OpenAI's API keeps conversations, and the next turn may select another candidate than the last, so the gateway keeps them (`internal/history`).
+
+Decided: the store belongs to the process, not to a gateway or a facade.
+A reload rebuilds every adapter and facade, and the next turn names its facade and runs selection afresh, so nothing a conversation needs survives in them; `Live.Reload` builds the new gateway around the old one's store (`gateway.build`).
+It is keyed by the response ID the client saw: the backend's own on the identity route, the translator's (`resp_` and random hex) otherwise.
+Each turn records the client's own input, not the expanded one, and links to the turn it followed, so the conversation is the chain of links.
+Decided: memory only, limited by total size and by age since a conversation's last turn (`server.responses`), evicting a conversation with all its turns, least recently used first, so no chain is ever missing a link.
+Decided: the client's `store` is never changed; `store: false` means the gateway keeps nothing either, and the request is sent as it came.
+
+The flow is the package comment's: `Store.Prepare` runs after selection, since what it sends depends on the winner, and before translation, so a translator sees a complete input and no `previous_response_id`; `Turn.Record` wraps the reply after translation, in Responses, recording from the response object or from the stream's `response.completed` or `response.incomplete` event.
+
+Decided (2026-11-09): each candidate chooses where its turns are kept, `responsesHistory: gateway` (default) or `service`, which needs a `backend.ResponsesKeeper`.
+For a service turn the store keeps only its backend and link.
+The service's own ID is passed on only to a `service` candidate on the backend that made it, over Responses; any other winner is sent the expanded conversation.
+Decided against: passing the backend's own ID to any candidate on that backend, which fails on a hosted API that serves Responses statelessly behind an `openAi` backend; `service` is the config saying the backend keeps them.
+Expanding a service turn reads `GET /v1/responses/{id}`'s output and its `input_items` with `order=asc`, which hold every earlier turn's input and output too, paged after the last item's ID, and a fetched item's ID is accepted back as input (verified 2026-11-09 on gpt-5.4-nano, and in the testkit's live claims).
+That read fails if the service is down, which is when another candidate is most likely to take over: the trade a `service` candidate makes to save memory and resending.
+
+Decided (2026-11-09): reasoning items in a conversation are dropped, and reported, when it reaches another backend than the one that served their turn, since only that backend can read them; a reasoning item a client sends itself is the translator's to judge.
+Deferred (2026-11-09): background mode, which needs work the gateway owns after the request, with polling and cancellation, within the reload rules; the Conversations API; and `GET` and `DELETE /v1/responses/{id}` and its `input_items`, which the store could answer.
+Each is refused or not served.
+
 ## Translation
 
 A request whose protocol the selected backend doesn't accept is translated to one it does, and the reply translated back, streamed or not (`internal/translate`).
@@ -552,10 +577,6 @@ A Messages client gets OpenAI's reasoning as a thinking block whose signature is
 OpenAI accepts that `include` and `reasoning.summary` on a model that doesn't reason (verified on gpt-4.1-mini), so they are sent whatever the model.
 From Chat Completions, `logprobs` become `include: ["message.output_text.logprobs"]` and `top_logprobs`, each part's in the shape Chat Completions gives; and custom tools, `custom_tool_call` items and their `custom_tool_call_output`, and `allowed_tools`, translate both ways (each shape seen from both APIs on gpt-5.4-nano, 2026-11-09).
 Stop sequences, `n` above 1 and audio are refused, having no Responses counterpart.
-
-Decided (2026-11-09): toward another backend, `previous_response_id` is refused, since only OpenAI keeps the response it names, and `store` is dropped, so a Responses client there sends its conversation every turn.
-Deferred (2026-11-09): background mode, which needs work the gateway owns after the request, with polling and cancellation, within the reload rules; and the Conversations API.
-Each is refused.
 
 ### Effort
 

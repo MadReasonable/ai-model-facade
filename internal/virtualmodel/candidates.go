@@ -35,6 +35,9 @@ type candidateConfig struct {
 	Backend    string    `yaml:"backend"` // default: the virtual model's backend
 	LoadIfNone bool      `yaml:"loadIfNone"`
 	Params     yaml.Node `yaml:"params"`
+	// ResponsesHistory says who keeps the Responses conversations the
+	// candidate serves: the gateway (default) or the service.
+	ResponsesHistory string `yaml:"responsesHistory"`
 	// UseProtocol is the protocol the backend receives for this candidate, one
 	// it accepts; default: the client's, else the first it can be translated
 	// to.
@@ -62,6 +65,10 @@ type candidates struct {
 	selector     *selector.FirstLoaded
 	patches      []protocolParams // per candidate
 	passthrough  []string         // backends with passthroughAuth, when more than one
+	pipeline     *pipeline.Pipeline
+	// services holds, per candidate, its backend when the candidate keeps its
+	// Responses conversations there, else nil.
+	services []backend.ResponsesKeeper
 }
 
 func newCandidates(entry config.Entry, env Env) (*candidates, error) {
@@ -69,7 +76,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 	if err := config.DecodeStrict(entry.Node, &c); err != nil {
 		return nil, err
 	}
-	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}}
+	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}, pipeline: env.Pipeline}
 	if c.Backend != "" {
 		if m.backend = env.Backends[c.Backend]; m.backend == nil {
 			return nil, fmt.Errorf("line %d: backend '%s' is not defined", entry.Node.Line, c.Backend)
@@ -131,6 +138,10 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		if err != nil {
 			return nil, err
 		}
+		service, err := responsesService(cc.ResponsesHistory, b, name, node.Line)
+		if err != nil {
+			return nil, err
+		}
 		hasParams := !m.params.empty() || !patches.empty()
 		if slices.Contains(accepted, backend.AnthropicMessages) {
 			m.warnChatOnlyKeys(entry.Name, cc.Model, name, env.Log, patches)
@@ -152,6 +163,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		m.useProtocols = append(m.useProtocols, cc.UseProtocol)
 		m.catalogs = append(m.catalogs, env.Catalogs[name])
 		m.patches = append(m.patches, patches)
+		m.services = append(m.services, service)
 	}
 	m.notePassthrough(env.Log, entry.Name)
 	return m, nil
@@ -168,6 +180,22 @@ func protocolsFor(name string, b backend.Backend, backendName string, line int) 
 		return nil, fmt.Errorf("line %d: useProtocol '%s' is not a protocol backend '%s' accepts; it accepts %s", line, name, backendName, joinProtocols(b.Protocols()))
 	}
 	return []backend.Protocol{protocol}, nil
+}
+
+// responsesService returns the backend that keeps a candidate's Responses
+// conversations under responsesHistory, nil when the gateway keeps them.
+func responsesService(keeper string, b backend.Backend, backendName string, line int) (backend.ResponsesKeeper, error) {
+	switch keeper {
+	case "", "gateway":
+		return nil, nil
+	case "service":
+		service, ok := b.(backend.ResponsesKeeper)
+		if !ok {
+			return nil, fmt.Errorf("line %d: responsesHistory is 'service', but backend '%s' keeps no Responses conversations; use 'gateway'", line, backendName)
+		}
+		return service, nil
+	}
+	return nil, fmt.Errorf("line %d: responsesHistory '%s' is not 'gateway' or 'service'", line, keeper)
 }
 
 // chatOnlyKeys exist only in Chat Completions. The Messages API refuses a field
@@ -316,7 +344,7 @@ func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body [
 	if err != nil {
 		return res, err
 	}
-	reply, err := pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
+	reply, err := m.pipeline.Serve(ctx, protocol, body, client, m.selected(sel))
 	res.Chat, res.Dropped = reply.Chat, reply.Dropped
 	return res, err
 }
@@ -354,6 +382,7 @@ func (m *candidates) selected(sel selector.Selection) pipeline.Selected {
 		AliasOf:     sel.AliasOf,
 		Accepted:    m.accepted[i],
 		Params:      func(protocol backend.Protocol) []mergepatch.Patch { return m.patchesFor(i, protocol) },
+		Service:     m.services[i],
 	}
 }
 
@@ -471,6 +500,9 @@ func (m *candidates) Describe(w io.Writer) {
 			note = " (loadIfNone)"
 		}
 		fmt.Fprintf(w, "  %d. %s%s\n", i+1, c.On(c.Model), note)
+		if m.services[i] != nil {
+			fmt.Fprintf(w, "     responses history: kept by the service\n")
+		}
 		if m.useProtocols[i] != "" {
 			fmt.Fprintf(w, "     use protocol: %s\n", m.useProtocols[i])
 		}

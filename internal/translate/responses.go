@@ -23,23 +23,22 @@ import (
 // responsesRefused are request fields that ask for what only OpenAI's servers
 // do.
 var responsesRefused = map[string]string{
-	"background":           "background mode needs work the gateway owns after the request; send the request without it",
-	"conversation":         "the gateway keeps no Conversations API objects; send the conversation in input",
-	"previous_response_id": "the response it names is kept at OpenAI; send the conversation in input",
-	"prompt":               "a prompt template is kept at OpenAI",
+	"background":   "background mode needs work the gateway owns after the request; send the request without it",
+	"conversation": "the gateway keeps no Conversations API objects; chain turns with previous_response_id",
+	"prompt":       "a prompt template is kept at OpenAI",
 }
 
 // responsesDropped are request fields with no counterpart in either other
 // API that only tune OpenAI's own services or what it returns beyond the
-// response, so leaving them out changes nothing the reply depends on, such
-// as store, since only OpenAI keeps a response.
+// response, so leaving them out changes nothing the reply depends on. store
+// and previous_response_id are the gateway's (history), so they aren't
+// reported.
 var responsesDropped = map[string]bool{
 	"access_programs":    true,
 	"client_metadata":    true,
 	"context_management": true,
 	"image":              true,
 	"max_tool_calls":     true,
-	"store":              true,
 	"stream_options":     true,
 	"truncation":         true,
 }

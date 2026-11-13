@@ -29,7 +29,7 @@ A facade moves that decision out of every client and into one place, where it is
 
 **Evaluate models without re-pointing clients.** A facade wired into clients such as Cline, llama.vscode or Home Assistant can list every model under evaluation as its candidates: quants of one model, or entirely different generations and families. Requests are routed to whichever model is loaded, so trying the next model means loading it on the backend, with no change to any client or to the gateway's config. Each response carries an `X-Gateway-Target` header naming the model that answered, so each result can be attributed to the model that produced it.
 
-**Claude and Responses clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded. A client built on OpenAI's Responses API is served the same way.
+**Claude and Responses clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded. A client built on OpenAI's Responses API is served the same way, and since such a client may send only its new input and leave the conversation to the service, the gateway keeps the conversation, so the next turn can go to whichever candidate is loaded.
 
 **Keep keys and addresses out of clients.** Clients get one address and one key, the gateway's. The backends' addresses and keys live in the gateway's config, and a client's own key reaches a backend only where you turn passthrough on. In that respect it is a reverse proxy for LLM endpoints, limited to each API's chat, completion and model-list endpoints, and Claude's token count.
 
@@ -575,8 +575,28 @@ Claude accepts its thinking back only with the signature it was made with, so th
 Any other reasoning item a request carries is dropped, since only the backend that made it can read it.
 
 Fields that only tune OpenAI's own services or what it returns beyond the response, such as `include`, `metadata`, `service_tier` and `prompt_cache_key`, are dropped.
-A request that needs OpenAI's servers is refused with `400`: a tool that isn't a function, such as web search or file search, `background`, `conversation`, `previous_response_id`, which names a response only OpenAI keeps, a stored `prompt`, an `item_reference`, or an image or file by file ID.
-So a Responses client on another backend sends its conversation every turn, in `input`; `store` is dropped, since only OpenAI keeps a response.
+A request that needs OpenAI's servers is refused with `400`: a tool that isn't a function, such as web search or file search, `background`, `conversation`, a stored `prompt`, an `item_reference`, or an image or file by file ID.
+
+#### Conversations
+
+A Responses client can send only its new input and name the response it follows in `previous_response_id`, so the service supplies the rest of the conversation.
+No backend but OpenAI's keeps conversations, and the next turn may select another candidate than the last, so the gateway keeps them itself.
+
+Each response the gateway serves is kept, unless the request sets `store: false`: the input the client sent and the response's output.
+A request that names one is sent the conversation up to it in its `input`, without `previous_response_id`, to whichever candidate wins.
+A conversation started on a local model therefore continues on OpenAI's API or the Claude API when the local model is unloaded, and back.
+A response that was never kept, or has been evicted, is refused with `400`, as OpenAI refuses an unknown one.
+The request's `store` is passed on unchanged, so OpenAI keeps its own copy if the client asked it to.
+
+Conversations live in memory: a reload keeps them, and a restart loses them.
+[`server.responses`](#server) limits their total size and how long one is kept after its last turn, and evicts a conversation with every turn in it, the least recently used first.
+
+A candidate on an `openAi` backend can leave its conversations to OpenAI instead, with `responsesHistory: service`.
+The gateway then keeps only which backend served each turn, and a request for the same backend is passed its `previous_response_id`, so the conversation isn't sent again.
+When another candidate continues such a conversation, the gateway reads it from the service first; that read fails if the service is down, and an outage is when another candidate is most likely to take over.
+
+Reasoning items in a conversation that reaches another backend than the one that made them are dropped, and reported in [`X-Gateway-Dropped`](#dropped-fields).
+The gateway serves no endpoint to read back or delete a kept response, `GET` and `DELETE /v1/responses/{id}` and its `input_items`, and no background mode.
 
 #### Chat Completions and Messages through Responses
 
@@ -900,6 +920,8 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `apiKeys` | A list of `name` / `key` pairs. When set, requests need one of these keys, and the key's name appears in the log. The name `unknown` is reserved. Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
+| `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
+| `responses.maxAgeMinutes` | How long a conversation is kept after its last turn. Default `1440` (24 hours). |
 
 ### `logging`
 
@@ -1023,6 +1045,7 @@ OpenAI's newer models refuse `max_tokens`, so the gateway sends a chat's token l
 
 A Responses request reaches the backend untranslated, so another hosted API used as an `openAi` backend has to serve `/v1/responses` for a Responses client to use it (not checked on any API but OpenAI's).
 A model OpenAI serves only through Responses, such as its codex models, refuses Chat Completions, so its candidate needs [`useProtocol: openAiResponses`](#chat-completions-and-messages-through-responses) to serve Chat Completions and Messages clients.
+OpenAI keeps the responses it serves, so a candidate on this backend can leave its [conversations](#conversations) to it with `responsesHistory: service`; the gateway reads one back through `GET /v1/responses/{id}` and its `input_items`.
 
 #### Anthropic
 
@@ -1078,6 +1101,7 @@ Each candidate takes:
 | `backend` | The backend this candidate is on. Default: the facade's `backend`. |
 | `loadIfNone` | `true`: if no candidate is ready or starting, the first `loadIfNone` candidate is used and its backend loads it. Default `false`: only used when ready or starting. Must be an exact ID. |
 | `params` | Applied after the facade's `params` when this candidate wins. Optional. |
+| `responsesHistory` | Who keeps the Responses [conversations](#conversations) this candidate serves: `gateway` (default) or `service`, which needs a backend that keeps them, `openAi`. |
 | `useProtocol` | The protocol this candidate's backend is sent, one it accepts, such as `openAiResponses` on an `openAi` backend. Default: the client's own, else the first the request can be translated to. See [Chat Completions and Messages through Responses](#chat-completions-and-messages-through-responses). |
 
 ## API reference
@@ -1088,7 +1112,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | Endpoint | Description |
 |----------|-------------|
 | `POST /v1/chat/completions` | Chat Completions, streamed or not. Also under `/openai`. |
-| `POST /v1/responses` | OpenAI's Responses API, streamed or not; see [Responses on other backends](#responses-on-other-backends). Also under `/openai`. |
+| `POST /v1/responses` | OpenAI's Responses API, streamed or not, with `previous_response_id`; see [Conversations](#conversations). Also under `/openai`. |
 | `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. Also under `/openai`. |
 | `GET /v1/models` | Lists only the facades, so clients that pick from a list see only those. Also under `/openai`. |
 | `GET /v1/models/{id}` | One facade, or `404`. Also under `/openai`. |
