@@ -31,7 +31,7 @@ To keep your email private, set `git config user.email` to the noreply address G
 
 ## Tests
 
-The tests run in under a second, need no network or real backends, and never sleep: every backend is a fake that a test sets up and steps through.
+The tests are meant to run fast: they need no network or real backends, since every backend is a fake that a test sets up and steps through, and a test waits for the event it depends on rather than for a length of time.
 The rest of this file explains how they are organised and written, so a new test lands in the right place and stays fast and deterministic.
 
 ### Running the tests
@@ -110,12 +110,13 @@ CI runs neither live set, since they need Docker, model files and minutes of loa
 
 ### Waiting without sleeping
 
-A test waits for the event it depends on, never for a length of time.
+A test waits for the event it depends on, not for a length of time, wherever the event can be seen.
 A sleep is either too short on a busy CI machine, which makes the test flaky, or longer than needed everywhere else, which makes the suite slow.
 
 The tools, by what a test waits for:
 
 - **A request reaching a fake:** `WaitFor(t, "POST /v1/chat/completions", n)`.
+- **A chat reaching the backend in a claim, which runs against the fake and live:** `waitForChats(t, b, n)`. It waits for the fake's record of the chats, and against a real backend, which doesn't show a request arriving, waits a fixed 300 ms instead.
 - **A load or chat to proceed:** `HoldLoads` returns a `Gate` that holds every load until `Open`; an Open WebUI `Chat` takes a `PollGate`, which lets one poll through per value sent, and a `StopGate`.
 - **Readers waiting on the state cache:** the cache's unexported `waiting` hook, through `readersWaiting` in the `openaihttp` tests.
 - **A log line in a gateway test:** `gw.logs.waitFor(t, "...")`.

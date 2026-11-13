@@ -153,7 +153,7 @@ It walks the list up to three times:
 A model that is stopping or stopped never counts, since a request to it would load it again.
 A model whose state can't be read counts as not loaded, so only `loadIfNone` can pick it.
 
-A backend that serves nothing until a load ends is skipped whole while it loads: a request sent then would fail, so none of its candidates is waited on or picked as the fallback.
+A backend that serves nothing until a load ends is skipped entirely while it loads: a request sent then would fail, so none of its candidates is waited on or picked as the fallback.
 An adapter says so by wrapping `backend.ErrLoading` in its failed state read, as single-model llama-server's does for a 503, LM Studio's for a 500, and LocalAI's, under a limit on loaded models, for a load of the gateway's under way.
 The log calls such a backend's candidates busy, and since its state was read, a request that finds nothing else gets `503` as with no candidate loaded, not the `502` of a backend whose state can't be read.
 LM Studio needs more (`backend.LoadsOneAtATime`): loading one model aborts a load of another under way and fails the request that started it, and it lists the model it is loading as loaded from the moment the load begins.
@@ -227,7 +227,7 @@ A model also stops counting when its request ends, however it ends; if the clien
 
 With `api.openAi.addCurrent` on, when the gateway is an Open WebUI connection and also has an Open WebUI backend, building `current` for `/v1/models` refreshes Open WebUI's model list, which makes Open WebUI call this gateway's `/v1/models` again.
 That nested call would join the fetch already in flight and wait on itself until the state timeout.
-So `/v1/models` reads state under `backend.WithoutStateWait`: if a fetch is in flight, it answers from the last cached state, or omits `current` if there is none.
+So `/v1/models` reads state under `backend.WithoutStateWait`: if a fetch is in flight, it answers from the last cached state, or omits `current` if there is none, which it logs at INFO, since that is the loop broken as designed.
 
 The gateway can't tell whether a server's answer depends on this gateway, so `loopsBack: true` on a backend says it does.
 With it, `/v1/models` doesn't wait for that backend's fetch; without it, the default, a read waits for the fetch in flight and reports its state.

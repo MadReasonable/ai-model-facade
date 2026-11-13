@@ -102,6 +102,20 @@ func chatInBackground(t *testing.T, b Driver, model string) *backgroundChat {
 	return chat
 }
 
+// waitForChats returns once n chats have reached backend b. A fake records
+// each request, so a claim against one waits for exactly that. A real
+// backend doesn't say when a request arrives, and LocalAI shows no load
+// under way, so against one the claim waits 300 ms, long enough for a
+// request on the same host to arrive, and shorter than a real load.
+func waitForChats(t *testing.T, b Driver, n int) {
+	t.Helper()
+	if fake, ok := b.(interface{ WaitFor(testing.TB, string, int) }); ok {
+		fake.WaitFor(t, "POST /v1/chat/completions", n)
+		return
+	}
+	time.Sleep(300 * time.Millisecond)
+}
+
 // liveDriver drives a real backend through control's API.
 type liveDriver struct{ *LiveBackend }
 

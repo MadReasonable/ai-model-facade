@@ -136,9 +136,16 @@ func newCurrentObject(cur virtualmodel.Current) *currentObject {
 
 // currentOf returns where a request for m would go now. If the backend's
 // state can't be read it returns nil, so the caller leaves `current` out
-// rather than failing the listing.
+// rather than failing the listing. A backend with loopsBack whose refresh is
+// already in flight, with nothing cached, is the loop through Open WebUI
+// broken as designed (backend.ErrStateBusy), so that is logged at INFO; any
+// other failure is a WARN.
 func (s *server) currentOf(ctx context.Context, m Model) *currentObject {
 	cur, err := m.Handler.Current(ctx)
+	if errors.Is(err, backend.ErrStateBusy) {
+		s.log.Info("current selection unavailable", "model", m.Name, "error", err)
+		return nil
+	}
 	if err != nil {
 		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
 		return nil

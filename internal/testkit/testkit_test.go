@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -246,9 +245,8 @@ func TestLocalAI_ListsAliasesAndModelsOnlyOnceLoaded(t *testing.T) {
 // With a limit on loaded models, even of two, a request for a model that
 // isn't loaded during a load, the loading one too, waits for it, then evicts
 // the model it loaded: the request that started the load fails with 500, and
-// the later request loads its model and answers. LocalAI shows no load under
-// way, so the claim gives each request 300 ms to arrive before the next
-// step; a real load takes longer.
+// the later request loads its model and answers. Each step waits for the
+// request before it to arrive (waitForChats).
 func TestLocalAI_EvictsALoadForAnyModelNotLoaded(t *testing.T) {
 	for _, second := range []string{"localai-llm-2", "localai-llm-1"} {
 		t.Run(second, func(t *testing.T) {
@@ -256,9 +254,9 @@ func TestLocalAI_EvictsALoadForAnyModelNotLoaded(t *testing.T) {
 				b.Reset(t)
 				release := b.HoldLoads(t)
 				first := chatInBackground(t, b, "localai-llm-1")
-				time.Sleep(300 * time.Millisecond)
+				waitForChats(t, b, 1)
 				later := chatInBackground(t, b, second)
-				time.Sleep(300 * time.Millisecond)
+				waitForChats(t, b, 2)
 				release()
 				<-first.done
 				<-later.done

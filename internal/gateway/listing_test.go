@@ -142,7 +142,8 @@ func TestListing_ReadsEachBackendOnceThroughOpenWebUI(t *testing.T) {
 
 // When Open WebUI lists this gateway's models while the gateway is reading
 // Open WebUI's state, the nested listing doesn't wait for the read that is
-// waiting for it.
+// waiting for it. Leaving `current` out there is the loop broken as
+// designed, so it is logged at INFO, not as a warning.
 func TestListing_DoesNotWaitForItselfThroughOpenWebUI(t *testing.T) {
 	webui := testkit.NewOpenWebUI(t, testkit.OllamaEntry("qwen3:1.7b", true))
 	gw := startGateway(t, currentOn+`
@@ -161,6 +162,9 @@ models:
 	list := gw.get(t, "/v1/models").body
 	if time.Since(start) > time.Second || webui.Count("GET /api/models") != 1 || gjson.Get(list, "data.0.current").Raw != `{"model":"qwen3:1.7b","reason":"loaded"}` {
 		t.Errorf("after %v and %d model-list reads: %s", time.Since(start), webui.Count("GET /api/models"), list)
+	}
+	if out := gw.logs.String(); !strings.Contains(out, `level=INFO msg="current selection unavailable" model=assistant`) || strings.Contains(out, "level=WARN") {
+		t.Errorf("log:\n%s", out)
 	}
 }
 
