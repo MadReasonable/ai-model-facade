@@ -164,6 +164,9 @@ backends:
   #   apiKey: ${OPEN_WEBUI_API_KEY} # this account's permissions decide the built-in tools
   #   passthroughAuth: true         # each caller acts as their own Open WebUI user, with their
   #                                 # own memories and chats; apiKey stays for state calls
+  #   keyMap:                       # or give a caller an Open WebUI key of its own, by its key
+  #     alice: ${OPEN_WEBUI_KEY_ALICE}   # name or a group, without passing gateway keys through
+  #     family: ${OPEN_WEBUI_KEY_FAMILY} # every other member of family shares one account
   #   stateCacheSeconds: 2
   #   requestTimeoutSeconds: 180
   #   chats: delete                 # delete | archive | keep the chat each request creates

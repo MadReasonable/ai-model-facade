@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,8 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 		{"params mixing blocks and keys", "models:\n", "models:\n  mixed: {backend: llamaSwap, params: {all: {a: 1}, b: 2}, candidates: [{model: x}]}\n", "params mixes protocol blocks with the key 'b'"},
 		{"unknown protocol", "models:\n", "models:\n  bad: {backend: llamaSwap, protocols: [openAiChatt], candidates: [{model: x}]}\n", "unknown protocol 'openAiChatt'"},
 		{"negative retry", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", listRetrySeconds: -1`, "listRetrySeconds must not be negative"},
+		{"keyMap for an undefined name", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {nobody: k}`, "backends.llamaSwap: line 8: keyMap: 'nobody' is not a name in server.apiKeys or server.groups"},
+		{"keyMap for a built-in group", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {all: k}`, "keyMap: 'all' can't have an entry"},
 		{"undefined key on a facade", "    description:", "    allowedKeys: [nobody]\n    description:", "models.task: line 11: allowedKeys: 'nobody' is not a name in server.apiKeys"},
 		{"undefined group on a backend", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", allowedGroups: [famly]`, "backends.llamaSwap: line 8: allowedGroups: 'famly' is not a group"},
 	}
@@ -44,6 +47,46 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 				t.Errorf("got %v, want an error with %q", err, c.want)
 			}
 		})
+	}
+}
+
+// A key in two groups that both have keyMap entries gets the first one's key,
+// in keyMap order, which loading notes, once for each pair of groups, unless
+// the key has an entry of its own, which takes precedence over both.
+func TestBuild_NotesKeysInTwoMappedGroups(t *testing.T) {
+	swap := newSwap(t)
+	groups := "  groups: {a: [openWebUi], b: [openWebUi]}\nlogging:"
+	backend := `baseUrl: "${SWAP_URL}", keyMap: {b: kb, a: ka}`
+	cfg := parseConfig(t, edit(t, taskConfig, "logging:", groups, `baseUrl: "${SWAP_URL}"`, backend), map[string]string{"SWAP_URL": swap.URL})
+	if _, err := Build(context.Background(), cfg, discard); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"backends.llamaSwap: keyMap: key 'openWebUi' is in both 'b' and 'a', with no entry of its own; 'b' comes first, so its key is sent"}
+	if !slices.Equal(cfg.Notes, want) {
+		t.Errorf("notes: %q", cfg.Notes)
+	}
+	backend = `baseUrl: "${SWAP_URL}", keyMap: {a: ka, b: kb, openWebUi: kw}`
+	cfg = parseConfig(t, edit(t, taskConfig, "logging:", groups, `baseUrl: "${SWAP_URL}"`, backend), map[string]string{"SWAP_URL": swap.URL})
+	if _, err := Build(context.Background(), cfg, discard); err != nil || len(cfg.Notes) != 0 {
+		t.Errorf("with an entry of its own: %v, notes %q", err, cfg.Notes)
+	}
+}
+
+// Keys in the same two mapped groups make one note, with their count, so the
+// notes grow with the groups, not with the keys.
+func TestBuild_NotesTwoMappedGroupsOnceForAllTheirKeys(t *testing.T) {
+	swap := newSwap(t)
+	src := edit(t, taskConfig,
+		"    - {name: openWebUi, key: secret}\n", "    - {name: openWebUi, key: secret}\n    - {name: bob, key: k2}\n  groups: {a: [openWebUi, bob], b: [openWebUi, bob]}\n",
+		`baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {a: ka, b: kb}`,
+	)
+	cfg := parseConfig(t, src, map[string]string{"SWAP_URL": swap.URL})
+	if _, err := Build(context.Background(), cfg, discard); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"backends.llamaSwap: keyMap: 2 keys are in both 'a' and 'b', with no entries of their own; 'a' comes first, so its key is sent for them"}
+	if !slices.Equal(cfg.Notes, want) {
+		t.Errorf("notes: %q", cfg.Notes)
 	}
 }
 

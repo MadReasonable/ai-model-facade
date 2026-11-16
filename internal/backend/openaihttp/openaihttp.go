@@ -45,6 +45,10 @@ type Config struct {
 	ListRetrySeconds      float64 `yaml:"listRetrySeconds"`    // asking again for the models of a backend that couldn't be listed; default 30
 	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds"`
 	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds"` // until response headers arrive
+
+	// KeyMap holds, by key name or group name, the key sent on a caller's
+	// behalf in place of passthroughAuth's or apiKey's; see mappedKey.
+	KeyMap config.KeyMap `yaml:"keyMap"`
 }
 
 type Client struct {
@@ -57,6 +61,7 @@ type Client struct {
 	state        *StateCache // set by trackPending
 	failed       func()      // set by NewListedBackend: a request got no answer or a 5xx
 	access       config.Access
+	keyMap       config.KeyMap
 }
 
 func NewClient(c Config) (*Client, error) {
@@ -65,6 +70,11 @@ func NewClient(c Config) (*Client, error) {
 	}
 	if c.ListRetrySeconds < 0 {
 		return nil, fmt.Errorf("listRetrySeconds must not be negative")
+	}
+	for _, e := range c.KeyMap {
+		if e.Key == "" {
+			return nil, fmt.Errorf("keyMap.%s is empty", e.Name)
+		}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: seconds(c.ConnectTimeoutSeconds)}).DialContext
@@ -86,12 +96,35 @@ func NewClient(c Config) (*Client, error) {
 		listRetry:    listRetry,
 		client:       &http.Client{Transport: transport},
 		access:       c.Access,
+		keyMap:       c.KeyMap,
 	}, nil
 }
 
 // Access says which callers may use this backend.
 func (c *Client) Access() config.Access {
 	return c.access
+}
+
+// KeyMap returns the backend's keyMap, for the gateway to check its names
+// against the config's keys and groups.
+func (c *Client) KeyMap() config.KeyMap {
+	return c.keyMap
+}
+
+// mappedKey returns the key keyMap gives client: the entry for its key's
+// name, else the first entry, in keyMap order, for one of its groups.
+func (c *Client) mappedKey(client backend.Client) (string, bool) {
+	if client.Name != "" {
+		if key, ok := c.keyMap.Key(client.Name); ok {
+			return key, true
+		}
+	}
+	for _, e := range c.keyMap {
+		if slices.Contains(client.Groups, e.Name) {
+			return e.Key, true
+		}
+	}
+	return "", false
 }
 
 // ListRetry is how often the gateway asks this backend for its models again
@@ -248,8 +281,9 @@ func (c *Client) Send(ctx context.Context, req backend.ChatRequest, path string,
 }
 
 // Do sends one request made on a client's behalf, with JSON body if body
-// isn't nil. With passthroughAuth it carries the client's own credential, or
-// none: a keyless client never borrows the backend's apiKey.
+// isn't nil. It carries the key keyMap gives the client, else, with
+// passthroughAuth, the client's own credential, or none: a keyless client
+// never borrows the backend's apiKey. Otherwise it carries apiKey.
 func (c *Client) Do(ctx context.Context, method, path string, body []byte, accept string, client backend.Client) (*http.Response, error) {
 	return c.do(ctx, method, path, body, accept, nil, client)
 }
@@ -263,7 +297,9 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, accep
 	if err != nil {
 		return nil, err
 	}
-	if c.passthrough {
+	if key, ok := c.mappedKey(client); ok {
+		req.Header.Set("Authorization", "Bearer "+key)
+	} else if c.passthrough {
 		req.Header.Del("Authorization")
 		if client.Authorization != "" {
 			req.Header.Set("Authorization", client.Authorization)

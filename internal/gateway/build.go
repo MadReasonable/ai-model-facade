@@ -108,6 +108,19 @@ func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *his
 		if err := cfg.Server.CheckAccess(access[e.Name]); err != nil {
 			return nil, fmt.Errorf("backends.%s: line %d: %w", e.Name, e.Node.Line, err)
 		}
+		if m, ok := g.backends[e.Name].(keyMapper); ok {
+			notes, err := cfg.Server.CheckKeyMap(m.KeyMap())
+			if err != nil {
+				return nil, fmt.Errorf("backends.%s: line %d: %w", e.Name, e.Node.Line, err)
+			}
+			// Added to the config's notes, which were logged above, so check
+			// prints them with the others.
+			for _, note := range notes {
+				note = "backends." + e.Name + ": " + note
+				log.Warn(note)
+				cfg.Notes = append(cfg.Notes, note)
+			}
+		}
 	}
 	var errs map[string]error
 	g.catalogs, errs = listModels(ctx, g.backends, names)
@@ -172,6 +185,12 @@ func historyLimits(cfg *config.Config) history.Limits {
 // openaihttp.Config. A backend without one allows every caller.
 type accessor interface {
 	Access() config.Access
+}
+
+// keyMapper is a backend with a keyMap; every adapter has one, through
+// openaihttp.Config.
+type keyMapper interface {
+	KeyMap() config.KeyMap
 }
 
 // linker is a backend that refers to other backends. Link resolves those

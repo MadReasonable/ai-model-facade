@@ -273,6 +273,26 @@ models:
 	}
 }
 
+// check shows which group's keyMap entry a key in two mapped groups gets,
+// as a warning that doesn't fail it.
+func TestCheck_ShowsKeysInTwoMappedGroups(t *testing.T) {
+	swap := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	r := runArgs("check", writeConfig(t, `
+server:
+  listen: ":0"
+  apiKeys: [{name: alice, key: k1}]
+  groups: {family: [alice], adults: [alice]}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "`+swap.URL+`", keyMap: {family: kf, adults: ka}}
+models:
+  task: {backend: llamaSwap, candidates: [{model: m}]}
+`))
+	want := "warning: backends.llamaSwap: keyMap: key 'alice' is in both 'family' and 'adults', with no entry of its own; 'family' comes first, so its key is sent\n"
+	if r.code != 0 || r.stderr != want {
+		t.Errorf("exit %d, stderr %q", r.code, r.stderr)
+	}
+}
+
 // health exits 0 if something at server.listen answers /health, and 1 if
 // nothing does; it contacts no backend.
 func TestHealth_ChecksTheGatewayAtServerListen(t *testing.T) {

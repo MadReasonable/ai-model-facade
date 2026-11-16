@@ -301,6 +301,28 @@ func TestLive_AccessListsChooseAmongBackends(t *testing.T) {
 	}
 }
 
+// keyMap on a real backend: Open WebUI receives the key mapped to the
+// caller's key name, or to its group, in place of apiKey. Open WebUI has one
+// account in dev-env, so the map sends a key it refuses: a caller with an
+// entry, or in a group with one, is refused by Open WebUI, while a caller
+// with none is served with apiKey, which the gateway's state reads use too.
+func TestLive_KeyMapSendsTheCallersKey(t *testing.T) {
+	edits := append(slices.Clone(devKeys),
+		"    apiKey: ${OPEN_WEBUI_API_KEY} # from control; see README.md\n",
+		"    apiKey: ${OPEN_WEBUI_API_KEY} # from control; see README.md\n    keyMap: {bob: not-a-key, family: not-a-key}\n",
+	)
+	gw := startEditedDevGateway(t, edits, "", "ollama", "openWebUi")
+	gw.backends["ollama"].Reset(t)
+	if r := gw.askAs(t, "", "webui"); r.StatusCode != http.StatusOK {
+		t.Errorf("an unknown caller, with apiKey: %d: %s", r.StatusCode, r.body)
+	}
+	for _, key := range []string{"bob-key", "carol-key"} {
+		if r := gw.askAs(t, key, "webui"); r.StatusCode != http.StatusBadGateway || !strings.Contains(r.body, "401 Unauthorized") {
+			t.Errorf("%s, mapped to a key Open WebUI refuses: %d: %s", key, r.StatusCode, r.body)
+		}
+	}
+}
+
 // An Open WebUI workspace model is forwarded under its own ID, and a
 // request for it loads its base model on Ollama.
 func TestLive_WorkspaceModelLoadsItsBase(t *testing.T) {

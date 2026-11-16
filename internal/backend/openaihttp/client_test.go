@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
@@ -165,6 +166,75 @@ func TestClient_Auth(t *testing.T) {
 				t.Errorf("state: got %q, want %q", got, c.state)
 			}
 		})
+	}
+}
+
+// With no key configured anywhere, no apiKey, passthroughAuth or keyMap, and
+// a caller that sent none, neither a chat nor a state call carries an
+// Authorization header at all, not even an empty one.
+func TestClient_SendsNoKeyWhenNoneIsConfigured(t *testing.T) {
+	f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	f.SetState("m", "ready")
+	client := newClient(t, Config{BaseURL: f.URL})
+	client.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`), Client: backend.Client{Groups: []string{"unknown"}}})
+	client.GetJSON(context.Background(), "/running", &struct{}{})
+	chat, _ := f.Last("POST /v1/chat/completions")
+	state, _ := f.Last("GET /running")
+	if got := chat.Header.Values("Authorization"); len(got) != 0 {
+		t.Errorf("chat: got %q", got)
+	}
+	if got := state.Header.Values("Authorization"); len(got) != 0 {
+		t.Errorf("state: got %q", got)
+	}
+}
+
+// keyMap gives a caller a key of its own on chat requests: the entry for its
+// key's name first, then the first, in keyMap order, for one of its groups,
+// whatever order the caller's groups are in. A caller it doesn't name gets
+// what it would without keyMap, passthroughAuth's key or apiKey, and the
+// gateway's own calls keep the apiKey.
+func TestClient_KeyMap(t *testing.T) {
+	keyMap := config.KeyMap{{Name: "alice", Key: "alices-backend-key"}, {Name: "family", Key: "family-backend-key"}, {Name: "adults", Key: "adults-backend-key"}}
+	cases := []struct {
+		name        string
+		passthrough bool
+		client      backend.Client
+		chat        string
+	}{
+		{"by name", false, backend.Client{Name: "alice", Groups: []string{"all", "family"}}, "Bearer alices-backend-key"},
+		{"by name over passthrough", true, backend.Client{Name: "alice", Groups: []string{"all", "family"}, Authorization: "Bearer client"}, "Bearer alices-backend-key"},
+		{"by group", false, backend.Client{Name: "bob", Groups: []string{"all", "family"}}, "Bearer family-backend-key"},
+		{"by the first of its groups in keyMap", false, backend.Client{Name: "carol", Groups: []string{"all", "adults", "family"}}, "Bearer family-backend-key"},
+		{"by name over its groups", false, backend.Client{Name: "alice", Groups: []string{"all", "adults", "family"}}, "Bearer alices-backend-key"},
+		{"unnamed, apiKey", false, backend.Client{Name: "agent", Groups: []string{"all"}}, "Bearer svc"},
+		{"unnamed, passthrough", true, backend.Client{Name: "agent", Groups: []string{"all"}, Authorization: "Bearer client"}, "Bearer client"},
+		{"unknown caller", true, backend.Client{Name: "unknown", Groups: []string{"unknown"}, Authorization: "Bearer client"}, "Bearer client"},
+		{"keyless caller", false, backend.Client{Groups: []string{"unknown"}}, "Bearer svc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+			f.SetState("m", "ready")
+			client := newClient(t, Config{BaseURL: f.URL, APIKey: "svc", PassthroughAuth: c.passthrough, KeyMap: keyMap})
+			client.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`), Client: c.client})
+			client.GetJSON(context.Background(), "/running", &struct{}{})
+			chat, _ := f.Last("POST /v1/chat/completions")
+			state, _ := f.Last("GET /running")
+			if got := chat.Header.Get("Authorization"); got != c.chat {
+				t.Errorf("chat: got %q, want %q", got, c.chat)
+			}
+			if got := state.Header.Get("Authorization"); got != "Bearer svc" {
+				t.Errorf("state: got %q", got)
+			}
+		})
+	}
+}
+
+// A keyMap entry that is empty, such as a variable set to nothing, would send an
+// empty key, so it is refused.
+func TestClient_RefusesAnEmptyKeyMapEntry(t *testing.T) {
+	if _, err := NewClient(Config{BaseURL: "http://x", KeyMap: config.KeyMap{{Name: "alice", Key: ""}}}); err == nil || err.Error() != "keyMap.alice is empty" {
+		t.Errorf("got %v", err)
 	}
 }
 

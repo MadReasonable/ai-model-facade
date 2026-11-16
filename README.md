@@ -757,6 +757,25 @@ To pass through every caller's key without listing them all, combine it with `un
 
 If a facade's candidates span two or more backends with `passthroughAuth`, the gateway warns at startup and `check` notes it: a client has one key, but it is sent to whichever of those backends wins, so it may be refused by some of them.
 
+Passthrough only works if each caller's gateway key is also its key on the backend.
+`keyMap` on a backend separates the two: it maps a key's name, or a group, to the key the backend receives for that caller, so a backend with accounts of its own, such as Open WebUI, sees each caller as themselves while the gateway's keys stay at the gateway:
+
+```yaml
+backends:
+  openWebUi:
+    type: openWebUi
+    apiKey: ${OPEN_WEBUI_API_KEY}
+    keyMap:
+      alice: ${OPEN_WEBUI_KEY_ALICE}   # an account of its own
+      family: ${OPEN_WEBUI_KEY_FAMILY} # every other member of the group shares one
+```
+
+A request on a caller's behalf carries the entry for its key's name, else the first entry, in the order the map lists them, for one of its groups, else what it would carry without `keyMap`: its own key with `passthroughAuth`, or the backend's `apiKey`.
+So the order matters only for a key with no entry of its own in two groups with entries: it gets the key of the group listed first.
+The gateway logs that at startup, and `check` shows it, once for each pair of groups, with the number of keys in both.
+`all` and `unknown` can't have entries, since `apiKey` already serves every caller the map doesn't name.
+The gateway's own calls, such as reading which models are loaded, use `apiKey`, and mapped keys are never logged.
+
 ### Access
 
 A key names a caller, and the config decides what each caller may use: which facades it may ask for, and which backends may serve it.
@@ -833,7 +852,7 @@ Some tools can't work through the gateway, because Open WebUI runs them in the u
 Set Open WebUI's code interpreter to its Jupyter engine to use it through the gateway.
 A client's own tools don't work either, since Open WebUI runs the tool loop with its own tools only.
 
-Everything a tool reads or writes belongs to an Open WebUI account: the account behind `apiKey`, or each client's own account with `passthroughAuth`.
+Everything a tool reads or writes belongs to an Open WebUI account: the account behind `apiKey`, or each client's own account with `passthroughAuth` or [`keyMap`](#keys).
 That account's permissions decide which built-in tools are offered.
 Without passthrough, every client of the gateway shares that account's memories, notes and chat history; with it, each caller has their own.
 
@@ -1135,6 +1154,7 @@ All take these keys:
 | `allowedKeys`, `allowedGroups` | Which callers this backend may serve; a candidate on it is skipped for anyone else. Default: every caller. See [Access](#access). |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own key (or none). Default `false`. See [Keys](#keys). |
+| `keyMap` | The key to send instead, on a caller's behalf, by the caller's key name or group; it takes precedence over `passthroughAuth` and `apiKey`. Optional. See [Keys](#keys). |
 | `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks once per request: a request reads each backend's state once, even for several facades in a `/amf/models` listing, or when it loops back to the gateway through Open WebUI. Concurrent requests share one in-flight check either way. |
 | `stateTimeoutSeconds` | Timeout for the state and model-list calls. Default `10`. |
 | `loopsBack` | `true`: reading this backend's state can lead back to this gateway's `/v1/models`, as reading Open WebUI can when this gateway has `api.openAi.addCurrent` on and is one of its connections. `/v1/models` then doesn't wait for a read of this backend already in flight, and answers from the last state, or leaves `current` out if there is none. Default `false`: `/v1/models` waits, so `current` reflects that read. If the read does lead back to this gateway with this off, the read waits on itself until `stateTimeoutSeconds` and fails, so listings stall and chat requests that need that state fail with `502`. |

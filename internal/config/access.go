@@ -92,6 +92,60 @@ func (s *Server) CheckAccess(a Access) error {
 	return nil
 }
 
+// CheckKeyMap fails if a backend's keyMap names something other than a key
+// or a group of the config's own. The built-in groups can't have entries,
+// since apiKey is already the key for every caller the map doesn't name, and
+// an entry for `all` would come before or after every group's. It returns a
+// note for each pair of groups that both have entries for keys with none of
+// their own: those keys get the first one's key, by keyMap order, which is
+// the one thing in a keyMap its order decides.
+func (s *Server) CheckKeyMap(keyMap KeyMap) ([]string, error) {
+	for _, e := range keyMap {
+		switch {
+		case e.Name == GroupAll || e.Name == GroupUnknown:
+			return nil, fmt.Errorf("keyMap: '%s' can't have an entry; apiKey is the key for every caller keyMap doesn't name", e.Name)
+		case s.groupsOf[e.Name] == nil && !s.isGroup(e.Name):
+			return nil, fmt.Errorf("keyMap: '%s' is not a name in server.apiKeys or server.groups", e.Name)
+		}
+	}
+	type pair struct{ first, other string }
+	var pairs []pair
+	keysOf := map[pair][]string{}
+	counted := map[string]bool{}
+	for _, k := range s.APIKeys {
+		if counted[k.Name] {
+			continue // a name with several keys is one caller
+		}
+		counted[k.Name] = true
+		if _, own := keyMap.Key(k.Name); own {
+			continue
+		}
+		var mapped []string
+		for _, e := range keyMap {
+			if slices.Contains(s.groupsOf[k.Name], e.Name) {
+				mapped = append(mapped, e.Name)
+			}
+		}
+		for _, other := range mapped[min(1, len(mapped)):] {
+			p := pair{mapped[0], other}
+			if keysOf[p] == nil {
+				pairs = append(pairs, p)
+			}
+			keysOf[p] = append(keysOf[p], k.Name)
+		}
+	}
+	var notes []string
+	for _, p := range pairs {
+		keys := keysOf[p]
+		if len(keys) == 1 {
+			notes = append(notes, fmt.Sprintf("keyMap: key '%s' is in both '%s' and '%s', with no entry of its own; '%s' comes first, so its key is sent", keys[0], p.first, p.other, p.first))
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("keyMap: %d keys are in both '%s' and '%s', with no entries of their own; '%s' comes first, so its key is sent for them", len(keys), p.first, p.other, p.first))
+	}
+	return notes, nil
+}
+
 func (s *Server) isGroup(name string) bool {
 	_, defined := s.Groups[name]
 	return defined || name == GroupAll || name == GroupUnknown

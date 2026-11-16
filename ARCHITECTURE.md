@@ -106,7 +106,7 @@ Context helpers control how state reads are shared within one request or one mod
 
 ### `internal/backend/openaihttp`
 
-What adapters share: `Client` (HTTP with timeouts, auth and passthrough, chat forwarding) and `StateCache`.
+What adapters share: `Client` (HTTP with timeouts, auth, passthrough and `keyMap`, chat forwarding) and `StateCache`.
 `StateCache` is where state reads are cached, shared between concurrent requests, and adjusted for loads the gateway started itself (`Pending`).
 Rules about backend state are implemented here once, not in each adapter.
 

@@ -80,6 +80,47 @@ func TestAuth_AKeyListedTwiceIsNamedForTheFirstEntry(t *testing.T) {
 	}
 }
 
+// keyMap sends each caller's request to a backend with the key the map gives
+// its name or group, so a backend with accounts of its own, such as Open
+// WebUI, sees each caller as themselves without their gateway key.
+func TestAuth_SendsTheKeyMapsKeyForEachCaller(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startTask(t, swap,
+		"    - {name: openWebUi, key: secret}", "    - {name: openWebUi, key: secret}\n    - {name: alice, key: alices-key}\n    - {name: bob, key: bobs-key}\n  groups: {family: [alice, bob]}",
+		`llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}`, `llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", apiKey: svc, keyMap: {alice: alices-swap-key, family: family-swap-key}}`,
+	)
+	for key, want := range map[string]string{"alices-key": "Bearer alices-swap-key", "bobs-key": "Bearer family-swap-key", "secret": "Bearer svc"} {
+		gw.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"task","messages":[]}`)
+		if req, _ := swap.Last("POST /v1/chat/completions"); req.Header.Get("Authorization") != want {
+			t.Errorf("%s: backend got %q, want %q", key, req.Header.Get("Authorization"), want)
+		}
+	}
+	if out := gw.logs.String(); strings.Contains(out, "swap-key") {
+		t.Errorf("log leaks a mapped key:\n%s", out)
+	}
+}
+
+// A key in several groups with keyMap entries is sent the key of the entry
+// listed first, whatever order the key's groups are in, and a key's own entry
+// comes before its groups' wherever it is written.
+func TestAuth_SendsTheFirstMappedGroupsKey(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startTask(t, swap,
+		"    - {name: openWebUi, key: secret}", "    - {name: openWebUi, key: secret}\n    - {name: carol, key: carols-key}\n    - {name: dave, key: daves-key}\n  groups: {adults: [carol, dave], family: [carol, dave]}",
+		`llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}`, `llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", apiKey: svc, keyMap: {family: family-swap-key, adults: adults-swap-key, dave: daves-swap-key}}`,
+	)
+	for key, want := range map[string]string{"carols-key": "Bearer family-swap-key", "daves-key": "Bearer daves-swap-key"} {
+		if r := gw.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"task","messages":[]}`); r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d %s", key, r.StatusCode, r.body)
+		}
+		if req, _ := swap.Last("POST /v1/chat/completions"); req.Header.Get("Authorization") != want {
+			t.Errorf("%s: backend got %q, want %q", key, req.Header.Get("Authorization"), want)
+		}
+	}
+}
+
 func TestAuth_RejectsAnUnknownUnknownKeysValue(t *testing.T) {
 	src := edit(t, taskConfig, "logging:", "  unknownKeys: maybe\nlogging:")
 	if _, err := parseConfigErr(src); err == nil || !strings.Contains(err.Error(), "unknownKeys") {
