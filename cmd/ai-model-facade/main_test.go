@@ -18,6 +18,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
 
@@ -27,7 +28,7 @@ var update = flag.Bool("update", false, "rewrite the golden files in testdata wi
 // is started by runProgram, so a test can send it real signals.
 func TestMain(m *testing.M) {
 	if os.Getenv("AI_MODEL_FACADE_RUN_MAIN") == "1" {
-		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
 }
@@ -39,8 +40,12 @@ type result struct {
 }
 
 func runArgs(args ...string) result {
+	return runWithStdin("", args...)
+}
+
+func runWithStdin(stdin string, args ...string) result {
 	var stdout, stderr bytes.Buffer
-	code := run(args, &stdout, &stderr)
+	code := run(args, strings.NewReader(stdin), &stdout, &stderr)
 	return result{code, stdout.String(), stderr.String()}
 }
 
@@ -176,6 +181,53 @@ models:
 		t.Errorf("exit %d, stderr:\n%s", r.code, r.stderr)
 	}
 	golden(t, "check-aliases.golden", r.stdout)
+}
+
+// hash-key prints a new key and the hash a key entry takes in its place, and
+// with --stdin hashes an existing key, so neither needs the key on the
+// command line. Both hashes are what the config accepts for that key.
+func TestHashKey_PrintsAKeyAndItsHash(t *testing.T) {
+	r := runArgs("hash-key")
+	key, hash, ok := strings.Cut(r.stdout, "\nhash: ")
+	key, hasKey := strings.CutPrefix(key, "key:  ")
+	if r.code != 0 || !ok || !hasKey || !strings.HasPrefix(key, "amf-") || len(key) != len("amf-")+43 {
+		t.Fatalf("got %+v", r)
+	}
+	if hash != config.HashKey(key)+"\n" {
+		t.Errorf("hash %q is not the hash of %q", hash, key)
+	}
+	if again := runArgs("hash-key"); again.stdout == r.stdout {
+		t.Error("two runs printed the same key")
+	}
+	if r := runWithStdin(key+"\n", "hash-key", "--stdin"); r.code != 0 || r.stdout != "hash: "+config.HashKey(key)+"\n" {
+		t.Errorf("--stdin: got %+v", r)
+	}
+	if r := runWithStdin("", "hash-key", "--stdin"); r.code != 1 || !strings.Contains(r.stderr, "no key") {
+		t.Errorf("--stdin without a key: got %+v", r)
+	}
+	if r := runArgs("hash-key", "secret"); r.code != 2 {
+		t.Errorf("a key as an argument: got %+v", r)
+	}
+}
+
+// One key under two names is a warning for check, as for serve: the config
+// has a defined meaning, the first name, so check still exits 0.
+func TestCheck_WarnsAboutAKeyListedTwice(t *testing.T) {
+	swap := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	r := runArgs("check", writeConfig(t, `
+server:
+  listen: ":0"
+  apiKeys:
+    - {name: alice, key: secret}
+    - {name: bob, hash: "`+config.HashKey("secret")+`"}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  task: {backend: llamaSwap, candidates: [{model: m}]}
+`))
+	if r.code != 0 || r.stderr != "warning: server.apiKeys: key of 'bob' is the same as 'alice'; requests with it are named 'alice'\n" {
+		t.Errorf("got %+v", r)
+	}
 }
 
 // health exits 0 if something at server.listen answers /health, and 1 if

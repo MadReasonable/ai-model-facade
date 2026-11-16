@@ -5,6 +5,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path"
@@ -21,6 +22,10 @@ type Config struct {
 	Vars     yaml.Node `yaml:"vars"` // ignored; a home for anchors
 	Backends yaml.Node `yaml:"backends"`
 	Models   yaml.Node `yaml:"models"`
+	// Notes are what loading found that is likely a mistake but has a defined
+	// meaning, such as one key listed under two names. They fail neither serve
+	// nor check: serve logs them, check prints them.
+	Notes []string `yaml:"-"`
 }
 
 type Server struct {
@@ -29,6 +34,8 @@ type Server struct {
 	UnknownKeys  string    `yaml:"unknownKeys"` // reject (default) | allow
 	TargetHeader string    `yaml:"targetHeader"`
 	Responses    Responses `yaml:"responses"`
+	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
+	keys map[[sha256.Size]byte]string
 }
 
 // Responses limits the conversations the gateway keeps for Responses clients
@@ -38,9 +45,14 @@ type Responses struct {
 	MaxAgeMinutes float64 `yaml:"maxAgeMinutes"` // since a conversation's last turn; default 1440
 }
 
+// APIKey is one entry of server.apiKeys: a name for a caller, and either the
+// key itself or its hash, exactly one of the two. They are pointers so that
+// one given as an empty value, as a variable set to nothing expands to, is
+// told apart from one left out.
 type APIKey struct {
-	Name string `yaml:"name"`
-	Key  string `yaml:"key"`
+	Name string  `yaml:"name"`
+	Key  *string `yaml:"key"`
+	Hash *string `yaml:"hash"` // "sha256:" and 64 hex characters, as hash-key prints
 }
 
 type Logging struct {
@@ -187,13 +199,8 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 	if err := cfg.Server.Responses.applyDefaults(); err != nil {
 		return nil, err
 	}
-	for i, k := range cfg.Server.APIKeys {
-		if k.Name == "" || k.Key == "" {
-			return nil, fmt.Errorf("server.apiKeys[%d]: name and key are required", i)
-		}
-		if k.Name == UnknownClient {
-			return nil, fmt.Errorf("server.apiKeys[%d]: name '%s' is reserved for unlisted keys", i, UnknownClient)
-		}
+	if err := cfg.indexKeys(); err != nil {
+		return nil, err
 	}
 	switch cfg.Server.UnknownKeys {
 	case "":

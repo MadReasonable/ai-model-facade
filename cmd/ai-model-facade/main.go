@@ -5,6 +5,8 @@
 //	                                  model's resolved params per candidate
 //	ai-model-facade health <config>   exit 0 if the gateway at server.listen
 //	                                  answers /health (for container health checks)
+//	ai-model-facade hash-key          print a new key and its hash for server.apiKeys
+//	ai-model-facade hash-key --stdin  print the hash of a key read from stdin
 //	ai-model-facade version           print the version
 package main
 
@@ -19,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +41,8 @@ const usage = `usage:
   ai-model-facade serve <config>    run the gateway
   ai-model-facade check <config>    validate the config and print each candidate's resolved params
   ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
+  ai-model-facade hash-key          print a new key and its hash for server.apiKeys
+  ai-model-facade hash-key --stdin  print the hash of a key read from standard input
   ai-model-facade version           print the version, which the startup log line also reports
 `
 
@@ -59,14 +64,26 @@ func currentVersion() string {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run carries out the command in args and returns the exit code: 0 on
 // success, 1 if the command failed, 2 if args name no command.
-func run(args []string, stdout, stderr io.Writer) int {
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Fprintln(stdout, currentVersion())
+		return 0
+	}
+	if len(args) >= 1 && args[0] == "hash-key" && len(args) <= 2 {
+		fromStdin := len(args) == 2 && args[1] == "--stdin"
+		if len(args) == 2 && !fromStdin {
+			fmt.Fprint(stderr, about+"\n"+usage+"\n")
+			return 2
+		}
+		if err := hashKey(fromStdin, stdin, stdout); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
 		return 0
 	}
 	commands := map[string]func(path string, stdout, stderr io.Writer) error{"serve": serve, "check": check, "health": health}
@@ -104,6 +121,10 @@ func check(path string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, m.Name)
 		m.Handler.Describe(stdout)
 	}
+	// Notes have a defined meaning, so they don't fail check either.
+	for _, note := range cfg.Notes {
+		fmt.Fprintln(stderr, "warning:", note)
+	}
 	// serve starts despite these; check is where they should be caught.
 	for _, w := range g.Warnings {
 		fmt.Fprintln(stderr, "error:", w)
@@ -111,6 +132,28 @@ func check(path string, stdout, stderr io.Writer) error {
 	if n := len(g.Warnings); n > 0 {
 		return fmt.Errorf("%d check(s) against the backends failed", n)
 	}
+	return nil
+}
+
+// hashKey prints a new random key and the hash line for server.apiKeys, or,
+// fromStdin, the hash line of a key read from stdin. A key to hash is read
+// from stdin rather than taken as an argument, which would leave it in the
+// shell's history and in the process list.
+func hashKey(fromStdin bool, stdin io.Reader, stdout io.Writer) error {
+	if !fromStdin {
+		key := config.NewKey()
+		fmt.Fprintf(stdout, "key:  %s\nhash: %s\n", key, config.HashKey(key))
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(stdin, 64<<10))
+	if err != nil {
+		return err
+	}
+	key := strings.TrimRight(string(data), "\r\n")
+	if key == "" {
+		return errors.New("no key on standard input")
+	}
+	fmt.Fprintf(stdout, "hash: %s\n", config.HashKey(key))
 	return nil
 }
 

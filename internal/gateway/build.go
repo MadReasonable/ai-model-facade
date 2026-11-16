@@ -67,6 +67,9 @@ func Build(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Gateway,
 // the conversations of the gateway it replaces.
 func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *history.Store) (*Gateway, error) {
 	g := &Gateway{Config: cfg, backends: map[string]backend.Backend{}, history: store}
+	for _, note := range cfg.Notes {
+		log.Warn(note)
+	}
 	var err error
 	if g.served, err = servedProtocols(cfg.API); err != nil {
 		return nil, err

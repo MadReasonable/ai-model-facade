@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -79,6 +78,10 @@ type clientHandler func(w http.ResponseWriter, r *http.Request, client backend.C
 // unknownKeys: allow, the request is accepted: an unlisted key is named
 // "unknown" with a fingerprint, and no key leaves the name empty. With keys
 // listed and unknownKeys: reject, anything else is a 401.
+//
+// Keys are matched by their SHA-256, the form every entry is indexed in. A
+// map lookup's timing can tell an attacker something about a hash, but
+// nothing about a key that hashes to it.
 func (s *server) authenticated(family *apiFamily, next clientHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.gateway.Config.Server
@@ -86,17 +89,13 @@ func (s *server) authenticated(family *apiFamily, next clientHandler) http.Handl
 		client := backend.Client{Authorization: header}
 		token, hasToken := strings.CutPrefix(header, "Bearer ")
 		if hasToken {
-			for _, k := range cfg.APIKeys {
-				if subtle.ConstantTimeCompare([]byte(token), []byte(k.Key)) == 1 {
-					client.Name = k.Name
-					next(w, r, client)
-					return
-				}
+			digest := sha256.Sum256([]byte(token))
+			if name, ok := cfg.KeyName(digest); ok {
+				client.Name = name
+				next(w, r, client)
+				return
 			}
-		}
-		if hasToken {
-			sum := sha256.Sum256([]byte(token))
-			client.Fingerprint = hex.EncodeToString(sum[:4])
+			client.Fingerprint = hex.EncodeToString(digest[:4])
 		}
 		if len(cfg.APIKeys) > 0 && cfg.UnknownKeys != "allow" {
 			s.reject(family, w, r, client, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")

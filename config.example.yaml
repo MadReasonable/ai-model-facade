@@ -26,10 +26,14 @@ server:
   # apiKeys below: anyone who can reach the port can use the gateway.
   listen: 127.0.0.1:8088
   # Without apiKeys, every request is accepted. With them, a client needs one
-  # of these keys, and its name appears in the log.
+  # of these keys, and its name appears in the log. An entry gives the key's
+  # hash, which `ai-model-facade hash-key` prints with a new key, or the key
+  # itself, which the gateway hashes when the config loads.
   # apiKeys:
   #   - name: openWebUi
-  #     key: ${GATEWAY_KEY_OPEN_WEBUI}
+  #     hash: sha256:...              # from hash-key; the hash can't be used as a key
+  #   - name: legacyClient
+  #     key: ${GATEWAY_KEY_LEGACY}
   # unknownKeys: reject             # or allow: accept an unlisted key, logged by fingerprint
   targetHeader: X-Gateway-Target    # response header naming the model that answered
   # The gateway keeps the conversations of Responses clients, which may send

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // With apiKeys set, a request needs a listed key: a missing or unlisted one
@@ -45,6 +47,36 @@ func TestAuth_AllowsUnlistedKeysWhenConfigured(t *testing.T) {
 	}
 	if strings.Contains(out, "some-other-users-key") || strings.Contains(out, "secret") {
 		t.Errorf("log leaks a key:\n%s", out)
+	}
+}
+
+// A key entry may give the key's hash instead of the key; a client sending
+// the key is matched and named the same either way.
+func TestAuth_AcceptsAKeyByItsHash(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startTask(t, swap, "{name: openWebUi, key: secret}", "{name: openWebUi, hash: "+config.HashKey("secret")+"}")
+	if r := gw.chat(t, `{"model":"task","messages":[]}`); r.StatusCode != http.StatusOK {
+		t.Fatalf("got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodPost, "/v1/chat/completions", config.HashKey("secret"), `{"model":"task","messages":[]}`); r.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the hash itself as a key: got %d", r.StatusCode)
+	}
+	if out := gw.logs.String(); !strings.Contains(out, "client=openWebUi") {
+		t.Errorf("log:\n%s", out)
+	}
+}
+
+// One key under two names loads with a warning in the log, and requests with
+// it are named after the first entry.
+func TestAuth_AKeyListedTwiceIsNamedForTheFirstEntry(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	gw := startTask(t, swap, "{name: openWebUi, key: secret}", "{name: openWebUi, key: secret}\n    - {name: other, key: secret}")
+	gw.chat(t, `{"model":"task","messages":[]}`)
+	out := gw.logs.String()
+	if !strings.Contains(out, "key of 'other' is the same as 'openWebUi'") || !strings.Contains(out, "client=openWebUi") {
+		t.Errorf("log:\n%s", out)
 	}
 }
 

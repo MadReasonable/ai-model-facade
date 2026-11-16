@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"slices"
 	"strings"
 	"testing"
 
@@ -211,10 +213,77 @@ func TestDecodeStrict_AcceptsInlinedMapKeys(t *testing.T) {
 	}
 }
 
-func TestParse_APIKeysNeedANameAndAKey(t *testing.T) {
-	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a}]", 1)
-	if _, err := Parse([]byte(src), env(nil)); err == nil {
-		t.Error("expected an error")
+// A key entry gives exactly one of the key or its hash, and a hash must be
+// one the gateway can match, so a mistyped one is an error rather than a key
+// that never matches.
+func TestParse_APIKeyEntriesAreChecked(t *testing.T) {
+	hash := HashKey("secret")
+	cases := []struct{ name, entries, want string }{
+		{"no key", "[{name: a}]", "key or hash is required"},
+		{"empty key", "[{name: a, key: \"${EMPTY}\"}]", "key is empty; if it comes from an environment variable, that variable is set to nothing"},
+		{"empty hash", "[{name: a, hash: \"${EMPTY}\"}]", "hash is empty"},
+		{"both", "[{name: a, key: secret, hash: " + hash + "}]", "not both"},
+		{"no name", "[{key: secret}]", "name is required"},
+		{"reserved name", "[{name: unknown, key: secret}]", "reserved"},
+		{"no prefix", "[{name: a, hash: " + strings.TrimPrefix(hash, "sha256:") + "}]", "followed by 64 hex characters"},
+		{"short", "[{name: a, hash: " + hash[:len(hash)-2] + "}]", "followed by 64 hex characters"},
+		{"long", "[{name: a, hash: " + hash + "00}]", "followed by 64 hex characters"},
+		{"not hex", "[{name: a, hash: " + hash[:len(hash)-1] + "z}]", "followed by 64 hex characters"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: "+c.entries, 1)
+			if _, err := Parse([]byte(src), env(map[string]string{"EMPTY": ""})); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// Every entry is indexed by its key's SHA-256, whether it gives the key or
+// the hash, uppercase hex included, so both forms match the same way.
+func TestParse_IndexesKeysAndHashesAlike(t *testing.T) {
+	upper := "sha256:" + strings.ToUpper(strings.TrimPrefix(HashKey("bobs-key"), "sha256:"))
+	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: alice, key: alices-key}, {name: bob, hash: "+upper+"}]", 1)
+	cfg, err := Parse([]byte(src), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"alices-key": "alice", "bobs-key": "bob", "nobodys-key": ""} {
+		if name, _ := cfg.Server.KeyName(sha256.Sum256([]byte(key))); name != want {
+			t.Errorf("%s: got %q, want %q", key, name, want)
+		}
+	}
+}
+
+// One key under two names has a defined meaning, the first name, so it loads
+// with a note instead of failing; the note names the entries, never the key.
+func TestParse_AKeyListedTwiceIsANote(t *testing.T) {
+	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: alice, key: secret}, {name: bob, hash: "+HashKey("secret")+"}]", 1)
+	cfg, err := Parse([]byte(src), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := cfg.Server.KeyName(sha256.Sum256([]byte("secret"))); name != "alice" {
+		t.Errorf("matched %q, want the first entry", name)
+	}
+	want := []string{"server.apiKeys: key of 'bob' is the same as 'alice'; requests with it are named 'alice'"}
+	if !slices.Equal(cfg.Notes, want) {
+		t.Errorf("notes: %q", cfg.Notes)
+	}
+}
+
+// One key listed twice under one name is a note too, worded for that case,
+// since naming the first entry would name the same caller.
+func TestParse_AKeyListedTwiceUnderOneNameIsANote(t *testing.T) {
+	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: alice, key: secret}, {name: alice, hash: "+HashKey("secret")+"}]", 1)
+	cfg, err := Parse([]byte(src), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"server.apiKeys: 'alice' has the same key in two entries; the first one will be used"}
+	if !slices.Equal(cfg.Notes, want) {
+		t.Errorf("notes: %q", cfg.Notes)
 	}
 }
 

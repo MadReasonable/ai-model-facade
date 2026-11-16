@@ -722,6 +722,29 @@ Under the Anthropic API's base path, a client can send the key in `x-api-key` in
 - With no `apiKeys` listed, every request is accepted.
 - `GET /health` never needs a key.
 
+An entry in `server.apiKeys` gives either the key's hash or the key itself:
+
+```yaml
+apiKeys:
+  - name: alice
+    hash: sha256:3b0f...
+  - name: legacyClient
+    key: ${GATEWAY_KEY_LEGACY}
+```
+
+A hash lets the config, and every copy of it, hold no usable key.
+`ai-model-facade hash-key` prints a new random key, for the client, and its `hash:` line, for the config; `hash-key --stdin` prints the hash of a key you already have, read from standard input so it stays out of your shell history:
+
+```bash
+printf '%s' "$GATEWAY_KEY_LEGACY" | ai-model-facade hash-key --stdin
+```
+
+Run at a terminal without a pipe, `--stdin` waits for the key and the end of input, Ctrl+D, and shows the key as it is typed.
+A plain SHA-256 protects these keys because they are long and random, which leaves nothing to guess; it would not protect a short key someone chose, so use generated keys with `hash`.
+A `key` entry is the simpler setup, one key set in the environment with nothing to generate, and the gateway hashes it when the config loads, so both forms are matched the same way.
+A name can have several entries, each a key of the same caller, such as an old and a new key while clients change over.
+If two entries hold the same key, the config still loads, with a warning, and requests with that key are named after the first entry; keep a key's other form, such as the key beside its hash, in a comment instead.
+
 By default, a client's key stays at the gateway, and each backend gets its own `apiKey`.
 With `passthroughAuth: true` on a backend, completion requests to it carry the client's own key in `Authorization` instead, so the backend makes the access decision and sees each caller as themselves.
 A key sent in `x-api-key` is forwarded as `Authorization: Bearer`.
@@ -1023,6 +1046,7 @@ Checks that depend on a backend being up and current only warn: a backend that c
 If a backend that a check needs can't be reached, `serve` asks it for its models again every `listRetrySeconds`, and once it answers, runs the checks that were waiting for it and logs what they find.
 The retries themselves log nothing, since the startup warning already reported the backend as down.
 `check` reports the same problems as errors and exits non-zero, so run it before deploying a config.
+A few things in a config have a defined meaning but are likely a mistake, such as one key listed under two names; both `serve` and `check` warn about them and carry on.
 Every backend is asked for its models once, all at the same time, so backends that don't answer delay startup by one `stateTimeoutSeconds` between them, not one each.
 
 ### `server`
@@ -1030,7 +1054,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 | Key | Description |
 |-----|-------------|
 | `listen` | Address and port to listen on. `127.0.0.1` accepts local connections only; to accept them from other machines or containers, use `0.0.0.0` or a specific IP, and set `apiKeys`. Required. |
-| `apiKeys` | A list of `name` / `key` pairs. When set, requests need one of these keys, and the key's name appears in the log. The name `unknown` is reserved. Optional. |
+| `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` is reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
@@ -1284,12 +1308,16 @@ If the backend sent an error event of its own in the client's protocol, that eve
 ai-model-facade serve <config>    run the gateway
 ai-model-facade check <config>    validate the config and print each candidate's resolved params
 ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
+ai-model-facade hash-key          print a new key and its hash for server.apiKeys
+ai-model-facade hash-key --stdin  print the hash of a key read from standard input
 ai-model-facade version           print the version, which the startup log line also reports
 ```
 
 `serve` and `check` make the same checks; `check` fails on what `serve` only warns about.
 See [Errors and warnings](#errors-and-warnings).
 `serve` logs to standard error.
+
+`hash-key` prints a key that starts with `amf-`, so a secret scanner can recognize one that leaks, and the `hash:` line to put in its `server.apiKeys` entry; see [Keys](#keys).
 
 `health` only reads `server.listen` from the config and contacts no backend; a wildcard address such as `0.0.0.0:8088` is checked on `127.0.0.1`.
 

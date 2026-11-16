@@ -2,6 +2,16 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Added
+
+- A `server.apiKeys` entry can give the key's hash, `hash: sha256:...`, instead of the key, so the config holds no usable key. `ai-model-facade hash-key` prints a new key with its hash, and `hash-key --stdin` hashes an existing key. Entries with `key` work as before, and every key is hashed when the config loads.
+
+### Changed
+
+- Two entries with the same key now load with a warning; requests with that key are named after the first entry, as before.
+
 ## [0.3.0] - 2026-11-12
 
 Clients built for Claude, or on OpenAI's Responses API, can use every facade, including those on local models.
