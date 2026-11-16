@@ -85,6 +85,47 @@ func TestHistory_RefusesAnUnknownResponse(t *testing.T) {
 	}
 }
 
+// A turn served to a listed key can be continued only by that key; to any
+// other caller it is refused as an unknown response is, so it doesn't learn
+// the response exists. A turn served to a caller the gateway can't name is
+// open to every caller, but a listed key's turn after it is still its own.
+func TestHistory_KeepsATurnToTheCallerItWasServedTo(t *testing.T) {
+	as := func(name string, groups ...string) pipeline.Winner {
+		return pipeline.Winner{Backend: "llama", Client: backend.Client{Name: name, Groups: groups}}
+	}
+	alice, bob := as("alice", "all"), as("bob", "all")
+	unlisted, keyless := as("unknown", "unknown"), as("", "unknown")
+	s := NewStore(generous)
+	serve(t, s, alice, `{"input":"one"}`, "a1", `[]`)
+	serve(t, s, unlisted, `{"input":"one"}`, "u1", `[]`)
+	serve(t, s, alice, `{"previous_response_id":"u1","input":"two"}`, "u2", `[]`)
+	cases := []struct {
+		id      string
+		winner  pipeline.Winner
+		allowed bool
+	}{
+		{"a1", alice, true},
+		{"a1", bob, false},
+		{"a1", unlisted, false},
+		{"a1", keyless, false},
+		{"u1", bob, true},
+		{"u1", keyless, true},
+		{"u2", alice, true},
+		{"u2", bob, false},
+		{"u2", unlisted, false},
+	}
+	for _, c := range cases {
+		_, _, _, err := s.Prepare(context.Background(), []byte(`{"previous_response_id":"`+c.id+`"}`), c.winner)
+		var refused *pipeline.Error
+		switch {
+		case c.allowed && err != nil:
+			t.Errorf("%s for %q: %v", c.id, c.winner.Client.Name, err)
+		case !c.allowed && (!errors.As(err, &refused) || refused.Message != "Previous response with id '"+c.id+"' not found."):
+			t.Errorf("%s for %q: got %v, want it refused as unknown", c.id, c.winner.Client.Name, err)
+		}
+	}
+}
+
 // Only a successful response is a turn.
 func TestHistory_DoesNotRecordAFailure(t *testing.T) {
 	s := NewStore(generous)
@@ -182,7 +223,7 @@ func TestHistory_DropsReasoningFromAnotherBackend(t *testing.T) {
 }
 
 func known(s *Store, id string) bool {
-	_, err := s.chain(id)
+	_, err := s.chain(id, "")
 	return err == nil
 }
 

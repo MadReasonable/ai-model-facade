@@ -599,6 +599,9 @@ Each response the gateway serves is kept, unless the request sets `store: false`
 A request that names one is sent the conversation up to it in its `input`, without `previous_response_id`, to whichever candidate wins.
 A conversation started on a local model therefore continues on OpenAI's API or the Claude API when the local model is unloaded, and back.
 A response that was never kept, or has been evicted, is refused with `400`, as OpenAI refuses an unknown one.
+A response served to a key in `server.apiKeys` belongs to that key: any other caller that names it, or a later turn of its conversation, gets the same `400`, so it can't read the conversation or learn that it exists.
+A response served to a caller the gateway can't tell apart from others, an unlisted key or no key, can be continued by anyone.
+A response belongs to the key's name, not to the key, so rotating a key keeps its conversations; giving an existing name to a different key, on a reload, gives that key the name's conversations too.
 The request's `store` is passed on unchanged, so OpenAI keeps its own copy if the client asked it to.
 
 Conversations live in memory: a reload keeps them, and a restart loses them.

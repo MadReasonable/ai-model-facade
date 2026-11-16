@@ -43,6 +43,29 @@ func (gw *gateway) respond(t *testing.T, body string) response {
 	return r
 }
 
+// The pipeline hands the store the caller the front end authenticated, so a
+// conversation started with one listed key can't be continued with another:
+// its response ID is unknown to that key, while the key that started it
+// continues it.
+func TestResponses_KeepAConversationToTheKeyThatStartedIt(t *testing.T) {
+	gw, swap, _ := startResponses(t, `server: {listen: "127.0.0.1:0"}`, `server:
+  listen: "127.0.0.1:0"
+  apiKeys: [{name: alice, key: alices-key}, {name: bob, key: bobs-key}]`)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	first := gw.do(t, http.MethodPost, "/v1/responses", "alices-key", `{"model":"ask","input":"one"}`)
+	id := gjson.Get(first.body, "id").String()
+	if first.StatusCode != http.StatusOK || id == "" {
+		t.Fatalf("first turn: got %d %s", first.StatusCode, first.body)
+	}
+	next := `{"model":"ask","previous_response_id":"` + id + `","input":"two"}`
+	if r := gw.do(t, http.MethodPost, "/v1/responses", "bobs-key", next); r.StatusCode != http.StatusBadRequest || gjson.Get(r.body, "error.message").String() != "Previous response with id '"+id+"' not found." {
+		t.Errorf("bob: got %d %s", r.StatusCode, r.body)
+	}
+	if r := gw.do(t, http.MethodPost, "/v1/responses", "alices-key", next); r.StatusCode != http.StatusOK {
+		t.Errorf("alice: got %d %s", r.StatusCode, r.body)
+	}
+}
+
 // A conversation continues on whichever candidate is selected: a turn served
 // by a local model through Chat Completions is sent to OpenAI as input, with
 // no previous_response_id OpenAI couldn't resolve, and back on the local

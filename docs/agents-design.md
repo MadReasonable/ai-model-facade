@@ -508,6 +508,9 @@ It is keyed by the response ID the client saw: the backend's own on the identity
 Each turn records the client's own input, not the expanded one, and links to the turn it followed, so the conversation is the chain of links.
 Decided: memory only, limited by total size and by age since a conversation's last turn (`server.responses`), evicting a conversation with all its turns, least recently used first, so no chain is ever missing a link.
 Decided: the client's `store` is never changed; `store: false` means the gateway keeps nothing either, and the request is sent as it came.
+Decided (2026-11-16): a turn belongs to the listed key it was served to, and naming it, or a later turn, from any other caller is refused as an unknown ID is, so a caller can't read another's conversation, including replies from a backend its access lists don't let it use, or learn that the response exists.
+A random ID alone isn't enough, since one that leaks, in a log or a shared transcript, would open the conversation.
+A turn served to an unlisted key or a keyless caller is open to every caller: they are all `unknown` to the gateway, so nothing could tell their turns apart.
 
 The flow is the package comment's: `Store.Prepare` runs after selection, since what it sends depends on the winner, and before translation, so a translator sees a complete input and no `previous_response_id`; `Turn.Record` wraps the reply after translation, in Responses, recording from the response object or from the stream's `response.completed` or `response.incomplete` event.
 

@@ -12,6 +12,11 @@
 //     the client set store to false: its input and output, or, where the
 //     service keeps them, only which backend has them.
 //
+// A turn served to a listed key belongs to that key: a request from any other
+// caller that names it, or a turn after it, is answered as if the store had
+// never kept it. A turn served to a caller the gateway can't name is open to
+// every caller, since nothing tells such callers apart.
+//
 // The store lives in memory and outlives a reload, which builds new backends
 // and facades around it, but not a restart. A conversation is evicted with every turn in
 // it, least recently used first, once the store holds more than its byte limit,
@@ -31,6 +36,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/pipeline"
 )
 
@@ -64,6 +70,9 @@ type turn struct {
 	kept          bool
 	input, output []byte // JSON arrays of items, when kept
 	conversation  *list.Element
+	// owner is the key name of the caller it was served to, or "" for a
+	// caller the gateway can't name; see ownerOf.
+	owner string
 }
 
 // conversation is a set of turns that descend from one first turn,
@@ -112,7 +121,7 @@ func (s *Store) Prepare(ctx context.Context, body []byte, winner pipeline.Winner
 	if t.parent == "" {
 		return body, t, nil, nil
 	}
-	chain, err := s.chain(t.parent)
+	chain, err := s.chain(t.parent, ownerOf(winner.Client))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -155,14 +164,27 @@ type link struct {
 	turn
 }
 
+// ownerOf returns the key name a turn served to client belongs to: its name
+// if it is a listed key, else "". An unlisted key is named "unknown", and a
+// keyless caller "", so neither tells one caller from another.
+func ownerOf(client backend.Client) string {
+	if client.Name == config.UnknownClient {
+		return ""
+	}
+	return client.Name
+}
+
 // chain returns the turns from id back to the first that the store doesn't
-// keep, or to the conversation's first turn, newest first.
-func (s *Store) chain(id string) ([]link, error) {
+// keep, or to the conversation's first turn, newest first. A turn that
+// belongs to another caller than owner fails it as an unknown id would, so
+// a caller can't learn that another's response exists.
+func (s *Store) chain(id, owner string) ([]link, error) {
 	if s == nil {
 		return nil, unknown(id)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	named := id
 	var chain []link
 	for id != "" {
 		t := s.turns[id]
@@ -171,6 +193,9 @@ func (s *Store) chain(id string) ([]link, error) {
 				return nil, unknown(id)
 			}
 			return nil, fmt.Errorf("history: response '%s' is missing from its conversation", id)
+		}
+		if t.owner != "" && t.owner != owner {
+			return nil, unknown(named)
 		}
 		chain = append(chain, link{id, *t})
 		if !t.kept {
@@ -264,7 +289,7 @@ func (t *Turn) record(response gjson.Result) {
 	if id == "" {
 		return
 	}
-	entry := &turn{parent: t.parent, backend: t.winner.Backend, native: t.winner.Native, kept: t.winner.Service == nil}
+	entry := &turn{parent: t.parent, backend: t.winner.Backend, native: t.winner.Native, kept: t.winner.Service == nil, owner: ownerOf(t.winner.Client)}
 	size := int64(turnOverhead)
 	if entry.kept {
 		entry.input = t.input
