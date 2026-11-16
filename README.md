@@ -92,7 +92,7 @@ docker run --rm --network <backend network> \
 Download the archive for your architecture and `checksums.txt`, check the archive against it, and install the binary:
 
 ```bash
-VERSION=v0.3.0
+VERSION=v0.3.1
 ARCH=amd64   # or arm64
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/ai-model-facade_${VERSION}_linux_${ARCH}.tar.gz
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/checksums.txt
@@ -137,7 +137,7 @@ journalctl -u ai-model-facade -f
 Download the archive for your Mac, `arm64` for Apple silicon or `amd64` for Intel, check it, and install the binary:
 
 ```bash
-VERSION=v0.3.0
+VERSION=v0.3.1
 ARCH=arm64   # or amd64
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/ai-model-facade_${VERSION}_darwin_${ARCH}.tar.gz
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/checksums.txt
@@ -198,7 +198,7 @@ sudo launchctl kill HUP system/com.github.madreasonable.ai-model-facade
 
 ### Windows
 
-Unzip `ai-model-facade_v0.3.0_windows_amd64.zip`, copy `config.example.yaml` to `config.yaml`, and run the gateway from a console:
+Unzip `ai-model-facade_v0.3.1_windows_amd64.zip`, copy `config.example.yaml` to `config.yaml`, and run the gateway from a console:
 
 ```
 ai-model-facade.exe check config.yaml

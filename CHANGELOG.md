@@ -2,7 +2,9 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.3.1] - 2026-11-16
+
+The gateway can limit which callers may use each facade and backend, send a backend a key of each caller's own, and read its secrets from a file of their own.
 
 ### Added
 
@@ -151,6 +153,7 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
+[0.3.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.1.3...v0.2.0
