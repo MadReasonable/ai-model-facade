@@ -107,12 +107,15 @@ Merge patch can't send a literal `null`; nothing has needed one yet.
 
 ## Config loading
 
-Loading turns a YAML file into a validated gateway in four steps, and stops at the first error with its file line:
+Loading turns a YAML file into a validated gateway in five steps, and stops at the first error with its file line:
 
 1. Parse to a `yaml.Node` tree.
 2. Expand `${NAME}` in scalar string nodes only, so a value can't inject YAML structure; an undefined variable is an error.
 3. Decode strictly. yaml.v3's `KnownFields(true)` is a `Decoder` option that `yaml.Node.Decode` ignores, so `config.DecodeStrict` walks the node tree against the target's `yaml` tags, following anchors and `<<:` merges, and rejects unknown keys before decoding. Backend and facade entries stay nodes until their own type decodes them.
-4. Build every backend and facade (`gateway.Build`), checking references and capabilities.
+4. Merge in the secrets file, if `--secrets` names one, which steps 1 to 3 have read on its own, against a schema of only the secret fields. Its key entries follow the config's, and a backend's `apiKey` and `keyMap` are added to that backend's node, so no adapter knows the file exists; `keyMap` entries go after the config's in the file's order, which `config.KeyMap` keeps, since the order decides between a key's groups. An entry is copied before anything is added, since it may be an anchor other entries share. A backend value in both files is an error, not an override, so a backend's secret is always in one known place; a key entry only adds a key, so a name may have entries in both.
+5. Build every backend and facade (`gateway.Build`), checking references and capabilities.
+
+Decided (2026-11-16): the secrets file is named on the command line, not by the config and not by a naming convention. The config not naming it lets one config serve several deployments; a convention would let a missing file pass unnoticed, starting backends without their keys.
 
 ### Errors and warnings
 

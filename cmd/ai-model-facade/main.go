@@ -1,7 +1,9 @@
 // Command ai-model-facade is an LLM gateway serving virtual models to OpenAI and Claude clients.
 //
-//	ai-model-facade serve <config>    run the gateway
-//	ai-model-facade check <config>    validate the config and print each virtual
+//	ai-model-facade serve <config> [--secrets <file>]
+//	                                  run the gateway
+//	ai-model-facade check <config> [--secrets <file>]
+//	                                  validate the config and print each virtual
 //	                                  model's resolved params per candidate
 //	ai-model-facade health <config>   exit 0 if the gateway at server.listen
 //	                                  answers /health (for container health checks)
@@ -40,6 +42,8 @@ https://github.com/MadReasonable/ai-model-facade
 const usage = `usage:
   ai-model-facade serve <config>    run the gateway
   ai-model-facade check <config>    validate the config and print each candidate's resolved params
+                                    serve and check take --secrets <file> after the config,
+                                    a secrets file merged into it
   ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
   ai-model-facade hash-key          print a new key and its hash for server.apiKeys
   ai-model-facade hash-key --stdin  print the hash of a key read from standard input
@@ -86,26 +90,40 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	commands := map[string]func(path string, stdout, stderr io.Writer) error{"serve": serve, "check": check, "health": health}
+	commands := map[string]func(files configFiles, stdout, stderr io.Writer) error{"serve": serve, "check": check, "health": health}
 	command := commands[""]
-	if len(args) == 2 {
-		command = commands[args[0]]
+	var files configFiles
+	switch {
+	case len(args) == 2:
+		command, files = commands[args[0]], configFiles{config: args[1]}
+	case len(args) == 4 && args[2] == "--secrets" && args[0] != "health":
+		command, files = commands[args[0]], configFiles{config: args[1], secrets: args[3]}
 	}
 	if command == nil {
 		fmt.Fprint(stderr, about+"\n"+usage+"\n")
 		return 2
 	}
-	if err := command(args[1], stdout, stderr); err != nil {
+	if err := command(files, stdout, stderr); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
 	return 0
 }
 
-func check(path string, stdout, stderr io.Writer) error {
+// configFiles names the files a command loads: the config, and the secrets
+// file merged into it, if --secrets names one.
+type configFiles struct {
+	config, secrets string
+}
+
+func (f configFiles) load() (*config.Config, error) {
+	return config.Load(f.config, f.secrets)
+}
+
+func check(files configFiles, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cfg, err := config.Load(path)
+	cfg, err := files.load()
 	if err != nil {
 		return err
 	}
@@ -159,8 +177,8 @@ func hashKey(fromStdin bool, stdin io.Reader, stdout io.Writer) error {
 
 // health checks a running gateway. It only parses the config to find
 // server.listen; it contacts no backend.
-func health(path string, stdout, stderr io.Writer) error {
-	cfg, err := config.Load(path)
+func health(files configFiles, stdout, stderr io.Writer) error {
+	cfg, err := config.Load(files.config, "")
 	if err != nil {
 		return err
 	}
@@ -171,10 +189,10 @@ func health(path string, stdout, stderr io.Writer) error {
 	return gateway.CheckHealth(context.Background(), url)
 }
 
-func serve(path string, stdout, stderr io.Writer) error {
+func serve(files configFiles, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cfg, err := config.Load(path)
+	cfg, err := files.load()
 	if err != nil {
 		return err
 	}
@@ -215,7 +233,7 @@ func serve(path string, stdout, stderr io.Writer) error {
 		case err := <-errs:
 			return err
 		case <-hup:
-			if err := reload(path, live, &levelVar, log); err != nil {
+			if err := reload(files, live, &levelVar, log); err != nil {
 				log.Error("config reload failed; keeping the running config", "error", err)
 			}
 		case <-ctx.Done():
@@ -231,13 +249,13 @@ func serve(path string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// reload re-reads the config on SIGHUP. Nothing changes unless the whole
-// config loads and validates; checks against the backends only warn, as at
+// reload re-reads the config and the secrets file on SIGHUP. Nothing changes
+// unless the whole config loads and validates; checks against the backends only warn, as at
 // startup.
-func reload(path string, live *gateway.Live, levelVar *slog.LevelVar, log *slog.Logger) error {
+func reload(files configFiles, live *gateway.Live, levelVar *slog.LevelVar, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cfg, err := config.Load(path)
+	cfg, err := files.load()
 	if err != nil {
 		return err
 	}

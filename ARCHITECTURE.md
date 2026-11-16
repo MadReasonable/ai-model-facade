@@ -36,7 +36,7 @@ The commands: `serve`, `check`, `health` and `version`.
 
 ### `internal/config`
 
-Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME}` in string values, decode strictly.
+Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME}` in string values, decode strictly, and merge in the secrets file, if there is one (`secrets.go`), adding its backend values to their entries' nodes so each adapter decodes them as its own.
 `DecodeStrict` rejects unknown keys, which yaml.v3 doesn't do for node trees.
 Backend and facade entries stay as nodes, because each type decodes its own schema.
 

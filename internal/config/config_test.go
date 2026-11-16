@@ -2,6 +2,9 @@ package config
 
 import (
 	"crypto/sha256"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -287,6 +290,26 @@ func TestParse_AKeyListedTwiceUnderOneNameIsANote(t *testing.T) {
 	}
 }
 
+// A name with several entries is one caller with several keys, such as an old
+// and a new key while clients change over, whether the entries are in one
+// file or in the config and the secrets file.
+func TestParse_ANameCanHaveSeveralKeys(t *testing.T) {
+	src := strings.Replace(secretsBase, "apiKeys: [{name: alice, key: alices-key}]", "apiKeys: [{name: alice, key: alices-key}, {name: alice, hash: "+HashKey("alices-phone-key")+"}]", 1)
+	secretsFile := "server: {apiKeys: [{name: alice, key: alices-new-key}]}"
+	cfg, err := ParseWithSecrets([]byte(src), []byte(secretsFile), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"alices-key", "alices-phone-key", "alices-new-key"} {
+		if name, _ := cfg.Server.KeyName(sha256.Sum256([]byte(key))); name != "alice" {
+			t.Errorf("%s: matched %q, want 'alice'", key, name)
+		}
+	}
+	if len(cfg.Notes) != 0 {
+		t.Errorf("notes: %q", cfg.Notes)
+	}
+}
+
 // Key names, group names and the built-in groups are one namespace, since
 // access lists take a name of either kind, and a group's members are keys.
 func TestParse_GroupsAreChecked(t *testing.T) {
@@ -389,7 +412,169 @@ func TestParse_APIDefaultsAndChecksBasePaths(t *testing.T) {
 }
 
 func TestParse_ExampleConfig(t *testing.T) {
-	if _, err := Load("../../config.example.yaml"); err != nil {
+	if _, err := Load("../../config.example.yaml", ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// secretsBase is a config whose secrets a secrets file can supply: two
+// backends sharing an anchored entry, one key, and a keyMap entry.
+const secretsBase = `
+server:
+  listen: x
+  apiKeys: [{name: alice, key: alices-key}]
+vars:
+  swapBase: &swapBase {type: llamaSwap, baseUrl: "http://x"}
+backends:
+  one: *swapBase
+  two:
+    <<: *swapBase
+    keyMap: {alice: alices-two-key}
+models:
+  task: {backend: one}
+`
+
+// backendValue decodes the field of a backend entry, as an adapter would.
+func backendValue(t *testing.T, cfg *Config, backend string) (apiKey string, keyMap map[string]string) {
+	t.Helper()
+	entries, err := Entries(&cfg.Backends, "backends")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name != backend {
+			continue
+		}
+		var v struct {
+			APIKey string            `yaml:"apiKey"`
+			KeyMap map[string]string `yaml:"keyMap"`
+		}
+		if err := e.Node.Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v.APIKey, v.KeyMap
+	}
+	t.Fatalf("no backend %s", backend)
+	return "", nil
+}
+
+// A secrets file's values reach the config as if it held them: a backend's
+// apiKey and keyMap entries in that backend's entry, beside the config's own,
+// and its keys after the config's. An entry it adds to is copied first, so a
+// shared anchor still holds what the config wrote, for every other entry.
+func TestParse_MergesASecretsFile(t *testing.T) {
+	secretsFile := `
+server:
+  apiKeys: [{name: bob, key: "${BOBS_KEY}"}]
+backends:
+  one: {apiKey: ones-key}
+  two: {apiKey: twos-key, keyMap: {family: family-two-key}}
+`
+	cfg, err := ParseWithSecrets([]byte(secretsBase), []byte(secretsFile), env(map[string]string{"BOBS_KEY": "bobs-key"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiKey, _ := backendValue(t, cfg, "one"); apiKey != "ones-key" {
+		t.Errorf("one: apiKey %q", apiKey)
+	}
+	apiKey, keyMap := backendValue(t, cfg, "two")
+	if apiKey != "twos-key" || keyMap["alice"] != "alices-two-key" || keyMap["family"] != "family-two-key" || len(keyMap) != 2 {
+		t.Errorf("two: apiKey %q, keyMap %v", apiKey, keyMap)
+	}
+	if names := []string{cfg.Server.APIKeys[0].Name, cfg.Server.APIKeys[1].Name}; !slices.Equal(names, []string{"alice", "bob"}) {
+		t.Errorf("keys in order %v", names)
+	}
+	if name, _ := cfg.Server.KeyName(sha256.Sum256([]byte("bobs-key"))); name != "bob" {
+		t.Errorf("bob's key from the environment matched %q", name)
+	}
+	var anchor struct {
+		SwapBase map[string]any `yaml:"swapBase"`
+	}
+	if err := cfg.Vars.Decode(&anchor); err != nil || anchor.SwapBase["apiKey"] != nil {
+		t.Errorf("the shared anchor changed: %v, %v", anchor.SwapBase, err)
+	}
+}
+
+// A secrets file's keyMap entries follow the config's, in the file's order,
+// since a keyMap's order decides between the entries of a key's groups.
+func TestParse_KeepsTheSecretsFilesKeyMapOrder(t *testing.T) {
+	secretsFile := "backends: {two: {keyMap: {family: kf, adults: ka}}}"
+	cfg, err := ParseWithSecrets([]byte(secretsBase), []byte(secretsFile), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := Entries(&cfg.Backends, "backends")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name != "two" {
+			continue
+		}
+		var v struct {
+			KeyMap KeyMap `yaml:"keyMap"`
+		}
+		if err := e.Node.Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range v.KeyMap {
+			names = append(names, entry.Name)
+		}
+		if !slices.Equal(names, []string{"alice", "family", "adults"}) {
+			t.Errorf("keyMap %v", v.KeyMap)
+		}
+	}
+}
+
+// A secrets file holds only secrets, each backend value lives in one of the
+// two files, and it can't name a backend the config doesn't define. Errors in
+// the file itself are SecretsErrors, so Load names that file.
+func TestParse_SecretsFileErrors(t *testing.T) {
+	cases := []struct {
+		name, secrets, want string
+		inSecrets           bool
+	}{
+		{"a setting", "server: {listen: y}", "unknown key 'listen'", true},
+		{"a backend setting", "backends: {one: {baseUrl: y}}", "unknown key 'baseUrl'", true},
+		{"a section", "models: {}", "unknown key 'models'", true},
+		{"an undefined backend", "backends: {three: {apiKey: k}}", "the config defines no backend 'three'", true},
+		{"an undefined variable", "backends: {one: {apiKey: \"${NOPE}\"}}", "environment variable NOPE is not defined", true},
+		{"a bad hash", "server: {apiKeys: [{name: bob, hash: nope}]}", "server.apiKeys[0] ('bob'): hash must be", true},
+		{"an apiKey in both", "backends: {one: {apiKey: a}}", "", false},
+		{"a keyMap entry in both", "backends: {two: {keyMap: {alice: other}}}", "backends.two.keyMap.alice is in both", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			base := secretsBase
+			if c.name == "an apiKey in both" {
+				base = strings.Replace(base, "  one: *swapBase", "  one: {<<: *swapBase, apiKey: own}", 1)
+				c.want = "backends.one.apiKey is in both"
+			}
+			_, err := ParseWithSecrets([]byte(base), []byte(c.secrets), env(nil))
+			var inSecrets *SecretsError
+			if err == nil || !strings.Contains(err.Error(), c.want) || errors.As(err, &inSecrets) != c.inSecrets {
+				t.Errorf("got %v (in the secrets file: %v), want %q", err, errors.As(err, &inSecrets), c.want)
+			}
+		})
+	}
+}
+
+// Load names the file an error is in: the secrets file for an error there,
+// the config for one in the config.
+func TestLoad_NamesTheFileAnErrorIsIn(t *testing.T) {
+	dir := t.TempDir()
+	configPath, secretsPath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "secrets.yaml")
+	os.WriteFile(configPath, []byte(secretsBase), 0o600)
+	os.WriteFile(secretsPath, []byte("backends: {one: {baseUrl: y}}"), 0o600)
+	if _, err := Load(configPath, secretsPath); err == nil || !strings.HasPrefix(err.Error(), secretsPath+": ") {
+		t.Errorf("got %v", err)
+	}
+	os.WriteFile(secretsPath, []byte("backends: {one: {apiKey: k}}"), 0o600)
+	if _, err := Load(configPath, secretsPath); err != nil {
+		t.Errorf("a good secrets file: %v", err)
+	}
+	if _, err := Load(configPath, filepath.Join(dir, "missing.yaml")); err == nil {
+		t.Error("a missing secrets file loaded")
 	}
 }

@@ -15,6 +15,8 @@
 # Conventions:
 #   - ${NAME} is replaced by the environment variable NAME when the config
 #     loads; an undefined one is a startup error. It is meant for secrets.
+#     Secrets can also go in a secrets file, given with --secrets, which is
+#     read again on every reload; see the README's Secrets file section.
 #   - `params` are JSON Merge Patches applied to the client's request body,
 #     facade params first, then the winning candidate's: objects merge key by
 #     key, scalars and arrays replace, and null deletes the key. They override

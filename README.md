@@ -1100,6 +1100,34 @@ It also carries a commented-out entry for each other backend, and a commented-ou
 
 `${NAME}` in any string value is replaced by the environment variable `NAME` when the config loads.
 It is meant for secrets, so they can live outside the config file; there is no other substitution.
+The environment is fixed when the gateway starts, so a reload expands `${NAME}` against the same values: a variable added or changed since needs a restart.
+
+### Secrets file
+
+A secrets file holds the config's secrets in a file of their own, which the config doesn't name: `serve` and `check` read it when given `--secrets <file>`.
+One config can then be shared, committed or used by several deployments, each with its own secrets, and the file can be mounted from a secret store, such as Docker's secrets, with mode 0600.
+Unlike the environment, it is read again on every reload, so a key can be added or rotated without a restart.
+
+It has the config's shape, and holds only secrets:
+
+```yaml
+server:
+  apiKeys:
+    - {name: legacyClient, key: amf-...}
+backends:
+  claude:
+    apiKey: sk-ant-...
+  openWebUi:
+    apiKey: sk-owui-...
+    keyMap:
+      alice: sk-owui-alice...
+```
+
+It may hold `server.apiKeys` entries, with `key` or `hash`, and a backend's `apiKey` and `keyMap`; any other key is a startup error, so the file can't change anything but secrets.
+Its key entries come after the config's, and its backend values join the backend's entry in the config, which must define that backend; a backend's `keyMap` entries follow the config's, in the file's order.
+A backend's `apiKey` and each `keyMap` entry live in one of the two files: one in both is a startup error, rather than one silently winning.
+A key entry only adds a key, so a name can have keys in both files.
+The config's own `apiKey`, `keyMap` and `apiKeys` work as before, so a secret can stay in the config, or come from the environment with `${NAME}`, which works in the secrets file too.
 
 `vars` is ignored by the gateway.
 It is a place to define YAML anchors (`&name`) that entries reference explicitly (`*name`), so every facade shows exactly what it uses.
@@ -1378,6 +1406,8 @@ If the backend sent an error event of its own in the client's protocol, that eve
 ```
 ai-model-facade serve <config>    run the gateway
 ai-model-facade check <config>    validate the config and print each candidate's resolved params
+                                  serve and check take --secrets <file> after the config,
+                                  a secrets file merged into it
 ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
 ai-model-facade hash-key          print a new key and its hash for server.apiKeys
 ai-model-facade hash-key --stdin  print the hash of a key read from standard input
@@ -1407,6 +1437,7 @@ The new config is loaded and validated in full first, and replaces the running o
 Otherwise the running config stays and the error is logged.
 Requests already in flight, including streams, finish on the config that accepted them.
 Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
+A reload reads the [secrets file](#secrets-file) again too, but not the environment, which is fixed when the gateway starts.
 Run `check` first to see what a reload would load.
 Windows has no `SIGHUP`, so there a changed config needs a restart.
 

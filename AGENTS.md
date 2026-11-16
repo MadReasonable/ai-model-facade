@@ -75,6 +75,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 
 - `serve <config>` runs the gateway. `SIGHUP` reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` is rejected.
 - `check <config>` loads and validates the config, then prints each facade's resolved params per candidate.
+- `serve` and `check` take `--secrets <file>` after the config: a secrets file, holding only `server.apiKeys` entries and backends' `apiKey` and `keyMap`, merged into the config at load and on every reload.
 - `health <config>` exits 0 if the gateway at `server.listen` answers `/health`; the image's `HEALTHCHECK` uses it. It contacts no backend.
 - `hash-key` prints a new key and its `hash:` line for `server.apiKeys`; `hash-key --stdin` hashes a key read from stdin.
 

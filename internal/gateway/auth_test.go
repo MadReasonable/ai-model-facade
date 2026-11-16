@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -112,6 +114,71 @@ func TestAuth_SendsTheFirstMappedGroupsKey(t *testing.T) {
 		`llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}`, `llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", apiKey: svc, keyMap: {family: family-swap-key, adults: adults-swap-key, dave: daves-swap-key}}`,
 	)
 	for key, want := range map[string]string{"carols-key": "Bearer family-swap-key", "daves-key": "Bearer daves-swap-key"} {
+		if r := gw.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"task","messages":[]}`); r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d %s", key, r.StatusCode, r.body)
+		}
+		if req, _ := swap.Last("POST /v1/chat/completions"); req.Header.Get("Authorization") != want {
+			t.Errorf("%s: backend got %q, want %q", key, req.Header.Get("Authorization"), want)
+		}
+	}
+}
+
+// Secrets from a secrets file work as the config's own would: a key listed
+// there is accepted, and a backend's apiKey and keyMap there reach the
+// backend.
+func TestAuth_UsesASecretsFile(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	secrets := `
+server: {apiKeys: [{name: alice, key: alices-key}]}
+backends: {llamaSwap: {apiKey: svc, keyMap: {alice: alices-swap-key}}}
+`
+	cfg, err := config.ParseWithSecrets([]byte(taskConfig), []byte(secrets), func(n string) (string, bool) { return swap.URL, n == "SWAP_URL" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	t.Cleanup(srv.Close)
+	gw := &gateway{Server: srv, g: g}
+	swap.Reset()
+	for key, want := range map[string]string{"alices-key": "Bearer alices-swap-key", "secret": "Bearer svc"} {
+		if r := gw.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"task","messages":[]}`); r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d %s", key, r.StatusCode, r.body)
+		}
+		if req, _ := swap.Last("POST /v1/chat/completions"); req.Header.Get("Authorization") != want {
+			t.Errorf("%s: backend got %q, want %q", key, req.Header.Get("Authorization"), want)
+		}
+	}
+}
+
+// A secrets file's keyMap entries come after the config's, in the file's
+// order, so a key in two mapped groups is sent the config's group entry over
+// the secrets file's, and between two in the secrets file, the one it lists
+// first, though their names sort the other way.
+func TestAuth_OrdersTheSecretsFilesKeyMapAfterTheConfigs(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	src := edit(t, taskConfig,
+		"    - {name: openWebUi, key: secret}\n", "    - {name: openWebUi, key: secret}\n    - {name: carol, key: carols-key}\n    - {name: erin, key: erins-key}\n  groups: {family: [carol], adults: [carol], zeta: [erin], alpha: [erin]}\n",
+		`llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}`, `llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}", keyMap: {family: family-swap-key}}`,
+	)
+	secrets := "backends: {llamaSwap: {apiKey: svc, keyMap: {adults: adults-swap-key, zeta: zeta-swap-key, alpha: alpha-swap-key}}}"
+	cfg, err := config.ParseWithSecrets([]byte(src), []byte(secrets), func(n string) (string, bool) { return swap.URL, n == "SWAP_URL" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := Build(context.Background(), cfg, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g.Handler(discard))
+	t.Cleanup(srv.Close)
+	gw := &gateway{Server: srv, g: g}
+	for key, want := range map[string]string{"carols-key": "Bearer family-swap-key", "erins-key": "Bearer zeta-swap-key"} {
 		if r := gw.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"task","messages":[]}`); r.StatusCode != http.StatusOK {
 			t.Fatalf("%s: got %d %s", key, r.StatusCode, r.body)
 		}

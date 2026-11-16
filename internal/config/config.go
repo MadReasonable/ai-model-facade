@@ -6,6 +6,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -161,21 +162,40 @@ type Entry struct {
 	Node *yaml.Node
 }
 
-// Load reads, expands and strictly decodes the config file at path.
-func Load(path string) (*Config, error) {
+// Load reads, expands and strictly decodes the config file at path, with
+// the secrets file at secretsPath merged in, or none if it is "". An error
+// names the file it is in.
+func Load(path, secretsPath string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := Parse(data, os.LookupEnv)
+	var secretsData []byte
+	if secretsPath != "" {
+		if secretsData, err = os.ReadFile(secretsPath); err != nil {
+			return nil, err
+		}
+	}
+	cfg, err := ParseWithSecrets(data, secretsData, os.LookupEnv)
+	var inSecrets *SecretsError
+	if errors.As(err, &inSecrets) {
+		return nil, fmt.Errorf("%s: %w", secretsPath, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-// Parse is Load without the file read, with an injectable environment.
+// Parse is Load without the file read or a secrets file, with an injectable
+// environment.
 func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) {
+	return ParseWithSecrets(data, nil, lookupEnv)
+}
+
+// ParseWithSecrets is Parse with a secrets file merged in, nil for none. An
+// error in the secrets file itself is a *SecretsError.
+func ParseWithSecrets(data, secretsData []byte, lookupEnv func(string) (string, bool)) (*Config, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -202,6 +222,15 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 	}
 	if err := cfg.Server.Responses.applyDefaults(); err != nil {
 		return nil, err
+	}
+	if secretsData != nil {
+		s, err := parseSecrets(secretsData, lookupEnv)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.mergeSecrets(s); err != nil {
+			return nil, err
+		}
 	}
 	if err := cfg.indexKeys(); err != nil {
 		return nil, err

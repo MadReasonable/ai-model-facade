@@ -293,6 +293,34 @@ models:
 	}
 }
 
+// check and serve take a secrets file with --secrets, and check names it in
+// an error that is in it; health, which reads only server.listen, doesn't
+// take one.
+func TestCheck_TakesASecretsFile(t *testing.T) {
+	swap := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	configPath := writeConfig(t, `
+server: {listen: ":0"}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  task: {backend: llamaSwap, candidates: [{model: m}]}
+`)
+	secretsPath := filepath.Join(filepath.Dir(configPath), "secrets.yaml")
+	os.WriteFile(secretsPath, []byte("backends: {llamaSwap: {apiKey: k}}\n"), 0o600)
+	if r := runArgs("check", configPath, "--secrets", secretsPath); r.code != 0 || r.stderr != "" {
+		t.Errorf("good secrets: got %+v", r)
+	}
+	os.WriteFile(secretsPath, []byte("backends: {llamaSwap: {baseUrl: x}}\n"), 0o600)
+	if r := runArgs("check", configPath, "--secrets", secretsPath); r.code != 1 || !strings.Contains(r.stderr, "error: "+secretsPath+": ") || !strings.Contains(r.stderr, "unknown key 'baseUrl'") {
+		t.Errorf("bad secrets: got %+v", r)
+	}
+	for _, args := range [][]string{{"health", configPath, "--secrets", secretsPath}, {"check", configPath, "--secret", secretsPath}, {"check", configPath, "--secrets"}} {
+		if r := runArgs(args...); r.code != 2 {
+			t.Errorf("%q: got %+v", args, r)
+		}
+	}
+}
+
 // health exits 0 if something at server.listen answers /health, and 1 if
 // nothing does; it contacts no backend.
 func TestHealth_ChecksTheGatewayAtServerListen(t *testing.T) {
