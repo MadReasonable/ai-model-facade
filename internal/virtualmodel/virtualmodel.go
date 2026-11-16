@@ -59,11 +59,17 @@ type Inspection struct {
 
 type Handler interface {
 	Description() string
-	// Current predicts the routing of a request made now, without making one.
-	Current(ctx context.Context) (Current, error)
-	// Inspect is Current with the state of every candidate. A non-nil error
-	// means Current is nil; Candidates are still filled.
-	Inspect(ctx context.Context) (Inspection, error)
+	// Access says who may ask for the facade. The gateway checks it before
+	// the handler sees a request, and leaves the facade out of the model
+	// lists of anyone it doesn't allow.
+	Access() config.Access
+	// Current predicts the routing of a request client makes now, without
+	// making one, among the candidates on backends client may use.
+	Current(ctx context.Context, client backend.Client) (Current, error)
+	// Inspect is Current with the state of every candidate client may use,
+	// and leaves out the rest. A non-nil error means Current is nil;
+	// Candidates are still filled.
+	Inspect(ctx context.Context, client backend.Client) (Inspection, error)
 	Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error)
 	// CountTokens counts a Messages body's input tokens on the model a chat
 	// would use now, so it may load the same model a chat would.
@@ -83,6 +89,9 @@ type Handler interface {
 // Env is what types need from the rest of the config while building.
 type Env struct {
 	Backends map[string]backend.Backend
+	// Access holds, by backend name, who may use each backend. A candidate
+	// on a backend a caller may not use is skipped for that caller.
+	Access map[string]config.Access
 	// Catalogs holds each backend's listed models, fetched once at startup. A
 	// backend that couldn't be listed has an Unavailable catalog, already
 	// warned about.

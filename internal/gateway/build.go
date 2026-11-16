@@ -100,6 +100,15 @@ func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *his
 			}
 		}
 	}
+	access := map[string]config.Access{}
+	for _, e := range backendEntries {
+		if a, ok := g.backends[e.Name].(accessor); ok {
+			access[e.Name] = a.Access()
+		}
+		if err := cfg.Server.CheckAccess(access[e.Name]); err != nil {
+			return nil, fmt.Errorf("backends.%s: line %d: %w", e.Name, e.Node.Line, err)
+		}
+	}
 	var errs map[string]error
 	g.catalogs, errs = listModels(ctx, g.backends, names)
 	for _, name := range names {
@@ -108,7 +117,7 @@ func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *his
 		}
 	}
 	run := &pipeline.Pipeline{Hooks: map[backend.Protocol]pipeline.Hook{backend.OpenAIResponses: store}, Backends: g.backends}
-	env := virtualmodel.Env{Backends: g.backends, Catalogs: g.catalogs, Check: check, Pipeline: run, Log: log}
+	env := virtualmodel.Env{Backends: g.backends, Access: access, Catalogs: g.catalogs, Check: check, Pipeline: run, Log: log}
 	modelEntries, err := config.Entries(&cfg.Models, "models")
 	if err != nil {
 		return nil, err
@@ -122,6 +131,9 @@ func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *his
 			return nil, fmt.Errorf("models.%s: %w", e.Name, err)
 		}
 		if err := g.checkServed(h); err != nil {
+			return nil, fmt.Errorf("models.%s: line %d: %w", e.Name, e.Node.Line, err)
+		}
+		if err := cfg.Server.CheckAccess(h.Access()); err != nil {
 			return nil, fmt.Errorf("models.%s: line %d: %w", e.Name, e.Node.Line, err)
 		}
 		g.Models = append(g.Models, Model{Name: e.Name, Handler: h})
@@ -154,6 +166,12 @@ func (g *Gateway) checkServed(h virtualmodel.Handler) error {
 func historyLimits(cfg *config.Config) history.Limits {
 	limits := cfg.Server.Responses
 	return history.Limits{MaxBytes: limits.MaxBytes, MaxAge: time.Duration(limits.MaxAgeMinutes * float64(time.Minute))}
+}
+
+// accessor is a backend with an access list; every adapter has one, through
+// openaihttp.Config. A backend without one allows every caller.
+type accessor interface {
+	Access() config.Access
 }
 
 // linker is a backend that refers to other backends. Link resolves those

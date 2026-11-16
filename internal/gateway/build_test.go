@@ -29,6 +29,8 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 		{"params mixing blocks and keys", "models:\n", "models:\n  mixed: {backend: llamaSwap, params: {all: {a: 1}, b: 2}, candidates: [{model: x}]}\n", "params mixes protocol blocks with the key 'b'"},
 		{"unknown protocol", "models:\n", "models:\n  bad: {backend: llamaSwap, protocols: [openAiChatt], candidates: [{model: x}]}\n", "unknown protocol 'openAiChatt'"},
 		{"negative retry", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", listRetrySeconds: -1`, "listRetrySeconds must not be negative"},
+		{"undefined key on a facade", "    description:", "    allowedKeys: [nobody]\n    description:", "models.task: line 11: allowedKeys: 'nobody' is not a name in server.apiKeys"},
+		{"undefined group on a backend", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", allowedGroups: [famly]`, "backends.llamaSwap: line 8: allowedGroups: 'famly' is not a group"},
 	}
 	swap := newSwap(t)
 	for _, c := range cases {

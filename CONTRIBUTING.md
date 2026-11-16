@@ -57,7 +57,7 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | `internal/pipeline` | The run after selection, the same for every facade type: route, the protocol's hook, translation, params, model and the backend call. |
 | `internal/history` | The Responses conversation store: expanding a conversation into a request, recording a turn, eviction, and reading one a service keeps. |
 | `internal/translate` | Each pair's translators, request and reply, streamed and not, and each protocol's module. |
-| `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `requests`, `responses`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
+| `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `access`, `requests`, `responses`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |
 
 Helpers used across one package's test files live in its `helpers_test.go`.

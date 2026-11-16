@@ -136,6 +136,7 @@ var anthropicErrorTypes = map[string]string{
 	"invalid_api_key":       "authentication_error",
 	"model_not_found":       "not_found_error",
 	"not_found":             "not_found_error",
+	"permission_error":      "permission_error",
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, errType, message string) {
@@ -219,13 +220,13 @@ type anthropicModel struct {
 	Current     *currentObject `json:"current,omitempty"`
 }
 
-func (s *server) anthropicModel(ctx context.Context, m Model) anthropicModel {
+func (s *server) anthropicModel(ctx context.Context, m Model, client backend.Client) anthropicModel {
 	obj := anthropicModel{Type: "model", ID: m.Name, DisplayName: m.Name, CreatedAt: time.Unix(s.started, 0).UTC().Format(time.RFC3339)}
 	if limit, ok := m.Handler.OutputCap(); ok {
 		obj.MaxTokens = limit
 	}
 	if s.gateway.Config.API.Anthropic.AddCurrent {
-		obj.Current = s.currentOf(ctx, m)
+		obj.Current = s.currentOf(ctx, m, client)
 	}
 	return obj
 }
@@ -241,8 +242,8 @@ func (s *server) listAnthropicModels(w http.ResponseWriter, r *http.Request, cli
 	}{Data: []anthropicModel{}}
 	ctx := listingContext(backend.WithStateSnapshot(r.Context()))
 	for _, m := range s.gateway.Models {
-		if s.lists(anthropicFamily, m) {
-			list.Data = append(list.Data, s.anthropicModel(ctx, m))
+		if s.lists(anthropicFamily, m) && allows(m, client) {
+			list.Data = append(list.Data, s.anthropicModel(ctx, m, client))
 		}
 	}
 	if len(list.Data) > 0 {
@@ -255,9 +256,9 @@ func (s *server) listAnthropicModels(w http.ResponseWriter, r *http.Request, cli
 func (s *server) getAnthropicModel(w http.ResponseWriter, r *http.Request, client backend.Client) {
 	id := r.PathValue("id")
 	for _, m := range s.gateway.Models {
-		if m.Name == id && s.lists(anthropicFamily, m) {
+		if m.Name == id && s.lists(anthropicFamily, m) && allows(m, client) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.anthropicModel(listingContext(r.Context()), m))
+			json.NewEncoder(w).Encode(s.anthropicModel(listingContext(r.Context()), m, client))
 			return
 		}
 	}

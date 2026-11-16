@@ -6,10 +6,13 @@ Before 1.0, a minor release can change config keys.
 
 ### Added
 
+- Groups of keys, `server.groups`, and access lists on facades and backends, `allowedKeys` and `allowedGroups`. A facade a caller may not use is left out of its model lists and answers it with `404`; a candidate on a backend a caller may not use is skipped, and a caller that may use none of a facade's backends gets `403`. `all` and `unknown` are built-in groups. Without the lists, every caller may use everything, as before. `check` shows a facade's lists, and a backend's under each candidate on that backend.
+- `current` and `/amf/models` describe the routing of the caller that asks.
 - A `server.apiKeys` entry can give the key's hash, `hash: sha256:...`, instead of the key, so the config holds no usable key. `ai-model-facade hash-key` prints a new key with its hash, and `hash-key --stdin` hashes an existing key. Entries with `key` work as before, and every key is hashed when the config loads.
 
 ### Changed
 
+- **Breaking:** `all` is reserved as a key name, for the built-in group, as `unknown` already was.
 - Two entries with the same key now load with a warning; requests with that key are named after the first entry, as before.
 
 ## [0.3.0] - 2026-11-12

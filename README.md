@@ -438,7 +438,7 @@ Its entry for `quick` from [Getting started](#getting-started):
 `current` is where a request made now would go:
 
 - `reason` is `loaded`, `starting` or `loadIfNone`, matching the step that would pick `model`.
-- When no request would succeed, `model` is absent and `reason` is `no candidate loaded`.
+- When no request would succeed, `model` is absent and `reason` is `no candidate loaded`, or `no backend this client may use` if the caller may use none of the candidates' backends.
 - `aliasOf` is present when `model` is an alias, and `backend` when the model is on another backend than the facade's own.
 - If no backend's state can be read, `current` is left out.
 
@@ -450,6 +450,7 @@ A candidate's `state` is `loaded`, `starting` or `not loaded`, or one of these:
 - `blocked`: its backend has a request pending for another model, which a request for this one would abort.
 
 `match` is the model a pattern resolved to, `aliasOf` is present when that model is an alias, and `winner` marks the candidate a request made now would go to.
+Both `current` and the candidates are for the caller that asks: a candidate on a backend the caller may not use is left out; see [Access](#access).
 It is a snapshot, so the next request can be routed differently if what is loaded changes.
 The client APIs' own model lists can carry `current` too, with [`addCurrent`](#api).
 
@@ -756,6 +757,49 @@ To pass through every caller's key without listing them all, combine it with `un
 
 If a facade's candidates span two or more backends with `passthroughAuth`, the gateway warns at startup and `check` notes it: a client has one key, but it is sent to whichever of those backends wins, so it may be refused by some of them.
 
+### Access
+
+A key names a caller, and the config decides what each caller may use: which facades it may ask for, and which backends may serve it.
+Facades and backends take the same two lists, `allowedKeys`, of names from `server.apiKeys`, and `allowedGroups`, of groups:
+
+```yaml
+server:
+  apiKeys:
+    - {name: alice, hash: sha256:3b0f...}
+    - {name: bob, hash: sha256:9a41...}
+    - {name: openWebUi, hash: sha256:c07e...}
+  groups:
+    family: [alice, bob]
+backends:
+  claude:
+    type: anthropic
+    apiKey: ${ANTHROPIC_API_KEY}
+    allowedGroups: [family]
+models:
+  research:
+    backend: claude
+    allowedGroups: [family]
+    candidates: [...]
+```
+
+A group lists the names of its keys, in `server.groups`.
+Two groups are built in: `all`, every key in `server.apiKeys`, and `unknown`, every other caller the gateway accepts, an unlisted key with `unknownKeys: allow` or a request with no key where no keys are listed.
+`all` doesn't include `unknown`, so callers the gateway can't name reach only what names `unknown`.
+Key names, group names, `all` and `unknown` are one set of names, so each may be used only once, and a list that names something undefined is a startup error.
+
+A caller is allowed if its key is in `allowedKeys` or one of its groups is in `allowedGroups`.
+With both lists left out, every caller the gateway accepts is allowed, as before access lists existed; an empty list, `allowedGroups: []`, allows no one.
+
+A facade a caller may not use is left out of that caller's model lists, `/v1/models` and `/amf/models` alike, and a request for it gets the same `404` as a facade that doesn't exist, so a name isn't confirmed to someone who can't use it.
+The log line says the caller wasn't allowed.
+
+A backend's lists act during selection: a candidate on a backend the caller may not use is skipped, and the next candidate is considered, so one facade can serve some callers from a hosted API and the rest from local models.
+The selection log line lists the skipped candidate with the reason, and `current` and `/amf/models` show the caller only the candidates it may use.
+If the caller may use none of a facade's backends, the request gets `403`, which, unlike `503`, won't change on a retry.
+
+The lists apply to the callers the gateway sees.
+A request that comes back through Open WebUI carries the key of Open WebUI's connection to the gateway, not the user's, so it is checked as that connection.
+
 ### Open WebUI
 
 An `openWebUi` backend is an Open WebUI instance, and its models are whatever Open WebUI serves: its Ollama and OpenAI connections, its workspace models, and the facades of any gateway it is connected to.
@@ -1054,8 +1098,9 @@ Every backend is asked for its models once, all at the same time, so backends th
 | Key | Description |
 |-----|-------------|
 | `listen` | Address and port to listen on. `127.0.0.1` accepts local connections only; to accept them from other machines or containers, use `0.0.0.0` or a specific IP, and set `apiKeys`. Required. |
-| `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` is reserved. See [Keys](#keys). Optional. |
+| `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` and `all` are reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
+| `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
 | `responses.maxAgeMinutes` | How long a conversation is kept after its last turn. Default `1440` (24 hours). |
@@ -1087,6 +1132,7 @@ All take these keys:
 | Key | Description |
 |-----|-------------|
 | `baseUrl` | The backend's address. Required. |
+| `allowedKeys`, `allowedGroups` | Which callers this backend may serve; a candidate on it is skipped for anyone else. Default: every caller. See [Access](#access). |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own key (or none). Default `false`. See [Keys](#keys). |
 | `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks once per request: a request reads each backend's state once, even for several facades in a `/amf/models` listing, or when it loops back to the gateway through Open WebUI. Concurrent requests share one in-flight check either way. |
@@ -1228,6 +1274,7 @@ Each entry is a facade, and its name is what clients request.
 | `protocols` | The protocols this facade serves, from `openAiChat`, `openAiCompletions`, `openAiResponses` and `anthropicMessages`. Default: all of them. A request in another protocol gets `404`. Naming a protocol that a candidate's backend can't accept is a startup error. |
 | `params` | Applied to every request for this facade. Optional. See [Params](#params). |
 | `description` | Shown in the model lists and `/amf/models`. Optional. |
+| `allowedKeys`, `allowedGroups` | Which callers may ask for this facade; to anyone else it doesn't exist. Default: every caller. See [Access](#access). |
 | `type` | Facade type. `candidates`, the default, is the only type today. |
 
 Each candidate takes:
@@ -1251,7 +1298,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /v1/chat/completions` | Chat Completions, streamed or not. Also under `/openai`. |
 | `POST /v1/responses` | OpenAI's Responses API, streamed or not, with `previous_response_id`; see [Conversations](#conversations). Also under `/openai`. |
 | `POST /v1/completions` | Legacy text completions, streamed or not. Same selection and params as chat. Also under `/openai`. |
-| `GET /v1/models` | Lists only the facades, so clients that pick from a list see only those. Also under `/openai`. |
+| `GET /v1/models` | Lists only the facades the caller may use, so clients that pick from a list see only those. Also under `/openai`. |
 | `GET /v1/models/{id}` | One facade, or `404`. Also under `/openai`. |
 | `POST /anthropic/v1/messages` | Anthropic's Messages API, streamed or not. |
 | `POST /anthropic/v1/messages/count_tokens` | A request's input tokens on the model a chat would use now; see [Counting tokens](#counting-tokens). |
@@ -1287,7 +1334,8 @@ The gateway's own errors use these codes:
 |--------|---------|
 | `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for. |
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching key. |
-| `404` | The requested model isn't a facade, its `protocols` list leaves out the request's protocol, or the path doesn't exist. |
+| `403` | The caller may use the facade, but none of the backends its candidates are on; see [Access](#access). |
+| `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, or the path doesn't exist. |
 | `405` | The path doesn't take this method. |
 | `413` | The body is over 100 MiB. |
 | `502` | The backend couldn't be reached or failed the request, no backend's state could be read, or no candidate's backend can serve the request's protocol. |

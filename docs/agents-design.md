@@ -161,6 +161,11 @@ So while one of its models has a request of the gateway's pending (`ModelInfo.Pe
 On every other backend, and on LM Studio for the model it is loading, a second request is served once the load ends, so a candidate starting there is still waited on.
 Limit: the gateway knows of a load on LM Studio only through its own pending requests, so a load another client starts there reads as its model loaded, and a request for another model the gateway sends then aborts it; nothing stops another client aborting a load the gateway started either.
 
+A candidate on a backend the caller may not use (`allowedKeys` and `allowedGroups` on the backend) is skipped for that caller, the same way as one whose backend can't serve the request's protocol: the walk goes on among the rest, and `SelectAmong` records each skipped candidate in `checked` with its reason.
+Skipping rather than refusing is what lets one facade serve some callers from a hosted API and the rest from local models.
+`current` and `/amf/models` run the same walk for the caller that asks, and leave out the candidates it can't use, so a caller learns nothing about backends it may not use.
+A facade the caller may not use answers `404`, as a facade that doesn't exist does, and is in none of its lists, so the lists and the requests agree.
+
 Aliases (llama-swap presets, Open WebUI workspace models, llama-server aliases) are candidates with their base model's state, since loading an alias loads its base.
 A pattern matches base models before aliases, each in sorted order, so a pattern matching both resolves to one well-defined model; it says nothing about which is better.
 An alias is forwarded under its own ID so the backend applies its settings, and those settings are applied after the gateway's params, which is why an alias candidate with params gets a startup note.
@@ -635,7 +640,7 @@ Ollama 0.40.8 and LM Studio have no HTTP token count (source), so they keep the 
 
 ## Errors
 
-Before the response starts, an error is an error body in the shape of the client's API family, with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read.
+Before the response starts, an error is an error body in the shape of the client's API family, with its status: 503 when no candidate is eligible, 502 when the backend can't be reached or no backend's state can be read, and 403 when the caller may use none of the facade's backends, since unlike 503 no change of state before a retry can help.
 A request fails with one error type, `pipeline.Error`, holding the status, an OpenAI error type and the message, and the front end writes it in OpenAI's shape or Anthropic's, whose error types Claude's clients use to decide whether to retry.
 After a stream's 200 is sent, the status can't change, so a failure ends the stream with the protocol's own error event (its descriptor's `ErrorEvent`): a final `data: {"error": ...}` and no `[DONE]` for Chat Completions, an `error` event for Messages, and an `error` event numbered after the sent events for Responses, which numbers every event.
 Clients then show an error instead of a silently cut reply.

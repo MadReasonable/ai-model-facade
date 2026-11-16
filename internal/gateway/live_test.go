@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,11 +48,18 @@ type liveGateway struct {
 // they don't run.
 func startDevGateway(t *testing.T, facades string, names ...string) *liveGateway {
 	t.Helper()
+	return startEditedDevGateway(t, nil, facades, names...)
+}
+
+// startEditedDevGateway is startDevGateway with edits, old and new text in
+// pairs as edit takes them, made to gateway.yaml first.
+func startEditedDevGateway(t *testing.T, edits []string, facades string, names ...string) *liveGateway {
+	t.Helper()
 	src, err := os.ReadFile("../../dev-env/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := string(src) + facades
+	config := edit(t, string(src), edits...) + facades
 	backends := map[string]*testkit.LiveBackend{}
 	vars := map[string]string{"OPEN_WEBUI_API_KEY": "unused"}
 	for _, name := range names {
@@ -72,6 +80,12 @@ const liveChat = `{"model":"%s","messages":[{"role":"user","content":"hi"}],"max
 func (gw *liveGateway) ask(t *testing.T, facade string) response {
 	t.Helper()
 	return gw.do(t, http.MethodPost, "/v1/chat/completions", "", fmt.Sprintf(liveChat, facade))
+}
+
+// askAs sends a one-token chat to facade with key, or with none if key is "".
+func (gw *liveGateway) askAs(t *testing.T, key, facade string) response {
+	t.Helper()
+	return gw.do(t, http.MethodPost, "/v1/chat/completions", key, fmt.Sprintf(liveChat, facade))
 }
 
 // backgroundAsk is a chat sent in the background. Once done is closed, resp
@@ -216,6 +230,74 @@ func TestLive_SpansBackends(t *testing.T) {
 	}
 	if !ollama.Loaded(t, "ollama-llm-1:latest") {
 		t.Error("Ollama's fallback not loaded after it was used")
+	}
+}
+
+// devKeys lists keys in dev-env's gateway.yaml, with unknownKeys: allow,
+// so a request with no key is served too, as an unknown caller.
+var devKeys = []string{
+	"server:\n  listen: 127.0.0.1:8088\n",
+	"server:\n  listen: 127.0.0.1:8088\n  apiKeys:\n    - {name: alice, key: alice-key}\n    - {name: bob, key: bob-key}\n    - {name: carol, key: carol-key}\n  unknownKeys: allow\n  groups:\n    family: [alice, carol]\n",
+}
+
+// Access lists on real backends: a candidate on a backend the caller may
+// not use is skipped, so the caller is served by the next one, and loads
+// it, even with the first loaded; a facade whose backends the caller may
+// use none of answers 403; a facade the caller may not use answers 404 and
+// is left out of its model list.
+func TestLive_AccessListsChooseAmongBackends(t *testing.T) {
+	edits := append(slices.Clone(devKeys), "    type: llamaSwap\n", "    type: llamaSwap\n    allowedGroups: [family]\n")
+	facades := `
+  swapOnly:
+    backend: llamaSwap
+    candidates: [{model: llamaSwap-llm-1, params: *llamaCppNoThinking}]
+  bobOnly:
+    backend: ollama
+    allowedKeys: [bob]
+    candidates: [{model: ollama-llm-1:latest, params: *ollamaNoThinking, loadIfNone: true}]
+`
+	gw := startEditedDevGateway(t, edits, facades, "llamaSwap", "ollama")
+	swap, ollama := gw.backends["llamaSwap"], gw.backends["ollama"]
+	swap.Reset(t)
+	ollama.Reset(t)
+	swap.Load(t, "llamaSwap-llm-1")
+	if r := gw.askAs(t, "alice-key", "either"); r.StatusCode != http.StatusOK || r.target() != "llamaSwap-llm-1" {
+		t.Errorf("alice, in family: %d, target %q: %s", r.StatusCode, r.target(), r.body)
+	}
+	if r := gw.askAs(t, "bob-key", "either"); r.StatusCode != http.StatusOK || r.target() != "ollama-llm-1:latest" {
+		t.Errorf("bob, not in family: %d, target %q: %s", r.StatusCode, r.target(), r.body)
+	}
+	if !ollama.Loaded(t, "ollama-llm-1:latest") {
+		t.Error("Ollama's fallback not loaded for bob")
+	}
+	if !swap.Loaded(t, "llamaSwap-llm-1") {
+		t.Error("llama-swap's model unloaded by bob's request")
+	}
+	if r := gw.askAs(t, "", "either"); r.StatusCode != http.StatusOK || r.target() != "ollama-llm-1:latest" {
+		t.Errorf("an unknown caller: %d, target %q: %s", r.StatusCode, r.target(), r.body)
+	}
+	if r := gw.askAs(t, "bob-key", "swapOnly"); r.StatusCode != http.StatusForbidden || gjson.Get(r.body, "error.type").String() != "permission_error" {
+		t.Errorf("bob on a facade with only llama-swap: %d: %s", r.StatusCode, r.body)
+	}
+	if r := gw.askAs(t, "alice-key", "bobOnly"); r.StatusCode != http.StatusNotFound {
+		t.Errorf("alice on bob's facade: %d: %s", r.StatusCode, r.body)
+	}
+	if r := gw.askAs(t, "bob-key", "bobOnly"); r.StatusCode != http.StatusOK {
+		t.Errorf("bob on his facade: %d: %s", r.StatusCode, r.body)
+	}
+	listed := func(key string) []string {
+		r := gw.do(t, http.MethodGet, "/v1/models", key, "")
+		var ids []string
+		for _, m := range gjson.Get(r.body, "data.#.id").Array() {
+			ids = append(ids, m.String())
+		}
+		return ids
+	}
+	if ids := listed("alice-key"); slices.Contains(ids, "bobOnly") || !slices.Contains(ids, "swapOnly") {
+		t.Errorf("alice's model list: %v", ids)
+	}
+	if ids := listed("bob-key"); !slices.Contains(ids, "bobOnly") {
+		t.Errorf("bob's model list: %v", ids)
 	}
 }
 

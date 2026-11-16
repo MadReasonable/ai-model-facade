@@ -366,6 +366,39 @@ func TestFirstLoaded_WalksCandidatesOnSeveralBackendsAsOneList(t *testing.T) {
 	}
 }
 
+// SelectAmong passes over each candidate skip gives a reason for, however
+// ready it is, and lists it in Checked with that reason, so the log says why
+// it wasn't used. A skipped candidate's backend can't fail the selection
+// either: with every other candidate unloaded, nothing is selected and there
+// is no error, even though the skipped one's backend can't be read.
+func TestFirstLoaded_SelectAmongSkipsWithTheReasonGiven(t *testing.T) {
+	def := &fakeBackend{loaded: []string{"a"}}
+	other := &fakeBackend{loaded: []string{"b"}}
+	s := &FirstLoaded{Candidates: []Candidate{
+		{Model: "a"},
+		{Model: "b", Backend: other, BackendName: "other"},
+	}}
+	denyFirst := func(i int) string {
+		if i == 0 {
+			return "this client may not use backend 'def'"
+		}
+		return ""
+	}
+	sel, err := s.SelectAmong(context.Background(), def, denyFirst)
+	if err != nil || sel.Index != 1 || strings.Join(sel.Checked, "; ") != "a: this client may not use backend 'def'; b on other: loaded" {
+		t.Errorf("got %+v, %v", sel, err)
+	}
+	// Fresh fakes: a skipped candidate's state read may still be running,
+	// since SelectAmong starts every backend's at once and waits only for
+	// the candidates it reaches.
+	down := &fakeBackend{err: errors.New("down")}
+	s.Candidates[1].Backend = &fakeBackend{}
+	sel, err = s.SelectAmong(context.Background(), down, denyFirst)
+	if err != nil || sel.Index != -1 || sel.Reason != "no candidate loaded" {
+		t.Errorf("skipped backend down: got %+v, %v", sel, err)
+	}
+}
+
 // A backend whose state can't be read makes its candidates count as not
 // loaded while others still serve; only if no backend can be read does the
 // selection fail.

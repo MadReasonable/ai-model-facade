@@ -52,14 +52,14 @@ Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds.
 `family.go` holds the API families, OpenAI's, Anthropic's and the gateway's own `/amf`: each family's routes come from its protocols' descriptors, less those `api.<family>.protocols` turns off, with its credential header, error shape and model list.
-`server.go` is the front end: auth, the routing-loop check, the selection log line, and SSE relay.
+`server.go` is the front end: auth, which facades a caller may ask for, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.
 
 ### `internal/virtualmodel`
 
 Facade types, each with its own schema, validator and `Handler`.
 `candidates`, the only type and the default, compiles the facade's and each candidate's params, checks candidate IDs against their backends, and on each request runs the selector and hands the winner to the pipeline as a `pipeline.Selected`.
-`Handler.Current` predicts the selection without making a request, for `current` in the model lists; `Handler.Inspect` adds the state of every candidate, for `/amf/models`; `Handler.OutputCap` is the smallest output cap among the models the facade can select, for the Anthropic list's `max_tokens`.
+`Handler.Current` predicts the selection without making a request, for `current` in the model lists; `Handler.Inspect` adds the state of every candidate, for `/amf/models`; both are for one caller, skipping candidates on backends it may not use, as selection does; `Handler.OutputCap` is the smallest output cap among the models the facade can select, for the Anthropic list's `max_tokens`.
 A new behaviour is a new type here, so existing config entries never change meaning.
 
 ### `internal/pipeline`

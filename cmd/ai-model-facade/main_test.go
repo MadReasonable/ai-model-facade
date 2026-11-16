@@ -230,6 +230,49 @@ models:
 	}
 }
 
+// check shows who may ask for a facade, for each list the facade sets.
+func TestCheck_ShowsAFacadesAccessLists(t *testing.T) {
+	swap := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	r := runArgs("check", writeConfig(t, `
+server:
+  listen: ":0"
+  apiKeys: [{name: alice, key: k1}, {name: agent, key: k2}]
+  groups: {family: [alice]}
+backends:
+  llamaSwap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+models:
+  open: {backend: llamaSwap, candidates: [{model: m}]}
+  limited: {backend: llamaSwap, allowedKeys: [agent], allowedGroups: [family, unknown], candidates: [{model: m}]}
+  closed: {backend: llamaSwap, allowedGroups: [], candidates: [{model: m}]}
+`))
+	want := "open\n  backend: llamaSwap\n  1. m\n     params: {}\n\nlimited\n  backend: llamaSwap\n  allowed keys: agent\n  allowed groups: family, unknown\n  1. m\n     params: {}\n\nclosed\n  backend: llamaSwap\n  allowed groups: none\n  1. m\n     params: {}\n"
+	if r.code != 0 || r.stdout != want {
+		t.Errorf("exit %d, stderr %q, stdout:\n%s", r.code, r.stderr, r.stdout)
+	}
+}
+
+// check shows who may use a candidate's backend, under each candidate on a
+// backend that sets a list, since the lists decide which candidates a caller
+// can be served by.
+func TestCheck_ShowsABackendsAccessLists(t *testing.T) {
+	swap := testkit.NewLlamaSwap(t, testkit.SwapModel{ID: "m"})
+	r := runArgs("check", writeConfig(t, `
+server:
+  listen: ":0"
+  apiKeys: [{name: alice, key: k1}, {name: agent, key: k2}]
+  groups: {family: [alice]}
+backends:
+  open: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
+  limited: {type: llamaSwap, baseUrl: "`+swap.URL+`", allowedKeys: [agent], allowedGroups: [family]}
+models:
+  task: {backend: limited, candidates: [{model: m}, {model: m, backend: open}]}
+`))
+	want := "task\n  backend: limited\n  1. m\n     backend 'limited' allowed keys: agent\n     backend 'limited' allowed groups: family\n     params: {}\n  2. m on open\n     params: {}\n"
+	if r.code != 0 || r.stdout != want {
+		t.Errorf("exit %d, stderr %q, stdout:\n%s", r.code, r.stderr, r.stdout)
+	}
+}
+
 // health exits 0 if something at server.listen answers /health, and 1 if
 // nothing does; it contacts no backend.
 func TestHealth_ChecksTheGatewayAtServerListen(t *testing.T) {

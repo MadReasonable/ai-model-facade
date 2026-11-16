@@ -114,6 +114,10 @@ type Client struct {
 	// Name is the matching server.apiKeys entry, "unknown" for an unlisted
 	// key, or "" when the request carried no key.
 	Name string
+	// Groups are the caller's groups: a listed key's server.groups and "all",
+	// or "unknown" alone for any other caller. Access lists and key maps
+	// match on them.
+	Groups []string
 	// Fingerprint distinguishes unlisted keys in the log without revealing
 	// them: the first 8 hex characters of the key's SHA-256.
 	Fingerprint string

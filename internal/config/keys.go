@@ -42,8 +42,8 @@ func (cfg *Config) indexKeys() error {
 		if k.Name == "" {
 			return fmt.Errorf("server.apiKeys[%d]: name is required", i)
 		}
-		if k.Name == UnknownClient {
-			return fmt.Errorf("server.apiKeys[%d]: name '%s' is reserved for unlisted keys", i, UnknownClient)
+		if k.Name == GroupUnknown || k.Name == GroupAll {
+			return fmt.Errorf("server.apiKeys[%d]: name '%s' is reserved for a built-in group", i, k.Name)
 		}
 		digest, err := k.digest()
 		if err != nil {

@@ -28,6 +28,9 @@ type candidatesConfig struct {
 	Protocols   []string    `yaml:"protocols"` // default: every protocol
 	Params      yaml.Node   `yaml:"params"`
 	Candidates  []yaml.Node `yaml:"candidates"`
+
+	// Access says who may ask for the facade.
+	config.Access `yaml:",inline"`
 }
 
 type candidateConfig struct {
@@ -69,6 +72,8 @@ type candidates struct {
 	// services holds, per candidate, its backend when the candidate keeps its
 	// Responses conversations there, else nil.
 	services []backend.ResponsesKeeper
+	access   config.Access   // who may ask for the facade
+	allowed  []config.Access // per candidate: who may use its backend
 }
 
 func newCandidates(entry config.Entry, env Env) (*candidates, error) {
@@ -76,7 +81,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 	if err := config.DecodeStrict(entry.Node, &c); err != nil {
 		return nil, err
 	}
-	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}, pipeline: env.Pipeline}
+	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}, pipeline: env.Pipeline, access: c.Access}
 	if c.Backend != "" {
 		if m.backend = env.Backends[c.Backend]; m.backend == nil {
 			return nil, fmt.Errorf("line %d: backend '%s' is not defined", entry.Node.Line, c.Backend)
@@ -164,6 +169,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		m.catalogs = append(m.catalogs, env.Catalogs[name])
 		m.patches = append(m.patches, patches)
 		m.services = append(m.services, service)
+		m.allowed = append(m.allowed, env.Access[name])
 	}
 	m.notePassthrough(env.Log, entry.Name)
 	return m, nil
@@ -281,12 +287,39 @@ func (m *candidates) Description() string {
 	return m.description
 }
 
-func (m *candidates) Current(ctx context.Context) (Current, error) {
-	sel, err := m.selector.Select(ctx, nil, m.backend)
+func (m *candidates) Access() config.Access {
+	return m.access
+}
+
+func (m *candidates) Current(ctx context.Context, client backend.Client) (Current, error) {
+	if !m.usableBy(client) {
+		return Current{Reason: noUsableBackend}, nil
+	}
+	sel, err := m.selector.SelectAmong(ctx, m.backend, m.deniedTo(client))
 	if err != nil {
 		return Current{}, err
 	}
 	return m.currentOf(sel), nil
+}
+
+// deniedTo returns, for SelectAmong, why client can't use candidate i: its
+// backend's access list leaves client out.
+func (m *candidates) deniedTo(client backend.Client) func(i int) string {
+	return func(i int) string {
+		if m.allowed[i].Allows(client.Name, client.Groups) {
+			return ""
+		}
+		return "this client may not use backend '" + m.backendNames[i] + "'"
+	}
+}
+
+// noUsableBackend is the reason when client may use the facade but none of
+// its candidates' backends.
+const noUsableBackend = "no backend this client may use"
+
+// usableBy reports whether client may use the backend of any candidate.
+func (m *candidates) usableBy(client backend.Client) bool {
+	return slices.ContainsFunc(m.allowed, func(a config.Access) bool { return a.Allows(client.Name, client.Groups) })
 }
 
 func (m *candidates) currentOf(sel selector.Selection) Current {
@@ -297,14 +330,21 @@ func (m *candidates) currentOf(sel selector.Selection) Current {
 	return cur
 }
 
-func (m *candidates) Inspect(ctx context.Context) (Inspection, error) {
-	sel, err := m.selector.Select(ctx, nil, m.backend)
+func (m *candidates) Inspect(ctx context.Context, client backend.Client) (Inspection, error) {
+	if !m.usableBy(client) {
+		return Inspection{Current: &Current{Reason: noUsableBackend}}, nil
+	}
+	denied := m.deniedTo(client)
+	sel, err := m.selector.SelectAmong(ctx, m.backend, denied)
 	var inspection Inspection
 	if err == nil {
 		cur := m.currentOf(sel)
 		inspection.Current = &cur
 	}
 	for i, c := range m.selector.Inspect(ctx, m.backend) {
+		if denied(i) != "" {
+			continue // a caller sees only the backends it may use
+		}
 		status := CandidateStatus{Model: c.Model, Backend: m.backendNames[i], LoadIfNone: c.LoadIfNone, State: c.State, AliasOf: c.AliasOf, Winner: err == nil && sel.Index == i}
 		if c.ID != c.Model {
 			status.Match = c.ID
@@ -340,7 +380,7 @@ func (m *candidates) Serves(protocol backend.Protocol) bool {
 }
 
 func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body []byte, client backend.Client) (Result, error) {
-	sel, res, err := m.choose(ctx, protocol)
+	sel, res, err := m.choose(ctx, protocol, client)
 	if err != nil {
 		return res, err
 	}
@@ -349,10 +389,10 @@ func (m *candidates) Chat(ctx context.Context, protocol backend.Protocol, body [
 	return res, err
 }
 
-// choose runs selection for a request in protocol, among the candidates whose
-// backend it can reach, and returns the winner with the Result filled as far
-// as selection got.
-func (m *candidates) choose(ctx context.Context, protocol backend.Protocol) (selector.Selection, Result, error) {
+// choose runs selection for a request in protocol from client, among the
+// candidates whose backend it can reach and client may use, and returns the
+// winner with the Result filled as far as selection got.
+func (m *candidates) choose(ctx context.Context, protocol backend.Protocol, client backend.Client) (selector.Selection, Result, error) {
 	if !m.Serves(protocol) {
 		return selector.Selection{}, Result{}, &pipeline.Error{Status: http.StatusNotFound, Type: "model_not_found", Message: fmt.Sprintf("this model is not served over %s; it serves %s", protocol, joinProtocols(m.protocols))}
 	}
@@ -360,7 +400,27 @@ func (m *candidates) choose(ctx context.Context, protocol backend.Protocol) (sel
 	if !slices.Contains(reachable, true) {
 		return selector.Selection{}, Result{}, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: fmt.Sprintf("no candidate of this model can serve %s; its backends accept %s", protocol, m.acceptedProtocols())}
 	}
-	sel, err := m.selector.SelectAmong(ctx, m.backend, func(i int) bool { return reachable[i] })
+	denied := m.deniedTo(client)
+	skip := func(i int) string {
+		if !reachable[i] {
+			return "its backend can't serve this protocol"
+		}
+		return denied(i)
+	}
+	var checked []string
+	for i, c := range m.selector.Candidates {
+		reason := skip(i)
+		if reason == "" {
+			checked = nil
+			break
+		}
+		checked = append(checked, c.On(c.Model)+": "+reason)
+	}
+	if checked != nil {
+		// Unlike 503, this is no state that may change before a retry.
+		return selector.Selection{}, Result{Checked: checked, Reason: noUsableBackend}, &pipeline.Error{Status: http.StatusForbidden, Type: "permission_error", Message: fmt.Sprintf("this client may not use the backend of any candidate of this model that can serve %s", protocol)}
+	}
+	sel, err := m.selector.SelectAmong(ctx, m.backend, skip)
 	res := Result{Target: sel.Target, AliasOf: sel.AliasOf, Checked: sel.Checked, Reason: sel.Reason}
 	if err != nil {
 		return sel, res, &pipeline.Error{Status: http.StatusBadGateway, Type: "backend_error", Message: m.stateError(err)}
@@ -395,7 +455,7 @@ var generationFields = []string{"max_tokens", "stream", "temperature", "top_p", 
 // A backend that can't count gets an estimate of the client's body, in its
 // response shape, and no request.
 func (m *candidates) CountTokens(ctx context.Context, body []byte, client backend.Client) (Result, error) {
-	sel, res, err := m.choose(ctx, backend.AnthropicMessages)
+	sel, res, err := m.choose(ctx, backend.AnthropicMessages, client)
 	if err != nil {
 		return res, err
 	}
@@ -491,6 +551,9 @@ func (m *candidates) Describe(w io.Writer) {
 	if m.description != "" {
 		fmt.Fprintf(w, "  description: %s\n", m.description)
 	}
+	for _, line := range m.access.Describe() {
+		fmt.Fprintf(w, "  %s\n", line)
+	}
 	if m.passthrough != nil {
 		fmt.Fprintf(w, "  note: candidates span several passthroughAuth backends (%s); a client's key is sent to whichever one wins\n", strings.Join(m.passthrough, ", "))
 	}
@@ -505,6 +568,9 @@ func (m *candidates) Describe(w io.Writer) {
 		}
 		if m.useProtocols[i] != "" {
 			fmt.Fprintf(w, "     use protocol: %s\n", m.useProtocols[i])
+		}
+		for _, line := range m.allowed[i].Describe() {
+			fmt.Fprintf(w, "     backend '%s' %s\n", m.backendNames[i], line)
 		}
 		hasParams := !m.params.empty() || !m.patches[i].empty()
 		for _, line := range describeAliases(c.Model, m.backendNames[i], m.catalogs[i], hasParams) {

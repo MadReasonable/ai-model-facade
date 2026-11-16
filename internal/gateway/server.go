@@ -91,7 +91,7 @@ func (s *server) authenticated(family *apiFamily, next clientHandler) http.Handl
 		if hasToken {
 			digest := sha256.Sum256([]byte(token))
 			if name, ok := cfg.KeyName(digest); ok {
-				client.Name = name
+				client.Name, client.Groups = name, cfg.GroupsOf(name)
 				next(w, r, client)
 				return
 			}
@@ -104,6 +104,7 @@ func (s *server) authenticated(family *apiFamily, next clientHandler) http.Handl
 		if hasToken {
 			client.Name = config.UnknownClient
 		}
+		client.Groups = []string{config.GroupUnknown}
 		next(w, r, client)
 	}
 }
@@ -139,8 +140,8 @@ func newCurrentObject(cur virtualmodel.Current) *currentObject {
 // already in flight, with nothing cached, is the loop through Open WebUI
 // broken as designed (backend.ErrStateBusy), so that is logged at INFO; any
 // other failure is a WARN.
-func (s *server) currentOf(ctx context.Context, m Model) *currentObject {
-	cur, err := m.Handler.Current(ctx)
+func (s *server) currentOf(ctx context.Context, m Model, client backend.Client) *currentObject {
+	cur, err := m.Handler.Current(ctx, client)
 	if errors.Is(err, backend.ErrStateBusy) {
 		s.log.Info("current selection unavailable", "model", m.Name, "error", err)
 		return nil
@@ -154,12 +155,19 @@ func (s *server) currentOf(ctx context.Context, m Model) *currentObject {
 
 // modelObject describes m for an OpenAI client. With api.openAi.addCurrent off,
 // no backend's state is read.
-func (s *server) modelObject(ctx context.Context, m Model) modelObject {
+func (s *server) modelObject(ctx context.Context, m Model, client backend.Client) modelObject {
 	obj := modelObject{ID: m.Name, Object: "model", Created: s.started, OwnedBy: "ai-model-facade", Description: m.Handler.Description()}
 	if s.gateway.Config.API.OpenAI.AddCurrent {
-		obj.Current = s.currentOf(ctx, m)
+		obj.Current = s.currentOf(ctx, m, client)
 	}
 	return obj
+}
+
+// allows reports whether client may ask for facade m. A facade it may not is
+// left out of every model list, and a request for one gets the same 404 as a
+// facade that doesn't exist, so the lists and the requests agree.
+func allows(m Model, client backend.Client) bool {
+	return m.Handler.Access().Allows(client.Name, client.Groups)
 }
 
 // listingContext is the context for building `current` in an OpenAI listing.
@@ -177,8 +185,8 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 	}{Object: "list", Data: []modelObject{}}
 	ctx := listingContext(backend.WithStateSnapshot(r.Context()))
 	for _, m := range s.gateway.Models {
-		if s.lists(openAIFamily, m) {
-			list.Data = append(list.Data, s.modelObject(ctx, m))
+		if s.lists(openAIFamily, m) && allows(m, client) {
+			list.Data = append(list.Data, s.modelObject(ctx, m, client))
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -188,9 +196,9 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request, client backe
 func (s *server) getModel(w http.ResponseWriter, r *http.Request, client backend.Client) {
 	id := r.PathValue("id")
 	for _, m := range s.gateway.Models {
-		if m.Name == id && s.lists(openAIFamily, m) {
+		if m.Name == id && s.lists(openAIFamily, m) && allows(m, client) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.modelObject(listingContext(r.Context()), m))
+			json.NewEncoder(w).Encode(s.modelObject(listingContext(r.Context()), m, client))
 			return
 		}
 	}
@@ -227,7 +235,9 @@ func (s *server) listFacades(w http.ResponseWriter, r *http.Request, client back
 	}{Models: []facadeObject{}}
 	ctx := backend.WithStateSnapshot(r.Context())
 	for _, m := range s.gateway.Models {
-		list.Models = append(list.Models, s.facadeObject(ctx, m))
+		if allows(m, client) {
+			list.Models = append(list.Models, s.facadeObject(ctx, m, client))
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
@@ -237,17 +247,17 @@ func (s *server) listFacades(w http.ResponseWriter, r *http.Request, client back
 func (s *server) getFacade(w http.ResponseWriter, r *http.Request, client backend.Client) {
 	id := r.PathValue("id")
 	for _, m := range s.gateway.Models {
-		if m.Name == id {
+		if m.Name == id && allows(m, client) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.facadeObject(backend.WithStateSnapshot(r.Context()), m))
+			json.NewEncoder(w).Encode(s.facadeObject(backend.WithStateSnapshot(r.Context()), m, client))
 			return
 		}
 	}
 	writeOpenAIError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
 }
 
-func (s *server) facadeObject(ctx context.Context, m Model) facadeObject {
-	inspection, err := m.Handler.Inspect(ctx)
+func (s *server) facadeObject(ctx context.Context, m Model, client backend.Client) facadeObject {
+	inspection, err := m.Handler.Inspect(ctx, client)
 	if err != nil {
 		s.log.Warn("current selection unavailable", "model", m.Name, "error", err)
 	}
@@ -321,6 +331,18 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	handler := s.models[name]
 	if handler == nil {
 		s.log.Warn("unknown model", "model", name, "status", http.StatusNotFound)
+		family.writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
+		return
+	}
+	if !handler.Access().Allows(client.Name, client.Groups) {
+		attrs := []any{"model", name, "status", http.StatusNotFound}
+		if client.Name != "" {
+			attrs = append(attrs, "client", client.Name)
+		}
+		if client.Fingerprint != "" {
+			attrs = append(attrs, "fingerprint", client.Fingerprint)
+		}
+		s.log.Warn("model not allowed for this client", attrs...)
 		family.writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
 		return
 	}

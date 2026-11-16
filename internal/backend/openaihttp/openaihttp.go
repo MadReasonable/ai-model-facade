@@ -33,6 +33,9 @@ const maxResponseBytes = 100 << 20
 // Config holds the keys every adapter built on Client accepts. Adapters embed
 // it with `yaml:",inline"` next to their own `type`.
 type Config struct {
+	// Access says which callers may use the backend; the gateway skips its
+	// candidates for anyone else.
+	config.Access         `yaml:",inline"`
 	BaseURL               string  `yaml:"baseUrl"`
 	APIKey                string  `yaml:"apiKey"`          // startup and state calls; chat too unless passthroughAuth
 	PassthroughAuth       bool    `yaml:"passthroughAuth"` // chat requests carry the client's own Authorization
@@ -53,6 +56,7 @@ type Client struct {
 	client       *http.Client
 	state        *StateCache // set by trackPending
 	failed       func()      // set by NewListedBackend: a request got no answer or a 5xx
+	access       config.Access
 }
 
 func NewClient(c Config) (*Client, error) {
@@ -81,7 +85,13 @@ func NewClient(c Config) (*Client, error) {
 		stateTimeout: stateTimeout,
 		listRetry:    listRetry,
 		client:       &http.Client{Transport: transport},
+		access:       c.Access,
 	}, nil
+}
+
+// Access says which callers may use this backend.
+func (c *Client) Access() config.Access {
+	return c.access
 }
 
 // ListRetry is how often the gateway asks this backend for its models again

@@ -34,8 +34,12 @@ type Server struct {
 	UnknownKeys  string    `yaml:"unknownKeys"` // reject (default) | allow
 	TargetHeader string    `yaml:"targetHeader"`
 	Responses    Responses `yaml:"responses"`
+	// Groups names sets of keys, by the names of their entries in APIKeys.
+	Groups map[string][]string `yaml:"groups"`
 	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
 	keys map[[sha256.Size]byte]string
+	// groupsOf holds each listed key's groups; see indexGroups.
+	groupsOf map[string][]string
 }
 
 // Responses limits the conversations the gateway keeps for Responses clients
@@ -200,6 +204,9 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 		return nil, err
 	}
 	if err := cfg.indexKeys(); err != nil {
+		return nil, err
+	}
+	if err := cfg.indexGroups(); err != nil {
 		return nil, err
 	}
 	switch cfg.Server.UnknownKeys {

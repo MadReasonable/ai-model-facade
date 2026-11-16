@@ -287,6 +287,82 @@ func TestParse_AKeyListedTwiceUnderOneNameIsANote(t *testing.T) {
 	}
 }
 
+// Key names, group names and the built-in groups are one namespace, since
+// access lists take a name of either kind, and a group's members are keys.
+func TestParse_GroupsAreChecked(t *testing.T) {
+	cases := []struct{ name, server, want string }{
+		{"built-in group", "groups: {all: [a]}", "'all' is a built-in group"},
+		{"unknown group", "groups: {unknown: [a]}", "'unknown' is a built-in group"},
+		{"a key's name", "groups: {a: [a]}", "already the name of a key"},
+		{"unlisted member", "groups: {g: [a, z]}", "'z' is not a name in server.apiKeys"},
+		{"key named all", "apiKeys: [{name: all, key: k}]", "reserved for a built-in group"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a, key: k}]\n  "+c.server, 1)
+			src = strings.Replace(src, "apiKeys: [{name: a, key: k}]\n  apiKeys:", "apiKeys:", 1)
+			if _, err := Parse([]byte(src), env(nil)); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// A listed key is in "all" and its own groups; GroupsOf lists them in that
+// order, so the client's groups are the same on every request.
+func TestParse_RecordsEachKeysGroups(t *testing.T) {
+	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a, key: k1}, {name: b, key: k2}]\n  groups: {zeta: [a], alpha: [a, b], empty: []}", 1)
+	cfg, err := Parse([]byte(src), env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]string{"a": {"all", "alpha", "zeta"}, "b": {"all", "alpha"}, "nobody": nil} {
+		if got := cfg.Server.GroupsOf(name); !slices.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	if err := cfg.Server.CheckAccess(Access{AllowedKeys: []string{"a"}, AllowedGroups: []string{"empty", "all", "unknown"}}); err != nil {
+		t.Errorf("defined names: %v", err)
+	}
+	if err := cfg.Server.CheckAccess(Access{AllowedKeys: []string{"alpha"}}); err == nil || !strings.Contains(err.Error(), "'alpha' is not a name in server.apiKeys") {
+		t.Errorf("a group in allowedKeys: %v", err)
+	}
+	if err := cfg.Server.CheckAccess(Access{AllowedGroups: []string{"a"}}); err == nil || !strings.Contains(err.Error(), "'a' is not a group") {
+		t.Errorf("a key in allowedGroups: %v", err)
+	}
+}
+
+// A list left out allows every caller; otherwise a caller is allowed by its
+// key's name or by one of its groups, and an empty list allows no one.
+func TestAccess_Allows(t *testing.T) {
+	alice := []string{"all", "family"}
+	unknown := []string{"unknown"}
+	cases := []struct {
+		name   string
+		access Access
+		caller string
+		groups []string
+		want   bool
+	}{
+		{"left out, listed key", Access{}, "alice", alice, true},
+		{"left out, unknown caller", Access{}, "unknown", unknown, true},
+		{"by name", Access{AllowedKeys: []string{"alice"}}, "alice", alice, true},
+		{"by group", Access{AllowedGroups: []string{"family"}}, "alice", alice, true},
+		{"by all", Access{AllowedGroups: []string{"all"}}, "alice", alice, true},
+		{"all leaves out unknown callers", Access{AllowedGroups: []string{"all"}}, "unknown", unknown, false},
+		{"by unknown", Access{AllowedGroups: []string{"unknown"}}, "", unknown, true},
+		{"another key", Access{AllowedKeys: []string{"bob"}}, "alice", alice, false},
+		{"empty list", Access{AllowedGroups: []string{}}, "alice", alice, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.access.Allows(c.caller, c.groups); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // Each family has a base path of its own, and the root serves the OpenAI
 // family unless the config says otherwise.
 func TestParse_APIDefaultsAndChecksBasePaths(t *testing.T) {

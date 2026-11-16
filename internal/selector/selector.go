@@ -102,21 +102,23 @@ func (s *FirstLoaded) Requires() []backend.Capability {
 }
 
 func (s *FirstLoaded) Select(ctx context.Context, body []byte, b backend.Backend) (Selection, error) {
-	return s.SelectAmong(ctx, b, func(int) bool { return true })
+	return s.SelectAmong(ctx, b, func(int) string { return "" })
 }
 
-// SelectAmong is Select over the candidates eligible says can serve this
-// request, by index. The selection order holds among them, so a ready model
-// that can't serve the request never wins over one that can.
-func (s *FirstLoaded) SelectAmong(ctx context.Context, b backend.Backend, eligible func(i int) bool) (Selection, error) {
+// SelectAmong is Select over the candidates skip leaves, by index: skip
+// returns why candidate i can't take this request, such as a protocol its
+// backend can't serve, or "" if it can. The selection order holds among the
+// rest, so a ready model that can't take the request never wins over one
+// that can, and each skipped one is in Checked with its reason.
+func (s *FirstLoaded) SelectAmong(ctx context.Context, b backend.Backend, skip func(i int) string) (Selection, error) {
 	sel := Selection{Index: -1}
 	states := s.states(ctx, b)
 	wait := -1     // first starting candidate, used if nothing is ready
 	fallback := -1 // first LoadIfNone candidate, used if nothing is ready or starting
 	var waitID, waitBase string
 	for i, c := range s.Candidates {
-		if !eligible(i) {
-			sel.Checked = append(sel.Checked, c.On(c.Model)+": its backend can't serve this protocol")
+		if reason := skip(i); reason != "" {
+			sel.Checked = append(sel.Checked, c.On(c.Model)+": "+reason)
 			continue
 		}
 		st := states[c.backendOr(b)]
@@ -161,7 +163,7 @@ func (s *FirstLoaded) SelectAmong(ctx context.Context, b backend.Backend, eligib
 	// the request.
 	var firstErr error
 	for i, c := range s.Candidates {
-		if !eligible(i) {
+		if skip(i) != "" {
 			continue
 		}
 		if st := states[c.backendOr(b)]; st.err == nil || st.busy {
