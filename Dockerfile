@@ -1,6 +1,7 @@
 # The build stage runs on the build machine and cross-compiles, so a
-# multi-platform build doesn't run the Go compiler under emulation.
-FROM --platform=$BUILDPLATFORM golang:1.25 AS build
+# multi-platform build doesn't run the Go compiler under emulation. golang:1
+# is the newest Go, as release.yml builds the binaries with.
+FROM --platform=$BUILDPLATFORM golang:1 AS build
 ARG TARGETOS TARGETARCH
 # Without VERSION, go build reads the version from .git, which is why the
 # build context keeps it: a tagged commit gives the tag, any other commit a

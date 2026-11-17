@@ -16,11 +16,19 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The oldest Go go.mod allows, and the newest, which releases are built
+    # with.
+    strategy:
+      matrix:
+        include:
+          - go-version-file: go.mod
+          - go-version: stable
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.go-version-file }}
+          go-version: ${{ matrix.go-version }}
       # Unformatted code would show up as unrelated whitespace changes in
       # the diff of whoever next edits the file with format-on-save.
       - name: gofmt

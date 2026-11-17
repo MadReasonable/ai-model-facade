@@ -20,9 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # Releases are built with the newest Go, which still gets security
+      # fixes, and tested with the same one. go.mod's go line is only the
+      # oldest Go that compiles the code; test.yml checks that one too.
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
       - run: go vet ./...
       - run: go test -race ./...
       # dev-env/control is a module of its own, which ./... doesn't reach.
@@ -40,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
       - name: Build
         env:
           VERSION: ${{ github.ref_name }}

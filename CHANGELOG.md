@@ -2,6 +2,12 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Changed
+
+- Release binaries and the Docker image are built with the newest Go release, which still gets security fixes, instead of Go 1.25. Building from source still needs Go 1.25 or newer.
+
 ## [0.3.1] - 2026-11-16
 
 The gateway can limit which callers may use each facade and backend, send a backend a key of each caller's own, and read its secrets from a file of their own.
