@@ -20,7 +20,9 @@
 #   - `params` are JSON Merge Patches applied to the client's request body,
 #     facade params first, then the winning candidate's: objects merge key by
 #     key, scalars and arrays replace, and null deletes the key. They override
-#     the client; they are not defaults.
+#     the client; they are not defaults. Each is in a block named for the
+#     protocol the backend is sent, such as openAiChat, or in `all` for every
+#     protocol.
 
 server:
   # 127.0.0.1 accepts local connections only. To accept them from other
@@ -197,14 +199,18 @@ models:
   task-monkey:
     backend: llamaSwap
     description: Background tasks on whichever LLM is already loaded, thinking off
-    params: *taskLimits
+    params:
+      all: *taskLimits
     candidates:
       - model: qwen3.6-35b-a3b:q8_0
-        params: *noThinking
+        params:
+          openAiChat: *noThinking
       - model: qwen3.8-flash-next:iq3_s
-        params: *noThinking
+        params:
+          openAiChat: *noThinking
       - model: qwen3.8-27b:*                 # a pattern: whichever quant of this model is loaded
-        params: *noThinking
+        params:
+          openAiChat: *noThinking
       - model: qwen2.5-coder-3b:q8_0         # small and quick to load, and doesn't think
         loadIfNone: true
 
@@ -219,22 +225,25 @@ models:
     candidates:
       - model: "*:Assistant"                 # quoted: a leading * is YAML alias syntax
       - model: qwen2.5-coder-3b:q8_0         # loaded only if no Assistant preset is
-        params: *noThinking
+        params:
+          openAiChat: *noThinking
         loadIfNone: true
 
   # With the openWebUi backend above enabled, this facade gives any client
   # Open WebUI's web search and memories. Tools and features are fields of
-  # Open WebUI's request, so they are set as params. Open WebUI's request has
-  # its own `params` field too, for model options, hence the nested params.
+  # Open WebUI's Chat Completions request, so they are set in the openAiChat
+  # block of params. Open WebUI's request has its own `params` field too, for
+  # model options, hence the nested params.
   # The candidate is a model as Open WebUI names it; it can be a facade of
   # this same gateway, such as task-monkey above.
   # researcher:
   #   backend: openWebUi
   #   description: Assistant with web search and memory
   #   params:
-  #     features: { web_search: true, memory: true }
-  #     # tool_ids: [server:mcp:home-assistant]   # tool servers connected to Open WebUI
-  #     params: { think: false }
+  #     openAiChat:
+  #       features: { web_search: true, memory: true }
+  #       # tool_ids: [server:mcp:home-assistant]   # tool servers connected to Open WebUI
+  #       params: { think: false }
   #   candidates:
   #     - model: task-monkey
   #       loadIfNone: true

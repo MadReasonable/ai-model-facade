@@ -476,9 +476,12 @@ A setting can be spelled differently in each API, so `params`, at both levels, c
 
 ```yaml
 params:
-  all: { max_tokens: 1000 }
-  openAiChat: { reasoning_effort: low }
-  anthropicMessages: { output_config: { effort: low } }
+  all:
+    max_tokens: 1000
+  openAiChat:
+    reasoning_effort: low
+  anthropicMessages:
+    output_config: { effort: low }
 ```
 
 The patches apply in this order: the facade's `all`, its block for the protocol, the candidate's `all`, its block.
@@ -492,19 +495,23 @@ That includes every protocol a candidate's backend supports, at the facade and t
 A key in a protocol's block reaches only that protocol, and `null` in a candidate's block removes a facade's unblocked key for that protocol alone.
 Some params only mean something for chat: `chat_template_kwargs` has no effect on `/v1/completions`, which applies no chat template.
 
-`params` can also be a list of maps, applied in order.
-Use the list form to combine YAML anchors, because YAML's `<<:` merge is shallow and would overwrite nested objects like `chat_template_kwargs`:
+A block can also be a list of maps, applied in order.
+Use the list form to combine YAML anchors, because YAML's `<<:` merge is shallow and would overwrite nested objects like `chat_template_kwargs`.
+An anchor holds one protocol's spelling, so a setting spelled differently in each API needs an anchor per protocol:
 
 ```yaml
 vars:
-  lowEffort: &lowEffort
+  lowEffortChat: &lowEffortChat
     chat_template_kwargs: { enable_thinking: true, reasoning_effort: low }
 
 # ...in a facade or candidate:
 params:
-  - *lowEffort
-  - thinking_budget_tokens: 2048
+  openAiChat:
+    - *lowEffortChat
+    - thinking_budget_tokens: 2048
 ```
+
+The list goes inside a block: a list in place of the blocks is a `params` without blocks, applied to every protocol as it is.
 
 ### Client APIs
 
@@ -841,14 +848,15 @@ The model decides which to call, and Open WebUI runs them before the answer come
 - **Built-in tools turned on per request**, through `features`: `web_search` (search the web and fetch pages), `memory` (read and update the memories Open WebUI keeps between conversations), `image_generation`, and `code_interpreter`.
 - **Built-in tools that need no switch**, offered whenever they are enabled in Open WebUI and the account has permission: search and read the knowledge bases the account can access (or only those attached to the model), the account's notes and past chats, the current time, and, where enabled, calendar, automations and notifications.
 
-Tools and features are fields of Open WebUI's request, so set them with `params`.
+Tools and features are fields of Open WebUI's Chat Completions request, so set them in the `openAiChat` block of `params`.
 Open WebUI's request also has a `params` field of its own, for model options such as `think` and `num_ctx`, which is why that key appears twice:
 
 ```yaml
 params:
-  features: { web_search: true, memory: true }
-  tool_ids: [server:mcp:home-assistant]
-  params: { think: false }
+  openAiChat:
+    features: { web_search: true, memory: true }
+    tool_ids: [server:mcp:home-assistant]
+    params: { think: false }
 ```
 
 Some tools can't work through the gateway, because Open WebUI runs them in the user's browser and a gateway request has no browser behind it: direct tool servers, asking the user a question mid-answer, and the code interpreter when it uses the default Pyodide engine.
@@ -947,7 +955,9 @@ models:
     candidates:
       - model: "*:Assistant"
       - model: qwen2.5-coder-3b:q8_0
-        params: { chat_template_kwargs: { enable_thinking: false } }
+        params:
+          openAiChat:
+            chat_template_kwargs: { enable_thinking: false }
         loadIfNone: true
 ```
 
@@ -1065,8 +1075,9 @@ models:
     backend: openWebUi
     description: Assistant with web search and memory
     params:
-      features: { web_search: true, memory: true }
-      params: { think: false }
+      openAiChat:
+        features: { web_search: true, memory: true }
+        params: { think: false }
     candidates:
       - model: task-monkey
         loadIfNone: true
