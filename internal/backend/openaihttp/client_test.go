@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,5 +252,71 @@ func TestClient_ErrorsQuoteTheURLWithSingleQuotes(t *testing.T) {
 	_, err = c.Do(ctx, http.MethodPost, "/v1/chat/completions", []byte(`{}`), "", backend.Client{})
 	if !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "POST '") {
 		t.Errorf("cancelled: got %v", err)
+	}
+}
+
+// A stream the backend stops sending on, without closing it, ends with a
+// *StallError once stallTimeoutSeconds pass, and the request is cancelled.
+func TestClient_StalledStreamEnds(t *testing.T) {
+	stalled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"n\":1}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(stalled)
+	}))
+	defer srv.Close()
+	timeout := 0.05
+	c := newClient(t, Config{BaseURL: srv.URL, StallTimeoutSeconds: &timeout})
+	res, err := c.Chat(context.Background(), backend.ChatRequest{Protocol: backend.OpenAIChat, Body: []byte(`{"model":"m"}`), Stream: true})
+	if err != nil || res.Stream == nil {
+		t.Fatalf("got %+v, %v", res, err)
+	}
+	defer res.Stream.Close()
+	if data, err := res.Stream.Next(); err != nil || string(data) != `{"n":1}` {
+		t.Fatalf("first event: %s, %v", data, err)
+	}
+	var stall *StallError
+	if _, err := res.Stream.Next(); !errors.As(err, &stall) || err.Error() != "sent nothing for 0.05s, the backend's stallTimeoutSeconds; the response was ended" {
+		t.Errorf("got %v", err)
+	}
+	select {
+	case <-stalled:
+	case <-time.After(testkit.Timeout):
+		t.Error("the backend's request wasn't cancelled")
+	}
+}
+
+// Only time spent waiting on the backend counts toward the stall timeout,
+// not time the reader takes between reads.
+func TestStallBody_CountsOnlyTimeInRead(t *testing.T) {
+	var cancelled atomic.Bool
+	b := newStallBody(io.NopCloser(strings.NewReader("ab")), 10*time.Millisecond, func() { cancelled.Store(true) })
+	defer b.Close()
+	p := make([]byte, 1)
+	for range 2 {
+		time.Sleep(30 * time.Millisecond)
+		if _, err := b.Read(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cancelled.Load() {
+		t.Error("the request was cancelled")
+	}
+}
+
+// stallTimeoutSeconds defaults to 600; 0 sets no limit, and a negative
+// value is refused.
+func TestClient_StallTimeout(t *testing.T) {
+	zero, negative := 0.0, -1.0
+	if got := newClient(t, Config{BaseURL: "http://x"}).StallTimeout(); got != 600*time.Second {
+		t.Errorf("default: got %v", got)
+	}
+	if got := newClient(t, Config{BaseURL: "http://x", StallTimeoutSeconds: &zero}).StallTimeout(); got != 0 {
+		t.Errorf("0: got %v", got)
+	}
+	if _, err := NewClient(Config{BaseURL: "http://x", StallTimeoutSeconds: &negative}); err == nil {
+		t.Error("negative: no error")
 	}
 }

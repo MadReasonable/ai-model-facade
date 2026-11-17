@@ -45,6 +45,9 @@ type Config struct {
 	ListRetrySeconds      float64 `yaml:"listRetrySeconds"`    // asking again for the models of a backend that couldn't be listed; default 30
 	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds"`
 	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds"` // until response headers arrive
+	// StallTimeoutSeconds limits how long a response may go without a byte
+	// once its headers have arrived; nil is the default, 600, and 0 no limit.
+	StallTimeoutSeconds *float64 `yaml:"stallTimeoutSeconds"`
 
 	// KeyMap holds, by key name or group name, the key sent on a caller's
 	// behalf in place of passthroughAuth's or apiKey's; see mappedKey.
@@ -56,6 +59,7 @@ type Client struct {
 	apiKey       string
 	passthrough  bool
 	stateTimeout time.Duration
+	stallTimeout time.Duration // 0: no limit
 	listRetry    time.Duration
 	client       *http.Client
 	state        *StateCache // set by trackPending
@@ -70,6 +74,13 @@ func NewClient(c Config) (*Client, error) {
 	}
 	if c.ListRetrySeconds < 0 {
 		return nil, fmt.Errorf("listRetrySeconds must not be negative")
+	}
+	stallTimeout := 600 * time.Second
+	if c.StallTimeoutSeconds != nil {
+		if *c.StallTimeoutSeconds < 0 {
+			return nil, fmt.Errorf("stallTimeoutSeconds must not be negative; 0 sets no limit")
+		}
+		stallTimeout = seconds(*c.StallTimeoutSeconds)
 	}
 	for _, e := range c.KeyMap {
 		if e.Key == "" {
@@ -93,6 +104,7 @@ func NewClient(c Config) (*Client, error) {
 		apiKey:       c.APIKey,
 		passthrough:  c.PassthroughAuth,
 		stateTimeout: stateTimeout,
+		stallTimeout: stallTimeout,
 		listRetry:    listRetry,
 		client:       &http.Client{Transport: transport},
 		access:       c.Access,
@@ -131,6 +143,13 @@ func (c *Client) mappedKey(client backend.Client) (string, bool) {
 // after it couldn't be listed, to run the checks that need them.
 func (c *Client) ListRetry() time.Duration {
 	return c.listRetry
+}
+
+// StallTimeout is how long a response may go without a byte from this
+// backend before the gateway ends it; 0 sets no limit. An adapter whose
+// replies arrive by polling applies it to its own measure of progress.
+func (c *Client) StallTimeout() time.Duration {
+	return c.stallTimeout
 }
 
 func seconds(s float64) time.Duration {
@@ -293,8 +312,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, accep
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
+	// Cancelling the request is what ends a read blocked on a stalled
+	// backend; the body's Close releases it otherwise.
+	ctx, cancel := context.WithCancel(ctx)
 	req, err := c.newRequest(ctx, method, path, reader)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if key, ok := c.mappedKey(client); ok {
@@ -315,7 +338,67 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, accep
 		req.Header[k] = v
 	}
 	resp, err := c.client.Do(req)
-	return resp, plainURLError(err)
+	if err != nil {
+		cancel()
+		return nil, plainURLError(err)
+	}
+	resp.Body = newStallBody(resp.Body, c.stallTimeout, cancel)
+	return resp, nil
+}
+
+// StallError ends a response the backend sent nothing of for its
+// stallTimeoutSeconds.
+type StallError struct {
+	Timeout time.Duration
+}
+
+func (e *StallError) Error() string {
+	return fmt.Sprintf("sent nothing for %gs, the backend's stallTimeoutSeconds; the response was ended", e.Timeout.Seconds())
+}
+
+// stallBody is a response body whose Read fails with a *StallError if the
+// backend sends nothing for timeout. Only time spent waiting in Read counts,
+// so a client that is slow to take a stream doesn't end it.
+type stallBody struct {
+	body    io.ReadCloser
+	timeout time.Duration // 0: no limit
+	timer   *time.Timer   // stopped except during a Read
+	cancel  context.CancelFunc
+	stalled atomic.Bool
+}
+
+func newStallBody(body io.ReadCloser, timeout time.Duration, cancel context.CancelFunc) *stallBody {
+	b := &stallBody{body: body, timeout: timeout, cancel: cancel}
+	if timeout > 0 {
+		b.timer = time.AfterFunc(timeout, func() {
+			b.stalled.Store(true)
+			cancel()
+		})
+		b.timer.Stop()
+	}
+	return b
+}
+
+func (b *stallBody) Read(p []byte) (int, error) {
+	if b.timer == nil {
+		return b.body.Read(p)
+	}
+	b.timer.Reset(b.timeout)
+	n, err := b.body.Read(p)
+	b.timer.Stop()
+	if b.stalled.Load() {
+		return n, &StallError{Timeout: b.timeout}
+	}
+	return n, err
+}
+
+func (b *stallBody) Close() error {
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	err := b.body.Close()
+	b.cancel()
+	return err
 }
 
 // urlError is a *url.Error reworded with the URL in single quotes. Go's own

@@ -718,7 +718,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	}
 	msg, err := r.wait(ctx, nil)
 	r.release()
-	go r.finish(err != nil && ctx.Err() != nil)
+	go r.finish(leftRunning(ctx, err))
 	if err != nil {
 		return backend.ChatResult{}, err
 	}
@@ -839,12 +839,45 @@ type message struct {
 	usage     gjson.Result
 }
 
+// progress is what a poll shows of the message's advance. Each poll is a
+// complete response, so the stall limit on reading a body never sees a
+// stuck task; a run measures the time since its progress last changed.
+type progress struct {
+	size int // reasoning and content together
+	done bool
+}
+
+func progressOf(msg message) progress {
+	return progress{size: len(msg.reasoning) + len(msg.content), done: msg.done}
+}
+
+// stallError ends a run whose message made no progress for the backend's
+// stallTimeoutSeconds.
+type stallError struct {
+	chatID  string
+	timeout time.Duration
+}
+
+func (e *stallError) Error() string {
+	return fmt.Sprintf("the reply in Open WebUI chat '%s' didn't change for %gs, the backend's stallTimeoutSeconds; its task was stopped", e.chatID, e.timeout.Seconds())
+}
+
+// leftRunning says whether a run that ended with err may have left its task
+// running, for finish to stop: the client left, or the message stalled.
+func leftRunning(ctx context.Context, err error) bool {
+	var stalled *stallError
+	return err != nil && (ctx.Err() != nil || errors.As(err, &stalled))
+}
+
 // wait polls until the message is done and the chat has no task left,
-// passing each new snapshot of the message to onPoll. If ctx ends first, the
-// task may still be running; the caller stops it with finish.
+// passing each new snapshot of the message to onPoll. If ctx ends first, or
+// the message makes no progress for the stall timeout, the task may still be
+// running; the caller stops it with finish.
 func (r *run) wait(ctx context.Context, onPoll func(message) error) (message, error) {
 	ticker := time.NewTicker(r.b.poll)
 	defer ticker.Stop()
+	var last progress
+	lastAt := time.Now()
 	for {
 		msg, err := r.poll(ctx)
 		if err == nil && onPoll != nil {
@@ -854,6 +887,13 @@ func (r *run) wait(ctx context.Context, onPoll func(message) error) (message, er
 			var idle bool
 			if idle, err = r.idle(ctx); err == nil && idle {
 				return msg, nil
+			}
+		}
+		if err == nil {
+			if p := progressOf(msg); p != last {
+				last, lastAt = p, time.Now()
+			} else if stall := r.b.StallTimeout(); stall > 0 && time.Since(lastAt) >= stall {
+				err = &stallError{chatID: r.chatID, timeout: stall}
 			}
 		}
 		if err != nil {
@@ -1088,7 +1128,7 @@ func (r *run) stream(ctx context.Context, includeUsage bool) backend.ChatStream 
 			}
 			return nil
 		})
-		stop = err != nil && ctx.Err() != nil
+		stop = leftRunning(ctx, err)
 		if err == nil {
 			err = send(r.chunk(map[string]any{}, "stop"))
 		}

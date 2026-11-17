@@ -660,6 +660,7 @@ A few rules guard the byte-level design:
 
 - **Duplicate body keys are rejected (400).** gjson and sjson act on a key's first occurrence while backends keep the last, so a duplicate could carry a value past the gateway's params and the `model` rewrite.
 - **Everything buffered is capped:** request bodies at 100 MiB (413 beyond), backend response bodies at 100 MiB, SSE lines at 1 MiB and events at 8 MiB. A client body must arrive within 2 minutes.
+- **A started response that goes silent is ended after `stallTimeoutSeconds`, 600 s by default.** `requestTimeoutSeconds` ends at the headers, so without it a backend that stops mid-response without closing would hold the request and its client forever. Only time spent waiting in a body read counts (`openaihttp`'s `stallBody`), so a client slow to take a stream doesn't end it. Open WebUI's replies arrive by polling, each poll a complete response, so the adapter applies the limit to the time since the message last changed, and stops the task. Decided: on by default, unlike the other timeouts, whose right value depends on the network or the load time; ten minutes without a byte mid-response is long for any backend, and a limit left off would leave the hang in place for everyone who hasn't set it.
 - **SSE is parsed per spec.** An event left unterminated at the end of a stream is discarded, and a stream that ends without `[DONE]` is an error that includes the last line, since llama-server may write a bare JSON error before closing.
 
 ## Implementation choices

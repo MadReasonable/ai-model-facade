@@ -1203,6 +1203,7 @@ All take these keys:
 | `listRetrySeconds` | If the backend couldn't be listed at startup, how often to ask it for its models again, so the checks that need them run once it answers; see [Errors and warnings](#errors-and-warnings). Default `30`. |
 | `connectTimeoutSeconds` | Connection timeout. Default `0`, no limit. |
 | `requestTimeoutSeconds` | How long to wait for the backend to start responding. Allow for a cold load of a `loadIfNone` candidate; a stream isn't cut off once it has started. Default `0`, no limit. |
+| `stallTimeoutSeconds` | How long a response that has started may go without the backend sending anything before the gateway ends it, so a backend that stops without closing the connection doesn't hold the request forever. A stream ends with the protocol's error event, a complete response fails with `502`, and the request to the backend is cancelled. Any bytes count, keepalive comments included, so a reply that keeps arriving is never cut off, however long it runs. On `openWebUi`, whose replies arrive by polling, it is the time since the reply last changed, and the chat's task is stopped. Allow for a backend that sends its headers before it reads a long prompt, and for Open WebUI tools that run long. Default `600`; `0` sets no limit. |
 
 #### llama-swap
 

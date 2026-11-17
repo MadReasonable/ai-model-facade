@@ -4,6 +4,10 @@ Before 1.0, a minor release can change config keys.
 
 ## [Unreleased]
 
+### Added
+
+- `stallTimeoutSeconds` on every backend: a response that has started and then sends nothing for this long is ended, a stream with the protocol's error event and a complete response with `502`, and the request to the backend is cancelled. On Open WebUI it is the time since the reply last changed, and the chat's task is stopped. Default `600`; `0` sets no limit, as before.
+
 ### Changed
 
 - Release binaries and the Docker image are built with the newest Go release, which still gets security fixes, instead of Go 1.25. Building from source still needs Go 1.25 or newer.

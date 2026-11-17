@@ -378,3 +378,27 @@ func TestChat_AlwaysAsksOpenWebUIForUsage(t *testing.T) {
 		t.Errorf("sent %+v", req)
 	}
 }
+
+// A message that makes no progress for stallTimeoutSeconds fails the
+// request, streamed or not, and its task is stopped before the chat is
+// deleted.
+func TestChat_StalledMessageStopsTheTask(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		f := testkit.NewOpenWebUI(t)
+		f.SetChat(testkit.Chat{Contents: slices.Repeat([]string{"a"}, 1_000_000)})
+		res, err := chat(t, newBackend(t, f, ", stallTimeoutSeconds: 0.05"), chatBody, stream)
+		if stream && err == nil {
+			for err == nil {
+				_, err = res.Stream.Next()
+			}
+			res.Stream.Close()
+		}
+		var stalled *stallError
+		if !errors.As(err, &stalled) {
+			t.Errorf("stream %v: got %v", stream, err)
+		}
+		if calls := deleted(t, f); !stoppedThenDeleted(calls) {
+			t.Errorf("stream %v: calls %v", stream, calls)
+		}
+	}
+}

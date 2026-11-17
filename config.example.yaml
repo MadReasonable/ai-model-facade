@@ -99,6 +99,7 @@ backends:
     listRetrySeconds: 30            # if it was down at startup, how often to ask for its models again
     connectTimeoutSeconds: 5
     requestTimeoutSeconds: 180      # long enough for a cold load of a loadIfNone candidate
+    stallTimeoutSeconds: 600        # how long a started response may send nothing before it is ended
 
   # An Ollama server takes the same keys. Its candidates use the full
   # name:tag IDs that `ollama list` shows, such as llama3:latest.
