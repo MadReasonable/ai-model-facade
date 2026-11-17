@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -36,12 +37,21 @@ type server struct {
 	models  map[string]virtualmodel.Handler
 	log     *slog.Logger
 	started int64
+	// reload reloads from the config files, for POST /amf/reload; nil
+	// where the gateway isn't served by a Live, which has the files.
+	reload func(by string) (*Gateway, error)
 }
 
 // Handler returns the front end for every client API: HTTP and SSE framing
 // only.
 func (g *Gateway) Handler(log *slog.Logger) http.Handler {
-	s := &server{gateway: g, models: map[string]virtualmodel.Handler{}, log: log, started: time.Now().Unix()}
+	return g.handler(log, nil)
+}
+
+// handler is Handler with the reload from the files that POST
+// /amf/reload runs, or nil to leave the endpoint out.
+func (g *Gateway) handler(log *slog.Logger, reload func(by string) (*Gateway, error)) http.Handler {
+	s := &server{gateway: g, models: map[string]virtualmodel.Handler{}, log: log, started: time.Now().Unix(), reload: reload}
 	for _, m := range g.Models {
 		s.models[m.Name] = m.Handler
 	}
@@ -49,6 +59,9 @@ func (g *Gateway) Handler(log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /amf/models", s.authenticated(amfFamily, s.listFacades))
 	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(amfFamily, s.getFacade))
+	if reload != nil {
+		mux.HandleFunc("POST /amf/reload", s.authenticated(amfFamily, s.reloadConfig))
+	}
 	api := g.Config.API
 	s.routeOpenAI(mux, api.OpenAI.BasePath)
 	s.routeAnthropic(mux, api.Anthropic.BasePath)
@@ -254,6 +267,49 @@ func (s *server) getFacade(w http.ResponseWriter, r *http.Request, client backen
 		}
 	}
 	writeOpenAIError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", id))
+}
+
+// reloadResult is the body of a successful POST /amf/reload.
+type reloadResult struct {
+	Reloaded bool     `json:"reloaded"`
+	Models   int      `json:"models"`
+	Warnings []string `json:"warnings"`
+	Notes    []string `json:"notes"`
+}
+
+// reloadConfig serves POST /amf/reload: a reload from the config
+// files, as SIGHUP does, for a caller in server.adminApi.write. With no such
+// list the endpoint is off and answers 404, as for a path that doesn't exist.
+// A config that fails to load is a 422, a file that can't be read a 500, and
+// either way the running gateway is kept. The gateway this request arrived on
+// answers it, whatever replaces it.
+func (s *server) reloadConfig(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	write := s.gateway.Config.Server.AdminAPI.Write
+	if !write.On() {
+		s.reject(amfFamily, w, r, client, http.StatusNotFound, "not_found", "POST /amf/reload is off; list its admins in server.adminApi.write to turn it on")
+		return
+	}
+	if !write.Allows(client.Name, client.Groups) {
+		s.reject(amfFamily, w, r, client, http.StatusForbidden, "permission_error", "this client may not reload the config; server.adminApi.write doesn't list it")
+		return
+	}
+	g, err := s.reload("key " + client.Name)
+	if err != nil {
+		status, errType := http.StatusUnprocessableEntity, "invalid_config"
+		var unread *fs.PathError
+		if errors.As(err, &unread) {
+			status, errType = http.StatusInternalServerError, "server_error"
+		}
+		writeOpenAIError(w, status, errType, "config reload failed; keeping the running config: "+err.Error())
+		return
+	}
+	result := reloadResult{Reloaded: true, Models: len(g.Models), Warnings: []string{}, Notes: []string{}}
+	for _, warning := range g.Warnings {
+		result.Warnings = append(result.Warnings, warning.Error())
+	}
+	result.Notes = append(result.Notes, g.Config.Notes...)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *server) facadeObject(ctx context.Context, m Model, client backend.Client) facadeObject {

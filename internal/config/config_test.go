@@ -331,6 +331,42 @@ func TestParse_GroupsAreChecked(t *testing.T) {
 	}
 }
 
+// server.adminApi names only keys and groups the config defines, and never
+// the unknown group; a list left out turns the endpoints off.
+func TestParse_AdminsAreChecked(t *testing.T) {
+	cases := []struct{ name, server, want string }{
+		{"undefined key", "adminApi: {write: {allowedKeys: [z]}}", "server.adminApi.write.allowedKeys: 'z' is not a name in server.apiKeys"},
+		{"undefined group", "adminApi: {write: {allowedGroups: [g]}}", "server.adminApi.write.allowedGroups: 'g' is not a group"},
+		{"unknown group", "adminApi: {write: {allowedGroups: [unknown]}}", "'unknown' can't be an admin"},
+		{"unknown key", "adminApi: {writes: {allowedKeys: [a]}}", "unknown key 'writes'"},
+		{"a list", "adminApi: {write: [a]}", "write must be an access list, a map with allowedKeys or allowedGroups, such as {allowedKeys: [a]}"},
+		{"a name", "adminApi: {write: a}", "write must be an access list, a map with allowedKeys or allowedGroups, such as {allowedKeys: [a]}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a, key: k}]\n  "+c.server, 1)
+			if _, err := Parse([]byte(src), env(nil)); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+	for server, on := range map[string]bool{
+		"":                                     false,
+		"adminApi: {write: {}}":                false,
+		"adminApi: {write: {allowedKeys: []}}": true,
+		"adminApi: {write: {allowedGroups: [all]}}": true,
+	} {
+		src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: a, key: k}]\n  "+server, 1)
+		cfg, err := Parse([]byte(src), env(nil))
+		if err != nil {
+			t.Fatalf("%q: %v", server, err)
+		}
+		if got := cfg.Server.AdminAPI.Write.On(); got != on {
+			t.Errorf("%q: on %v, want %v", server, got, on)
+		}
+	}
+}
+
 // A listed key is in "all" and its own groups; GroupsOf lists them in that
 // order, so the client's groups are the same on every request.
 func TestParse_RecordsEachKeysGroups(t *testing.T) {

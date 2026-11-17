@@ -9,7 +9,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var nodeType = reflect.TypeOf(yaml.Node{})
+var (
+	nodeType   = reflect.TypeOf(yaml.Node{})
+	accessType = reflect.TypeOf(Access{})
+)
 
 // DecodeStrict decodes n into v and fails on mapping keys that v's struct
 // types don't declare. yaml.Node.Decode ignores Decoder.KnownFields, and the
@@ -85,9 +88,19 @@ func checkKnown(n *yaml.Node, t reflect.Type) error {
 // checkShape refuses a value whose shape is wrong for its field, where
 // Decode's own message, such as "cannot unmarshal !!str into []string",
 // would name neither the key nor what is expected: a single name where a
-// list of names goes, as in allowedKeys: alice.
+// list of names goes, as in allowedKeys: alice, and an access list given as
+// anything but a map, as in read: [alice].
 func checkShape(k, v *yaml.Node, t reflect.Type) error {
 	v = resolve(v)
+	if t == accessType && v.Kind != yaml.MappingNode && v.Tag != "!!null" {
+		example := "alice"
+		if v.Kind == yaml.ScalarNode && v.Value != "" {
+			example = v.Value
+		} else if v.Kind == yaml.SequenceNode && len(v.Content) > 0 && v.Content[0].Kind == yaml.ScalarNode {
+			example = v.Content[0].Value
+		}
+		return fmt.Errorf("line %d: %s must be an access list, a map with allowedKeys or allowedGroups, such as {allowedKeys: [%s]}", v.Line, k.Value, example)
+	}
 	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.String && v.Kind == yaml.ScalarNode && v.Tag != "!!null" {
 		return fmt.Errorf("line %d: %s must be a list, such as [%s]", v.Line, k.Value, v.Value)
 	}

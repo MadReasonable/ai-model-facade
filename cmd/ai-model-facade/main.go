@@ -199,7 +199,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	level, err := parseLevel(cfg.Logging.Level)
+	level, err := cfg.Logging.SlogLevel()
 	if err != nil {
 		return err
 	}
@@ -210,7 +210,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	live := gateway.NewLive(g, log)
+	live := gateway.NewLive(g, log, &levelVar, files.load)
 	srv := &http.Server{
 		Addr:              g.Config.Server.Listen,
 		Handler:           live,
@@ -236,9 +236,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 		case err := <-errs:
 			return err
 		case <-hup:
-			if err := reload(files, live, &levelVar, log); err != nil {
-				log.Error("config reload failed; keeping the running config", "error", err)
-			}
+			live.ReloadFiles("SIGHUP") // logs its outcome
 		case <-ctx.Done():
 			running = false
 		}
@@ -250,41 +248,4 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
-}
-
-// reload re-reads the config and the secrets file on SIGHUP. Nothing changes
-// unless the whole config loads and validates; checks against the backends only warn, as at
-// startup.
-func reload(files configFiles, live *gateway.Live, levelVar *slog.LevelVar, log *slog.Logger) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cfg, err := files.load()
-	if err != nil {
-		return err
-	}
-	level, err := parseLevel(cfg.Logging.Level)
-	if err != nil {
-		return err
-	}
-	g, err := live.Reload(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	levelVar.Set(level)
-	log.Info("config reloaded", "models", len(g.Models))
-	return nil
-}
-
-func parseLevel(s string) (slog.Level, error) {
-	switch s {
-	case "", "info":
-		return slog.LevelInfo, nil
-	case "debug":
-		return slog.LevelDebug, nil
-	case "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	}
-	return 0, fmt.Errorf("logging.level: unknown level '%s' (debug | info | warning | error)", s)
 }

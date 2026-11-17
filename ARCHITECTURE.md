@@ -32,7 +32,7 @@ And a facade never causes a model load its candidate list didn't ask for, which 
 
 The commands: `serve`, `check`, `health` and `version`.
 `run` takes the arguments and output writers and returns the exit code, so the commands are tested in-process.
-`serve` binds the port, serves a `gateway.Live`, and reloads it on `SIGHUP`.
+`serve` binds the port, serves a `gateway.Live` with the function that reads the config files, and reloads it from them on `SIGHUP`.
 
 ### `internal/config`
 
@@ -50,7 +50,7 @@ Code that needs one of these reads the descriptor (`protocols.Of`) instead of sw
 
 Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
-`Live` holds the current gateway and swaps in a new one on reload, only if it builds.
+`Live` holds the current gateway and swaps in a new one on reload, only if it builds; a reload from the files, for `SIGHUP` or `POST /amf/reload`, runs in `Live` too, one at a time.
 `family.go` holds the API families, OpenAI's, Anthropic's and the gateway's own `/amf`: each family's routes come from its protocols' descriptors, less those `api.<family>.protocols` turns off, with its credential header, error shape and model list.
 `server.go` is the front end: auth, which facades a caller may ask for, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.

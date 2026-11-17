@@ -141,6 +141,15 @@ That put model-list calls inside the refreshes that requests wait on, and only o
 Requests already in flight finish on the gateway that accepted them.
 A changed `server.listen` is rejected, because the port is already bound.
 
+`POST /amf/reload` reloads from the files as `SIGHUP` does, through one path: `Live.ReloadFiles`, given at `NewLive` the function that reads the files and the log level a reload sets.
+Reading the files, building, swapping and setting the level run under one lock, so two reloads can't read the files in one order and swap in the other, which would leave the older config running.
+A request arriving while a reload runs can't take that reload's outcome, because the reload may have read the files before the edit the request was sent for; it joins the next reload instead, which every request that arrived meanwhile shares, and which closes to new requests just before it reads the files.
+So every caller gets the outcome of a read made after it asked, and requests that pile up cost one more reload, not one each, as a state read in flight serves the requests that arrived before it began (Fetching).
+The reload runs detached from the request, with its own timeout, so a caller that leaves doesn't fail the reload others wait on.
+The endpoint is answered by the gateway it replaces, which `Live` already allows.
+Its admin list, `server.adminApi.write`, defaults to no one, unlike the lists on facades and backends, because a config written before `adminApi` existed must not grant anyone the right to change what runs.
+Decided against: answering a waiting request with the outcome of the reload under way, which could report success without the caller's edit.
+
 Because a failed build is thrown away, building has no side effects that outlive it: `Build` and every adapter's `New` start no goroutines.
 Background work, such as listing a backend again for its pending checks, starts in `Gateway.start`, after the new gateway has been swapped in, and stops when a later reload replaces it.
 

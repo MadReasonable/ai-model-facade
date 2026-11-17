@@ -49,6 +49,11 @@ server:
   # caller may use everything.
   # groups:
   #   family: [alice, bob]
+  # The admin API changes what the gateway runs over HTTP: write allows
+  # POST /amf/reload, which reloads this file as SIGHUP does. Left
+  # out, no one may.
+  # adminApi:
+  #   write: {allowedKeys: [alice]}
   targetHeader: X-Gateway-Target    # response header naming the model that answered
   # The gateway keeps the conversations of Responses clients, which may send
   # only their new input and name the response they follow. Past maxBytes,

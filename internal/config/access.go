@@ -77,6 +77,34 @@ func (s *Server) GroupsOf(name string) []string {
 	return s.groupsOf[name]
 }
 
+// AdminAPI configures the admin endpoints: the callers who may use them.
+// Unlike a facade's or a backend's list, a list left out allows no one and turns off
+// the endpoints it guards, since an admin grant is never implicit.
+type AdminAPI struct {
+	// Write guards the endpoints that change what is running: POST
+	// /amf/reload.
+	Write Access `yaml:"write"`
+}
+
+// On reports whether a lists anyone, so that the endpoints it guards are
+// served; a list given empty is on and allows no one.
+func (a Access) On() bool {
+	return a.AllowedKeys != nil || a.AllowedGroups != nil
+}
+
+// checkAdmins checks server.adminApi like any access list, and refuses the
+// unknown group, which would grant admin to a caller the gateway can't tell
+// apart from any other.
+func (s *Server) checkAdmins() error {
+	if err := s.CheckAccess(s.AdminAPI.Write); err != nil {
+		return fmt.Errorf("server.adminApi.write.%w", err)
+	}
+	if slices.Contains(s.AdminAPI.Write.AllowedGroups, GroupUnknown) {
+		return fmt.Errorf("server.adminApi.write.allowedGroups: '%s' can't be an admin; name keys from server.apiKeys or their groups", GroupUnknown)
+	}
+	return nil
+}
+
 // CheckAccess fails if a names a key or a group the config doesn't define.
 func (s *Server) CheckAccess(a Access) error {
 	for _, name := range a.AllowedKeys {

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"regexp"
@@ -36,7 +37,8 @@ type Server struct {
 	TargetHeader string    `yaml:"targetHeader"`
 	Responses    Responses `yaml:"responses"`
 	// Groups names sets of keys, by the names of their entries in APIKeys.
-	Groups map[string][]string `yaml:"groups"`
+	Groups   map[string][]string `yaml:"groups"`
+	AdminAPI AdminAPI            `yaml:"adminApi"`
 	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
 	keys map[[sha256.Size]byte]string
 	// groupsOf holds each listed key's groups; see indexGroups.
@@ -63,6 +65,21 @@ type APIKey struct {
 type Logging struct {
 	Level        string `yaml:"level"`
 	LogSelection bool   `yaml:"logSelection"`
+}
+
+// SlogLevel returns Level as a slog level, info when it is left out.
+func (l Logging) SlogLevel() (slog.Level, error) {
+	switch l.Level {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return 0, fmt.Errorf("logging.level: unknown level '%s' (debug | info | warning | error)", l.Level)
 }
 
 // API configures what the gateway presents to clients of each API family.
@@ -267,6 +284,9 @@ func ParseWithSecrets(data, secretsData []byte, lookupEnv func(string) (string, 
 		return nil, err
 	}
 	if err := cfg.indexGroups(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Server.checkAdmins(); err != nil {
 		return nil, err
 	}
 	switch cfg.Server.UnknownKeys {

@@ -232,7 +232,7 @@ Whichever you use, it needs these settings for the gateway:
 - A restricted account, such as Network Service, instead of the default Local System, with read access to the config.
 - Keys as environment variables in the wrapper's settings, which the config refers to as `${NAME}`.
 
-Windows has no `SIGHUP`, so the config can't be reloaded in place there: restart the service to load a changed config, after running `check` on it.
+Windows has no `SIGHUP`, so there the config is reloaded in place only through [`POST /amf/reload`](#reloading-the-config), which needs `server.adminApi.write`; without it, restart the service to load a changed config, after running `check` on it.
 
 ### From source
 
@@ -843,6 +843,19 @@ If the caller may use none of a facade's backends, the request gets `403`, which
 The lists apply to the callers the gateway sees.
 A request that comes back through Open WebUI carries the key of Open WebUI's connection to the gateway, not the user's, so it is checked as that connection.
 
+The admin endpoints change what the gateway runs, so `server.adminApi` guards them with a list of the same two keys, under `write`:
+
+```yaml
+server:
+  adminApi:
+    write: {allowedKeys: [alice]}
+```
+
+`write` covers [`POST /amf/reload`](#reloading-the-config).
+Unlike a facade's or a backend's lists, `adminApi` left out allows no one, and the endpoints it guards answer `404`, as a path that doesn't exist does, so a config written before `adminApi` existed grants no one admin.
+`allowedGroups: [unknown]` there is a startup error, since an unknown caller can't be told apart from any other.
+A key is a name, so one key can be an admin and a client at once.
+
 ### Open WebUI
 
 An `openWebUi` backend is an Open WebUI instance, and its models are whatever Open WebUI serves: its Ollama and OpenAI connections, its workspace models, and the facades of any gateway it is connected to.
@@ -1176,6 +1189,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` and `all` are reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
+| `adminApi.write` | The keys and groups that may change what the gateway runs, through `POST /amf/reload`: `allowedKeys` and `allowedGroups`, as on a facade. Left out, no one may, and the endpoint answers `404`. See [Access](#access). Optional. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
 | `responses.maxAgeMinutes` | How long a conversation is kept after its last turn. Default `1440` (24 hours). |
@@ -1383,6 +1397,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `GET /anthropic/v1/models/{id}` | One facade in Anthropic's format, or `404`. |
 | `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state; see [Seeing the choice before a request](#seeing-the-choice-before-a-request). |
 | `GET /amf/models/{id}` | One entry of that list, or `404`. |
+| `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, for a key in `server.adminApi.write`; see [Reloading the config](#reloading-the-config). |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
 Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api); `api.anthropic.addCurrent` does the same for Anthropic's list.
@@ -1411,10 +1426,12 @@ The gateway's own errors use these codes:
 |--------|---------|
 | `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for. |
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching key. |
-| `403` | The caller may use the facade, but none of the backends its candidates are on; see [Access](#access). |
-| `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, or the path doesn't exist. |
+| `403` | The caller may use the facade, but none of the backends its candidates are on, or the caller isn't in `server.adminApi.write`; see [Access](#access). |
+| `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, the path doesn't exist, or it is an admin endpoint with no `server.adminApi.write`. |
 | `405` | The path doesn't take this method. |
 | `413` | The body is over 100 MiB. |
+| `422` | `POST /amf/reload` found the config wrong, so the running config stays. |
+| `500` | `POST /amf/reload` couldn't read a config file, so the running config stays. |
 | `502` | The backend couldn't be reached or failed the request, no backend's state could be read, or no candidate's backend can serve the request's protocol. |
 | `503` | No candidate is eligible. |
 | `508` | Routing loop: the request has already passed through this facade of this gateway, e.g. via Open WebUI back to itself. |
@@ -1452,20 +1469,39 @@ On Ctrl+C or `SIGTERM`, `serve` stops accepting requests and gives those in flig
 
 ### Reloading the config
 
-Send `serve` a `SIGHUP` to reload the config without a restart:
+`serve` reloads its config without a restart, from the same files it started with: the config and the [secrets file](#secrets-file), but not the environment, which is fixed when the gateway starts.
+The new config is loaded and validated in full first, and replaces the running one only if it has no errors; otherwise the running config stays.
+Requests already in flight, including streams, finish on the config that accepted them.
+Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
+Run `check` first to see what a reload would load.
+
+A `SIGHUP` reloads it and logs the outcome:
 
 ```bash
 kill -HUP <pid>
 ```
 
 The [Installation](#installation) section gives the same for each service manager and for Docker.
-The new config is loaded and validated in full first, and replaces the running one only if it has no errors.
-Otherwise the running config stays and the error is logged.
-Requests already in flight, including streams, finish on the config that accepted them.
-Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
-A reload reads the [secrets file](#secrets-file) again too, but not the environment, which is fixed when the gateway starts.
-Run `check` first to see what a reload would load.
-Windows has no `SIGHUP`, so there a changed config needs a restart.
+
+`POST /amf/reload` does the same over HTTP, for a key in [`server.adminApi.write`](#access), and answers with the outcome, including the warnings that a `SIGHUP` only logs:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8088/amf/reload
+```
+
+```json
+{"reloaded":true,"models":2,"warnings":[],"notes":[]}
+```
+
+`models` is the number of facades now running, `warnings` the [checks against the backends](#errors-and-warnings) that failed, and `notes` what the config has that is likely a mistake.
+A config with errors gets `422` and a config file that can't be read `500`, each with the error, and the running config stays.
+The reply comes from the config that received the request, since the reload replaces it only for the requests after.
+Windows has no `SIGHUP`, so this endpoint is the only way to reload there without a restart.
+
+One reload runs at a time.
+A reload asked for while another runs waits for it, then runs once for every request that arrived in the meantime, and each gets that reload's outcome.
+It doesn't share the reload under way, which may have read the files before an edit that the request was sent for.
+The log line `config reloaded` or `config reload failed` names what asked for the reload, `SIGHUP` or the admin key, in `by`.
 
 ## Upgrading
 

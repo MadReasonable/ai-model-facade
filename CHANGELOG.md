@@ -2,6 +2,12 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Added
+
+- `POST /amf/reload` reloads the config from its files, as `SIGHUP` does, and answers with the outcome: the number of facades, the warnings and notes, or the error with `422`, or `500` for a file it can't read. It needs a key in the new `server.adminApi.write`, `allowedKeys` and `allowedGroups` as on a facade; without that list the endpoint answers `404`. A reload asked for while another runs waits, then shares one reload with every request that arrived in the meantime. The reload log line names what asked for it, in `by`.
+
 ## [0.3.2] - 2026-11-20
 
 A response that stops arriving from a backend is now ended after a timeout, the Docker image's health check passes with a secrets file, and a wrong list in the config, or a backend error with no message, now gets a message that names it.
