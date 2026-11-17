@@ -109,7 +109,7 @@ func liveRespond(t *testing.T, gw *gateway, body string, stream bool) string {
 // refuses the second turn if anything in it changed.
 func liveFunctionLoop(t *testing.T, gw *gateway, facade string, stream bool) gjson.Result {
 	t.Helper()
-	question := `[{"role":"user","content":` + quoted(liveToolQuestion) + `}]`
+	question := `[{"role":"user","content":` + quoted(liveThinkingQuestion) + `}]`
 	body := `{"model":"` + facade + `","max_output_tokens":1500,"instructions":"You are a travel assistant.","reasoning":{"summary":"auto"},"tools":` + liveResponsesTools + `,"input":%s}`
 	for range 8 {
 		output := gjson.Get(liveRespond(t, gw, strings.Replace(body, "%s", question, 1), stream), "output")
@@ -121,7 +121,7 @@ func liveFunctionLoop(t *testing.T, gw *gateway, facade string, stream bool) gjs
 		for _, item := range output.Array() {
 			items = append(items, item.Raw)
 		}
-		result := `{"type":"function_call_output","call_id":` + quoted(call.Get("call_id").String()) + `,"output":"Paris: 14C, cloudy."}`
+		result := `{"type":"function_call_output","call_id":` + quoted(call.Get("call_id").String()) + `,"output":"Rome: 14C, cloudy."}`
 		input := strings.TrimSuffix(question, "]") + "," + strings.Join(items, ",") + "," + result + "]"
 		liveRespond(t, gw, strings.Replace(body, "%s", input, 1), false)
 		return reasoning

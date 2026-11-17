@@ -24,6 +24,11 @@ const (
 	liveMessagesTools = `[{"name":"get_weather","description":"Get the current weather for a city.","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]`
 	liveChatTools     = `[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]`
 	liveToolQuestion  = "I can visit either Paris or Rome tomorrow and want the warmer one. Call get_weather for one city at a time, Paris first."
+	// liveThinkingQuestion asks for a tool call that needs reasoning first,
+	// for the checks that need a reply with both. Claude Haiku 5.5, at its
+	// default effort, thought before the call on 10 of 10 requests, and on 1
+	// of 10 for liveToolQuestion, whose first call needs no reasoning.
+	liveThinkingQuestion = "Of Rome, Madrid and Athens, get the weather only for the city that lies furthest north."
 )
 
 // startClaudeGateway serves the facade `ask` on the real API, with thinking
@@ -65,7 +70,7 @@ func messagesBody(messages string, stream bool) string {
 // block too, since Claude doesn't think on every turn, and returns its content.
 func liveToolTurn(t *testing.T, gw *gateway, stream bool) string {
 	t.Helper()
-	question := `[{"role":"user","content":` + quoted(liveToolQuestion) + `}]`
+	question := `[{"role":"user","content":` + quoted(liveThinkingQuestion) + `}]`
 	for range 8 {
 		r := messagesRequest(t, gw, liveMessagesPath, "", messagesBody(question, stream), nil)
 		if r.StatusCode != http.StatusOK {
@@ -170,7 +175,7 @@ func TestLive_MessagesToolLoopSendsSignedThinkingBack(t *testing.T) {
 			for _, callID := range gjson.Get(content, `#(type=="tool_use")#.id`).Array() {
 				results = append(results, `{"type":"tool_result","tool_use_id":`+quoted(callID.String())+`,"content":"14C, cloudy."}`)
 			}
-			messages := `[{"role":"user","content":` + quoted(liveToolQuestion) + `},{"role":"assistant","content":` + content + `},{"role":"user","content":[` + strings.Join(results, ",") + `]}]`
+			messages := `[{"role":"user","content":` + quoted(liveThinkingQuestion) + `},{"role":"assistant","content":` + content + `},{"role":"user","content":[` + strings.Join(results, ",") + `]}]`
 			r := messagesRequest(t, gw, liveMessagesPath, "", messagesBody(messages, false), nil)
 			if r.StatusCode != http.StatusOK || gjson.Get(r.body, "type").String() != "message" {
 				t.Errorf("got %d %s", r.StatusCode, r.body)
