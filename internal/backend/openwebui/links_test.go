@@ -82,6 +82,7 @@ func TestLinks_CountRequestsThroughOpenWebUIInTheLinkedBackend(t *testing.T) {
 		t.Errorf("during the run: got %+v", got)
 	}
 	steps <- struct{}{}
+	steps <- struct{}{} // the read after the task has ended
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +321,7 @@ func TestLlamaSwapBlock_CountsRequestsThroughOpenWebUIInLlamaSwap(t *testing.T) 
 	}
 	swap.SetState("a", "ready")
 	steps <- struct{}{} // second poll: output
+	steps <- struct{}{} // the read after the task has ended
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}

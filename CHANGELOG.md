@@ -12,6 +12,10 @@ Before 1.0, a minor release can change config keys.
 
 - Release binaries and the Docker image are built with the newest Go release, which still gets security fixes, instead of Go 1.25. Building from source still needs Go 1.25 or newer.
 
+### Fixed
+
+- An Open WebUI reply now includes an outlet filter's rewrite of the finished message. Before, the reply could carry the message as it was before the rewrite. A stream carries a rewrite only if it adds to the end of what was already sent.
+
 ## [0.3.1] - 2026-11-16
 
 The gateway can limit which callers may use each facade and backend, send a backend a key of each caller's own, and read its secrets from a file of their own.

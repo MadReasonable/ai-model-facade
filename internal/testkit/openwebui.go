@@ -43,6 +43,10 @@ type Chat struct {
 	Contents  []string   // the assistant message's content at each poll; default {"ok"}
 	Reasoning [][]string // if set, the text of the reasoning items at each poll
 	Error     string     // if set, the finished message carries this error
+	// Outlet, if set, is the content an outlet filter rewrites the message to
+	// after it is done: every poll after the first done one shows it, and the
+	// task has ended by then, as in Open WebUI.
+	Outlet string
 
 	StartStatus int    // if set, the start answers this status with an error body
 	StartBody   string // if set, the start answers 200 with this body, without task_ids
@@ -172,11 +176,16 @@ func (f *OpenWebUI) servePoll(w http.ResponseWriter, chat Chat) {
 	id := gjson.Get(start.Body, "id").String()
 	contents := chat.contents()
 	f.mu.Lock()
-	i := min(f.polls, len(contents)-1)
+	n := f.polls
 	f.polls++
 	f.mu.Unlock()
+	i := min(n, len(contents)-1)
 	done := i == len(contents)-1
-	msg := map[string]any{"id": id, "role": "assistant", "content": contents[i], "done": done}
+	content := contents[i]
+	if chat.Outlet != "" && n >= len(contents) {
+		content = chat.Outlet
+	}
+	msg := map[string]any{"id": id, "role": "assistant", "content": content, "done": done}
 	if chat.Reasoning != nil {
 		// One reasoning item per model call, next to the other output items.
 		output := []any{map[string]any{"type": "message", "content": []any{}}}

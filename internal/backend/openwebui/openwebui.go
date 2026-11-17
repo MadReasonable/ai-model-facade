@@ -886,7 +886,17 @@ func (r *run) wait(ctx context.Context, onPoll func(message) error) (message, er
 		if err == nil && msg.done {
 			var idle bool
 			if idle, err = r.idle(ctx); err == nil && idle {
-				return msg, nil
+				// The task runs the model's outlet filters after it saves the
+				// message as done, and a filter can rewrite its content, so the
+				// poll above may predate the rewrite (Open WebUI 0.12.3 source,
+				// outlet_filter_handler). The task has ended now, so a read
+				// after it is final.
+				if msg, err = r.poll(ctx); err == nil && onPoll != nil {
+					err = onPoll(msg)
+				}
+				if err == nil {
+					return msg, nil
+				}
 			}
 		}
 		if err == nil {

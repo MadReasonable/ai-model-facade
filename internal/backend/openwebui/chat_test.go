@@ -69,9 +69,9 @@ func TestChat_ReturnsTheFinishedMessage(t *testing.T) {
 	if !started.Get("stream").Bool() || started.Get("chat_id").String() != "chat-1" || !strings.HasPrefix(started.Get("session_id").String(), "ai-model-facade-") || started.Get("background_tasks.title_generation").Bool() || started.Get(backend.RouteField).Raw != `["gw1","gw2"]` {
 		t.Errorf("started: %s", startReq.Body)
 	}
-	// The task is seen to have ended before the chat is deleted, and isn't
-	// stopped.
-	if calls := deleted(t, f); slices.Contains(calls, "POST /api/tasks/chat/chat-1/stop") || !slices.Equal(calls[len(calls)-2:], []string{"GET /api/tasks/chat/chat-1", "DELETE /api/v1/chats/chat-1"}) {
+	// The task is seen to have ended, and the message read once more, before
+	// the chat is deleted, and the task isn't stopped.
+	if calls := deleted(t, f); slices.Contains(calls, "POST /api/tasks/chat/chat-1/stop") || !slices.Equal(calls[len(calls)-3:], []string{"GET /api/tasks/chat/chat-1", "GET /api/v1/chats/chat-1", "DELETE /api/v1/chats/chat-1"}) {
 		t.Errorf("calls: %v", calls)
 	}
 }
@@ -280,7 +280,7 @@ func TestChat_CleansUpAsConfigured(t *testing.T) {
 	cases := []struct{ setting, last string }{
 		{"delete", "DELETE /api/v1/chats/chat-1"},
 		{"archive", "POST /api/v1/chats/chat-1/archive"},
-		{"keep", "GET /api/tasks/chat/chat-1"},
+		{"keep", "GET /api/v1/chats/chat-1"},
 	}
 	for _, c := range cases {
 		t.Run(c.setting, func(t *testing.T) {
@@ -335,6 +335,7 @@ func TestChat_CountsAsPendingUntilTheFirstOutput(t *testing.T) {
 		t.Error("before the first output: not starting")
 	}
 	steps <- struct{}{} // second poll: output
+	steps <- struct{}{} // the read after the task has ended
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -400,5 +401,30 @@ func TestChat_StalledMessageStopsTheTask(t *testing.T) {
 		if calls := deleted(t, f); !stoppedThenDeleted(calls) {
 			t.Errorf("stream %v: calls %v", stream, calls)
 		}
+	}
+}
+
+// An outlet filter's rewrite of the done message, saved before the task
+// ends, reaches the client, streamed or not.
+func TestChat_ReturnsTheOutletRewrite(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		f := testkit.NewOpenWebUI(t)
+		f.SetChat(testkit.Chat{Contents: []string{"", "ok"}, Outlet: "ok [1]"})
+		res, err := chat(t, newBackend(t, f, ""), chatBody, stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var content string
+		if stream {
+			for _, c := range readStream(t, res.Stream) {
+				content += c.Get("choices.0.delta.content").String()
+			}
+		} else {
+			content = gjson.GetBytes(res.Response.Body, "choices.0.message.content").String()
+		}
+		if content != "ok [1]" {
+			t.Errorf("stream %v: got %q", stream, content)
+		}
+		deleted(t, f)
 	}
 }
