@@ -70,6 +70,18 @@ Keep keys out of it: the config can read them from environment variables (`${NAM
 Inside a container, set `server.listen` to `0.0.0.0:8088`, since `127.0.0.1` there accepts connections only from the container itself.
 Other containers on the compose network reach the gateway by its service name, so publish the port only for clients outside that network.
 
+Keys can also live in a [secrets file](#secrets-file), which a reload reads again, unlike the environment.
+The image's command names no secrets file, so a service that uses one mounts it and gives the command in full.
+The two files can be mounted one by one, or together as the folder that holds them, which one line covers:
+
+```yaml
+    volumes:
+      - ./ai-model-facade:/config:ro
+    command: ["serve", "/config/config.yaml", "--secrets", "/config/secrets.yaml"]
+```
+
+The image's user is uid 65532, so give the secrets file to that user alone: `chown 65532 secrets.yaml` and `chmod 600 secrets.yaml`.
+
 The image has a health check: every 30 seconds it runs `ai-model-facade health /config/config.yaml`, which calls `/health` on the address in `server.listen`, so `docker ps` shows the container as `healthy` and compose's `depends_on: condition: service_healthy` works.
 If you mount the config somewhere other than `/config/config.yaml`, override the command and the health check to the same path.
 
@@ -86,6 +98,8 @@ docker run --rm --network <backend network> \
   -v "$PWD/config.yaml:/config/config.yaml:ro" \
   ghcr.io/madreasonable/ai-model-facade:0.3 check /config/config.yaml
 ```
+
+For a config with a secrets file, mount it too and add `--secrets /config/secrets.yaml` after the config, since `check` builds the same config `serve` does.
 
 ### Linux
 
