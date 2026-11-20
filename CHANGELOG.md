@@ -2,7 +2,9 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.3.2] - 2026-11-20
+
+A response that stops arriving from a backend is now ended after a timeout, the Docker image's health check passes with a secrets file, and a wrong list in the config, or a backend error with no message, now gets a message that names it.
 
 ### Added
 
@@ -170,6 +172,7 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
+[0.3.2]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.0...v0.2.1
