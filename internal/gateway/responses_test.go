@@ -169,7 +169,7 @@ func TestResponses_SurviveAReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	live := NewLive(g, discard, new(slog.LevelVar), noFiles)
+	live := NewLive(g, discard, new(slog.LevelVar), loadOnly(noFiles))
 	srv := httptest.NewServer(live)
 	t.Cleanup(srv.Close)
 	gw := &gateway{Server: srv, g: g}

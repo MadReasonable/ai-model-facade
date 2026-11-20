@@ -115,3 +115,14 @@ func Build(entry config.Entry, env Env) (Handler, error) {
 	}
 	return nil, fmt.Errorf("unknown type '%s'", entry.Type)
 }
+
+// Check checks what a facade entry can get wrong by itself, without the
+// backends it names: unknown keys, wrong types, and values that are wrong
+// whatever else the config holds. Build checks the rest.
+func Check(entry config.Entry) error {
+	switch entry.Type {
+	case "", "candidates":
+		return checkCandidates(entry)
+	}
+	return fmt.Errorf("unknown type '%s'", entry.Type)
+}

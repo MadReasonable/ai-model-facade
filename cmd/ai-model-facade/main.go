@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 	"github.com/MadReasonable/ai-model-facade/internal/gateway"
 )
 
@@ -210,7 +211,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	live := gateway.NewLive(g, log, &levelVar, files.load)
+	live := gateway.NewLive(g, log, &levelVar, configfile.Files{Config: files.config, Secrets: files.secrets})
 	srv := &http.Server{
 		Addr:              g.Config.Server.Listen,
 		Handler:           live,
