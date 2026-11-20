@@ -116,6 +116,19 @@ func waitForChats(t *testing.T, b Driver, n int) {
 	time.Sleep(300 * time.Millisecond)
 }
 
+// waitForLocalAILoads waits until LocalAI has loading loads under way and
+// evicted of them evicted by a later request: on the fake by its own state
+// (LocalAI.WaitForLoads); live, it gives the requests time to arrive, as
+// waitForChats does.
+func waitForLocalAILoads(t *testing.T, b Driver, loading, evicted int) {
+	t.Helper()
+	if fake, ok := b.(*fakeLocalAI); ok {
+		fake.WaitForLoads(t, loading, evicted)
+		return
+	}
+	time.Sleep(300 * time.Millisecond)
+}
+
 // liveDriver drives a real backend through control's API.
 type liveDriver struct{ *LiveBackend }
 

@@ -246,7 +246,8 @@ func TestLocalAI_ListsAliasesAndModelsOnlyOnceLoaded(t *testing.T) {
 // isn't loaded during a load, the loading one too, waits for it, then evicts
 // the model it loaded: the request that started the load fails with 500, and
 // the later request loads its model and answers. Each step waits for the
-// request before it to arrive (waitForChats).
+// request before it to act, the first to start its load and the second to
+// evict it, before the next (waitForLocalAILoads).
 func TestLocalAI_EvictsALoadForAnyModelNotLoaded(t *testing.T) {
 	for _, second := range []string{"localai-llm-2", "localai-llm-1"} {
 		t.Run(second, func(t *testing.T) {
@@ -254,9 +255,9 @@ func TestLocalAI_EvictsALoadForAnyModelNotLoaded(t *testing.T) {
 				b.Reset(t)
 				release := b.HoldLoads(t)
 				first := chatInBackground(t, b, "localai-llm-1")
-				waitForChats(t, b, 1)
+				waitForLocalAILoads(t, b, 1, 0)
 				later := chatInBackground(t, b, second)
-				waitForChats(t, b, 2)
+				waitForLocalAILoads(t, b, 1, 1)
 				release()
 				<-first.done
 				<-later.done

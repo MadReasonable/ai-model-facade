@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -88,6 +89,33 @@ func (f *LocalAI) SetReply(r Reply) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reply = r
+}
+
+// WaitForLoads waits until loading loads are under way and evicted of them
+// have been marked evicted by a later request, and fails t if that takes
+// longer than Timeout. A request reaches the load some time after the fake
+// received it, so a test that releases held loads waits on this, not on the
+// requests received, for each request to have acted on them.
+func (f *LocalAI) WaitForLoads(t testing.TB, loading, evicted int) {
+	t.Helper()
+	deadline := time.Now().Add(Timeout)
+	for {
+		f.mu.Lock()
+		n, e := len(f.loading), 0
+		for _, l := range f.loading {
+			if l.evicted {
+				e++
+			}
+		}
+		f.mu.Unlock()
+		if n >= loading && e >= evicted {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("LocalAI: %d loads under way, %d of them evicted; waited for %d and %d", n, e, loading, evicted)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // HoldLoads makes every later load wait until the returned gate is opened.
