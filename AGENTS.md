@@ -59,6 +59,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `cmd/ai-model-facade`: the commands; `run` returns the exit code, so they're tested in-process.
 - `internal/config`: parsing, `${ENV}` expansion, strict decoding (`DecodeStrict`, since yaml.v3's `KnownFields(true)` doesn't apply to `yaml.Node.Decode`), and the `Document` the admin endpoints read and edit.
 - `internal/configfile`: saving the config files, their backups, and whether each can be saved.
+- `internal/loghub`: the gateway's in-memory copy of its log for `GET /amf/logs`, and the streams that follow it. Nothing in it may wait on a reader.
 - `internal/protocols`: one descriptor per protocol (path, family, stream framing, stream error event). Code reads the descriptor rather than switching on the protocol.
 - `internal/gateway`: building and reloading a gateway, the API families (`family.go`), and the front end. The front end does HTTP and SSE framing only; selection belongs to the facade, and everything after it to the pipeline.
 - `internal/virtualmodel`: facade types, which select a candidate and hand it to the pipeline. A new behaviour is a new type with its own schema, validator and handler, never a change to `candidates`.

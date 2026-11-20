@@ -14,6 +14,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
+	"github.com/MadReasonable/ai-model-facade/internal/loghub"
 )
 
 // The main config of the admin tests holds no key itself: the keys are in
@@ -37,6 +38,7 @@ backends:
 type adminLive struct {
 	*gateway
 	live               *Live
+	logs               *loghub.Hub
 	dir, main, secrets string
 }
 
@@ -53,11 +55,15 @@ func startAdmin(t *testing.T, swapURL, main, secrets string) *adminLive {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := Build(context.Background(), cfg, discard)
+	a.logs = loghub.New()
+	a.logs.Configure(cfg)
+	log := slog.New(a.logs.Handler())
+	g, err := Build(context.Background(), cfg, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.live = NewLive(g, discard, new(slog.LevelVar), files)
+	a.live = NewLive(g, log, new(slog.LevelVar), files)
+	a.live.KeepLogs(a.logs)
 	srv := httptest.NewServer(a.live)
 	t.Cleanup(srv.Close)
 	a.gateway = &gateway{Server: srv, g: g}

@@ -237,7 +237,7 @@ Windows has no `SIGHUP`, so there the config is reloaded in place only through [
 
 ### From source
 
-Building needs Go 1.25 or newer:
+Building needs Go 1.26 or newer:
 
 ```bash
 go install github.com/MadReasonable/ai-model-facade/cmd/ai-model-facade@latest
@@ -844,7 +844,7 @@ If the caller may use none of a facade's backends, the request gets `403`, which
 The lists apply to the callers the gateway sees.
 A request that comes back through Open WebUI carries the key of Open WebUI's connection to the gateway, not the user's, so it is checked as that connection.
 
-The admin endpoints show the config and change what the gateway runs, so `server.adminApi`, which holds every setting of those endpoints, guards them with two lists of the same two keys, `read` and `write`:
+The admin endpoints show the config and the log and change what the gateway runs, so `server.adminApi`, which holds every setting of those endpoints, guards them with two lists of the same two keys, `read` and `write`:
 
 ```yaml
 server:
@@ -854,8 +854,9 @@ server:
 ```
 
 `write` covers every endpoint that changes the draft, what is running or the files: `PUT` and `DELETE` on [`/amf/config`](#editing-the-config), `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and [`POST /amf/reload`](#reloading-the-config).
-`read` covers the endpoints that only show: `GET` on `/amf/config`, `/amf/config-status` and `/amf/config-backups`.
-A key in `write` may use those too, since a client that edits the config reads it to see what it changes.
+`read` covers the endpoints that only show: `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and [`/amf/logs`](#reading-the-log).
+The log shows each client's requests, the facade and model each got, and backend errors, so a key in `read` sees what every client does, though never a secret.
+A key in `write` may use those too, since a client that edits the config reads it to see what it changes, and could list itself in `read` anyway.
 Unlike a facade's or a backend's lists, a list under `adminApi` left out allows no one, and the endpoints it guards answer `404`, as a path that doesn't exist does, so a config written before `adminApi` existed grants no one admin.
 `allowedGroups: [unknown]` there is a startup error, since an unknown caller can't be told apart from any other.
 A key is a name, so one key can be an admin and a client at once.
@@ -1193,12 +1194,14 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` and `all` are reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
-| `adminApi.read` | The keys and groups that may read the config, its status and its backups, with `GET` on `/amf/config`, `/amf/config-status` and `/amf/config-backups`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
+| `adminApi.read` | The keys and groups that may read the config, its status, its backups and the log, with `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and `/amf/logs`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, through `PUT` and `DELETE` on `/amf/config` and `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and `POST /amf/reload`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
 | `responses.maxAgeMinutes` | How long a conversation is kept after its last turn. Default `1440` (24 hours). |
+| `adminApi.logs.level` | The lowest level the gateway's copy of its log keeps, for [`/amf/logs`](#reading-the-log): `debug`, `info`, `warning` or `error`. It may be below `logging.level`, so the endpoint shows debug lines while stderr doesn't. Default: `logging.level`. |
+| `adminApi.logs.maxBytes` | The most that copy holds, in bytes; past it, the oldest lines are dropped, but the newest is always kept, however large. `0` keeps no history, so the endpoint only streams. Default `1048576` (1 MiB). |
 
 ### `logging`
 
@@ -1413,6 +1416,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, into the running config and the draft; see [Reloading the config](#reloading-the-config). For `server.adminApi.write`. |
 | `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, and whether each file can be saved. For `server.adminApi.read`. |
 | `GET /amf/config-backups` | The backups of the files, newest first. For `server.adminApi.read`. |
+| `GET /amf/logs` | The gateway's recent log lines, as JSON lines or stderr's text, and with `?follow` each new one as it is logged. For `server.adminApi.read`; see [Reading the log](#reading-the-log). |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
 Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api); `api.anthropic.addCurrent` does the same for Anthropic's list.
@@ -1432,6 +1436,7 @@ The gateway adds its own headers:
 | `X-Gateway-Target` | The model that was chosen, on every response where one was. Renamed by `server.targetHeader`. |
 | `X-Gateway-Dropped` | The client's fields a translation left out; see [Dropped fields](#dropped-fields). |
 | `X-Gateway-Estimated` | `true` on a token count the gateway estimated; see [Counting tokens](#counting-tokens). |
+| `X-Gateway-Logs` | `streaming-only` on `/amf/logs` when `server.adminApi.logs.maxBytes` is `0`, so an empty reply isn't read as a quiet gateway. |
 | `X-Gateway-Config` | On `GET`, `PUT` and `DELETE` of `/amf/config`, which copy of the config the response is about, with what `/amf/config-status` says of it: `draft; source=files; edited=true; live=false; saved=false` for a draft edited and not applied, `live; source=files; edited=false; saved=true` for a running config as the files hold it. |
 | `ETag` | On the same responses, the tag of the node read or written, for `If-Match` and `If-None-Match`; see [Editing the config](#editing-the-config). |
 
@@ -1441,7 +1446,7 @@ The gateway's own errors use these codes:
 
 | Status | Meaning |
 |--------|---------|
-| `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for. |
+| `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for, and `/amf/logs` when a query parameter is wrong. |
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching key. |
 | `403` | The caller may use the facade, but none of the backends its candidates are on, or the caller isn't in the `server.adminApi` list of an admin endpoint; see [Access](#access). |
 | `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, the path doesn't exist, it is an admin endpoint whose `server.adminApi` list is left out, or a path under `/amf/config` names no node. |
@@ -1608,6 +1613,39 @@ A save backs both files up first, so a `backups/` the gateway can't write makes 
 ```
 
 The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded` and `config saved` name the admin key in `by`.
+
+### Reading the log
+
+`GET /amf/logs` reads the gateway's log over HTTP, so it can be watched without a shell on the host, for a key in [`server.adminApi.read`](#access).
+The gateway keeps a copy of its recent lines in memory, beside the stderr it always writes; stderr stays the log that lasts, and a restart starts the copy empty.
+The copy keeps lines from [`server.adminApi.logs.level`](#server), which may be below `logging.level`, so debug lines can be read here while stderr doesn't show them, up to `server.adminApi.logs.maxBytes`.
+Past that size the oldest lines are dropped, but the newest is always kept, so the last line logged can be read even if everything else has stopped.
+With no admin list for `read` or `write`, the gateway keeps no copy at all.
+
+Each line is a JSON object, the same fields stderr shows, unless `?format=text` or `Accept: text/plain` asks for stderr's own text lines:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_KEY" "http://127.0.0.1:8088/amf/logs?level=warning&since=10m"
+```
+
+```json
+{"time":"2026-11-20T09:30:12.418-05:00","level":"WARN","msg":"request rejected","path":"/v1/chat/completions","status":401,"fingerprint":"9f2c41d0","error":"invalid or missing API key"}
+```
+
+`?level=` keeps lines at that level or above, `?since=` those logged at or after a time, such as `2026-11-20T09:30:00Z`, or within a duration back from now, such as `10m`, and `?limit=` the newest that many.
+
+`?follow` sends the lines selected, then each new one as it is logged, as server-sent events, one line per `data:` event, until the client leaves:
+
+```bash
+curl -N -H "Authorization: Bearer $ADMIN_KEY" "http://127.0.0.1:8088/amf/logs?follow&format=text&limit=20"
+```
+
+A stream that falls behind loses lines rather than holding up the gateway: it keeps 256 lines for a reader that hasn't taken them, and an `event: dropped` with `{"dropped": N}` comes before the next line it gets.
+Every 30 seconds with nothing to send, a stream sends a comment, so a proxy keeps the connection open.
+A stream ends with an `event: end` that gives the reason: when a reload or an apply leaves the caller no longer allowed to read the log, when no admin list remains, and when the gateway shuts down.
+
+With `server.adminApi.logs.maxBytes: 0` the gateway keeps no history: a read answers empty, with `X-Gateway-Logs: streaming-only`, and `?follow` sends only new lines.
+It then takes no line at all while no stream is open, so logging costs what it would without the endpoint.
 
 ## Upgrading
 

@@ -41,7 +41,8 @@ type Server struct {
 	Responses    Responses `yaml:"responses"`
 	// Groups names sets of keys, by the names of their entries in APIKeys.
 	Groups map[string][]string `yaml:"groups"`
-	// AdminAPI configures the endpoints that read and change the config.
+	// AdminAPI configures the endpoints that read and change the config and
+	// read the log.
 	AdminAPI AdminAPI `yaml:"adminApi"`
 	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
 	keys map[[sha256.Size]byte]string
@@ -66,6 +67,51 @@ type APIKey struct {
 	Hash *string `yaml:"hash"` // "sha256:" and 64 hex characters, as hash-key prints
 }
 
+// Logs configures the gateway's own copy of its log, which GET /amf/logs
+// reads and streams.
+type Logs struct {
+	// Level is the lowest level the copy keeps, which may be below
+	// logging.level, so the endpoint can show debug lines while stderr
+	// doesn't. Left out, it is logging.level.
+	Level string `yaml:"level"`
+	// MaxBytes is the most the copy holds; past it, the oldest lines are
+	// dropped, though the newest is always kept, so the last line logged can
+	// be read when nothing else can. 0 keeps none, so the endpoint only
+	// streams. nil means the default, 1 MiB; see KeepBytes.
+	MaxBytes *int64 `yaml:"maxBytes"`
+}
+
+// KeepBytes returns the most the copy of the log holds:
+// server.adminApi.logs.maxBytes, 1 MiB by default, 0 for none.
+func (l Logs) KeepBytes() int64 {
+	if l.MaxBytes == nil {
+		return 1 << 20
+	}
+	return *l.MaxBytes
+}
+
+func (l *Logs) applyDefaults() error {
+	if l.MaxBytes != nil && *l.MaxBytes < 0 {
+		return fmt.Errorf("server.adminApi.logs.maxBytes: %d is negative", *l.MaxBytes)
+	}
+	if l.Level != "" {
+		if _, err := parseLevel(l.Level); err != nil {
+			return fmt.Errorf("server.adminApi.logs.level: %w", err)
+		}
+	}
+	return nil
+}
+
+// SlogLevel returns Level as a slog level, or fallback, logging.level's,
+// when it is left out.
+func (l Logs) SlogLevel(fallback slog.Level) slog.Level {
+	if l.Level == "" {
+		return fallback
+	}
+	level, _ := parseLevel(l.Level) // checked at load
+	return level
+}
+
 type Logging struct {
 	Level        string `yaml:"level"`
 	LogSelection bool   `yaml:"logSelection"`
@@ -73,7 +119,16 @@ type Logging struct {
 
 // SlogLevel returns Level as a slog level, info when it is left out.
 func (l Logging) SlogLevel() (slog.Level, error) {
-	switch l.Level {
+	level, err := parseLevel(l.Level)
+	if err != nil {
+		return 0, fmt.Errorf("logging.level: %w", err)
+	}
+	return level, nil
+}
+
+// parseLevel returns the slog level a config names, info for "".
+func parseLevel(name string) (slog.Level, error) {
+	switch name {
 	case "", "info":
 		return slog.LevelInfo, nil
 	case "debug":
@@ -83,7 +138,7 @@ func (l Logging) SlogLevel() (slog.Level, error) {
 	case "error":
 		return slog.LevelError, nil
 	}
-	return 0, fmt.Errorf("logging.level: unknown level '%s' (debug | info | warning | error)", l.Level)
+	return 0, fmt.Errorf("unknown level '%s' (debug | info | warning | error)", name)
 }
 
 // API configures what the gateway presents to clients of each API family.
