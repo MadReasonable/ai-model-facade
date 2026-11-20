@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -593,7 +594,7 @@ func (s *responsesStream) Next() ([]byte, error) {
 		var streamErr *backend.StreamError
 		if errors.As(err, &streamErr) {
 			s.done = true
-			return nil, &backend.StreamError{Data: b.errorEvent(errorMessage(streamErr.Data))}
+			return nil, &backend.StreamError{Data: b.errorEvent(errorMessage(streamErr.Data, 0))}
 		}
 		if err == io.EOF {
 			s.done = true
@@ -615,12 +616,25 @@ func (s *responsesStream) Close() error {
 }
 
 // errorMessage reads an error body's message, OpenAI's or Anthropic's shape
-// alike, or takes the body as the message.
-func errorMessage(body []byte) string {
+// alike, or takes the body as the message; for a body with neither, such as
+// a proxy's empty 502, it says so, with status, 0 for a stream's error.
+func errorMessage(body []byte, status int) string {
 	if message := gjson.GetBytes(body, "error.message").String(); message != "" {
 		return message
 	}
-	return strings.TrimSpace(string(body))
+	if text := strings.TrimSpace(string(body)); text != "" {
+		return text
+	}
+	return noMessage(status)
+}
+
+// noMessage is the message of a backend error that came with none, so the
+// client learns at least that the backend failed, and with what status.
+func noMessage(status int) string {
+	if status == 0 {
+		return "the backend's stream failed with no message"
+	}
+	return fmt.Sprintf("the backend answered %d %s with no message", status, http.StatusText(status))
 }
 
 // responsesItemKind is an input item's type; one with a role and no type is
@@ -673,7 +687,7 @@ func streamErrorMessage(data []byte) string {
 	if message := gjson.GetBytes(data, "message").String(); message != "" {
 		return message
 	}
-	return errorMessage(data)
+	return errorMessage(data, 0)
 }
 
 // A Responses client's shell and apply_patch, which it runs itself, reach a

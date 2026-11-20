@@ -139,3 +139,31 @@ func TestResponses_DropACacheOnlySearch(t *testing.T) {
 		}
 	}
 }
+
+// A backend error with no message and no text, such as a proxy's empty 502,
+// reaches the client saying the backend answered with nothing, and with what
+// status, not as an empty message; one with a message or text keeps it.
+func TestErrorsWithNoMessage(t *testing.T) {
+	const want = "the backend answered 502 Bad Gateway with no message"
+	for _, body := range []string{"", "  \n"} {
+		if got := errorMessage([]byte(body), 502); got != want {
+			t.Errorf("errorMessage(%q): %q", body, got)
+		}
+		if got := gjson.GetBytes(openAIError(502, []byte(body)), "error.message").String(); got != want {
+			t.Errorf("openAIError(%q): %q", body, got)
+		}
+		if got := gjson.GetBytes(anthropicError(502, []byte(body)), "error.message").String(); got != want {
+			t.Errorf("anthropicError(%q): %q", body, got)
+		}
+	}
+	if got := errorMessage(nil, 0); got != "the backend's stream failed with no message" {
+		t.Errorf("a stream's error: %q", got)
+	}
+	if got := errorMessage([]byte("Loading model"), 503); got != "Loading model" {
+		t.Errorf("text: %q", got)
+	}
+	res := (&chatReply{}).Result(backend.ChatResult{Response: &backend.ChatResponse{Status: 502}})
+	if got := gjson.GetBytes(res.Response.Body, "error.message").String(); res.Response.Status != 502 || got != want {
+		t.Errorf("a Messages client's reply: %d %q", res.Response.Status, got)
+	}
+}

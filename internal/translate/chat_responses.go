@@ -366,7 +366,7 @@ func (r *responsesChatReply) Result(result backend.ChatResult) backend.ChatResul
 	switch response := gjson.ParseBytes(resp.Body); {
 	case resp.Status/100 != 2:
 		if !gjson.GetBytes(resp.Body, "error.message").Exists() {
-			resp.Body = openAIErrorBody("api_error", errorMessage(resp.Body))
+			resp.Body = openAIErrorBody("api_error", errorMessage(resp.Body, resp.Status))
 		}
 	case response.Get("status").String() == "failed":
 		resp.Status = http.StatusBadGateway
@@ -1008,7 +1008,7 @@ func (r *chatResponsesReply) Result(result backend.ChatResult) backend.ChatResul
 		resp.Body = responseFromChat(gjson.ParseBytes(resp.Body), r.request, r.records)
 		resp.RetryAfter = ""
 	} else if !gjson.GetBytes(resp.Body, "error.message").Exists() {
-		resp.Body = openAIErrorBody("api_error", errorMessage(resp.Body))
+		resp.Body = openAIErrorBody("api_error", errorMessage(resp.Body, resp.Status))
 	}
 	return backend.ChatResult{Response: &resp}
 }

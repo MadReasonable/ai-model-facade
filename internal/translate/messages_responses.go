@@ -1402,7 +1402,7 @@ func (r *messagesResponsesReply) Result(result backend.ChatResult) backend.ChatR
 		resp.Body = responseFromMessage(gjson.ParseBytes(resp.Body), r.request, r.records)
 		resp.RetryAfter = ""
 	} else {
-		resp.Body = openAIError(resp.Body)
+		resp.Body = openAIError(resp.Status, resp.Body)
 	}
 	return backend.ChatResult{Response: &resp}
 }

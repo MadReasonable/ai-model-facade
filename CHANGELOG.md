@@ -15,6 +15,7 @@ Before 1.0, a minor release can change config keys.
 
 ### Fixed
 
+- A backend error that a translation passes on, and that came with no message and no text, such as an empty `502` from a proxy, reaches the client as `the backend answered 502 Bad Gateway with no message`, or for a stream `the backend's stream failed with no message`, instead of an empty message.
 - `health`, which the Docker image's health check runs, reads only `server.listen`. It loaded the entire config without the secrets file, so a config whose groups or access lists name a key kept in the secrets file failed every health check, and the container showed as unhealthy while it served.
 - An Open WebUI reply now includes an outlet filter's rewrite of the finished message. Before, the reply could carry the message as it was before the rewrite. A stream carries a rewrite only if it adds to the end of what was already sent.
 

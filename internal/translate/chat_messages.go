@@ -539,12 +539,13 @@ func annotateCitations(b *chatWriter, citations []gjson.Result, start int) {
 }
 
 // openAIError turns a Claude API error body into OpenAI's error shape,
-// keeping its message and type. A body that isn't one becomes the message.
-func openAIError(body []byte) []byte {
+// keeping its message and type. A body that isn't one becomes the message;
+// see errorMessage. status is the backend's, 0 for a stream's error.
+func openAIError(status int, body []byte) []byte {
 	detail := gjson.GetBytes(body, "error")
 	message, errType := detail.Get("message").String(), detail.Get("type").String()
 	if message == "" {
-		message, errType = strings.TrimSpace(string(body)), "api_error"
+		message, errType = errorMessage(body, status), "api_error"
 	}
 	return openAIErrorBody(errType, message)
 }
@@ -571,7 +572,7 @@ func (r *messagesReply) Result(result backend.ChatResult) backend.ChatResult {
 		resp.Body = completion(gjson.ParseBytes(resp.Body), r.legacy, created)
 		resp.RetryAfter = ""
 	} else {
-		resp.Body = openAIError(resp.Body)
+		resp.Body = openAIError(resp.Status, resp.Body)
 	}
 	return backend.ChatResult{Response: &resp}
 }
@@ -624,7 +625,7 @@ func (s *chunkStream) Next() ([]byte, error) {
 		data, err := s.events.Next()
 		var streamErr *backend.StreamError
 		if errors.As(err, &streamErr) {
-			return nil, &backend.StreamError{Data: openAIError(streamErr.Data)}
+			return nil, &backend.StreamError{Data: openAIError(0, streamErr.Data)}
 		}
 		if err == io.EOF {
 			return nil, io.ErrUnexpectedEOF // the body ended before message_stop
@@ -1021,13 +1022,9 @@ func chatResponseFormat(format gjson.Result) (string, error) {
 }
 
 // anthropicError turns a Chat Completions error body into Anthropic's shape.
-// A body that isn't one becomes the message.
+// A body that isn't one becomes the message; see errorMessage.
 func anthropicError(status int, body []byte) []byte {
-	message := gjson.GetBytes(body, "error.message").String()
-	if message == "" {
-		message = strings.TrimSpace(string(body))
-	}
-	return anthropicErrorBody(anthropicErrorType(status), message)
+	return anthropicErrorBody(anthropicErrorType(status), errorMessage(body, status))
 }
 
 // stopReason maps a Chat Completions finish_reason to Messages'.
