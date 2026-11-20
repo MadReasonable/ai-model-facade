@@ -81,6 +81,7 @@ The two files can be mounted one by one, or together as the folder that holds th
 ```
 
 The image's user is uid 65532, so give the secrets file to that user alone: `chown 65532 secrets.yaml` and `chmod 600 secrets.yaml`.
+To [save the config](#editing-the-config) over HTTP, the folder must be mounted without `:ro` and be writable by that user, since a save renames new files into it and keeps its backups there; a file mounted by itself can't be saved.
 
 The image has a health check: every 30 seconds it runs `ai-model-facade health /config/config.yaml`, which calls `/health` on the address in `server.listen`, so `docker ps` shows the container as `healthy` and compose's `depends_on: condition: service_healthy` works.
 If you mount the config somewhere other than `/config/config.yaml`, override the command and the health check to the same path.
@@ -843,16 +844,19 @@ If the caller may use none of a facade's backends, the request gets `403`, which
 The lists apply to the callers the gateway sees.
 A request that comes back through Open WebUI carries the key of Open WebUI's connection to the gateway, not the user's, so it is checked as that connection.
 
-The admin endpoints change what the gateway runs, so `server.adminApi` guards them with a list of the same two keys, under `write`:
+The admin endpoints show the config and change what the gateway runs, so `server.adminApi`, which holds every setting of those endpoints, guards them with two lists of the same two keys, `read` and `write`:
 
 ```yaml
 server:
   adminApi:
+    read: {allowedGroups: [family]}
     write: {allowedKeys: [alice]}
 ```
 
-`write` covers [`POST /amf/reload`](#reloading-the-config).
-Unlike a facade's or a backend's lists, `adminApi` left out allows no one, and the endpoints it guards answer `404`, as a path that doesn't exist does, so a config written before `adminApi` existed grants no one admin.
+`write` covers every endpoint that changes the draft, what is running or the files: `PUT` and `DELETE` on [`/amf/config`](#editing-the-config), `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and [`POST /amf/reload`](#reloading-the-config).
+`read` covers the endpoints that only show: `GET` on `/amf/config`, `/amf/config-status` and `/amf/config-backups`.
+A key in `write` may use those too, since a client that edits the config reads it to see what it changes.
+Unlike a facade's or a backend's lists, a list under `adminApi` left out allows no one, and the endpoints it guards answer `404`, as a path that doesn't exist does, so a config written before `adminApi` existed grants no one admin.
 `allowedGroups: [unknown]` there is a startup error, since an unknown caller can't be told apart from any other.
 A key is a name, so one key can be an admin and a client at once.
 
@@ -1189,7 +1193,9 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` and `all` are reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
-| `adminApi.write` | The keys and groups that may change what the gateway runs, through `POST /amf/reload`: `allowedKeys` and `allowedGroups`, as on a facade. Left out, no one may, and the endpoint answers `404`. See [Access](#access). Optional. |
+| `adminApi.read` | The keys and groups that may read the config, its status and its backups, with `GET` on `/amf/config`, `/amf/config-status` and `/amf/config-backups`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
+| `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, through `PUT` and `DELETE` on `/amf/config` and `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and `POST /amf/reload`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
+| `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
 | `responses.maxAgeMinutes` | How long a conversation is kept after its last turn. Default `1440` (24 hours). |
@@ -1397,7 +1403,16 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `GET /anthropic/v1/models/{id}` | One facade in Anthropic's format, or `404`. |
 | `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state; see [Seeing the choice before a request](#seeing-the-choice-before-a-request). |
 | `GET /amf/models/{id}` | One entry of that list, or `404`. |
-| `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, for a key in `server.adminApi.write`; see [Reloading the config](#reloading-the-config). |
+| `GET /amf/config` | The draft of the config, or with `?live` the running config, as JSON or, with `Accept: application/yaml`, YAML; `GET /amf/config/<key>/<key>...` reads one node. For `server.adminApi.read`; see [Editing the config](#editing-the-config). |
+| `PUT /amf/config` | Replaces the draft, or with a path, the node at it, or adds a key to a map. For `server.adminApi.write`. |
+| `DELETE /amf/config/<key>/<key>...` | Removes the node at the path from the draft. For `server.adminApi.write`. |
+| `POST /amf/config-apply` | Puts the draft into service. For `server.adminApi.write`. |
+| `POST /amf/config-load` | Replaces the draft with the files as they are on disk now, or with `?backup=<id>` with a backup, `-1` being the newest. For `server.adminApi.write`. |
+| `POST /amf/config-revert` | Replaces the draft with the running config. For `server.adminApi.write`. |
+| `POST /amf/config-save` | Writes the running config to its files, after a backup. For `server.adminApi.write`. |
+| `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, into the running config and the draft; see [Reloading the config](#reloading-the-config). For `server.adminApi.write`. |
+| `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, and whether each file can be saved. For `server.adminApi.read`. |
+| `GET /amf/config-backups` | The backups of the files, newest first. For `server.adminApi.read`. |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
 Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api); `api.anthropic.addCurrent` does the same for Anthropic's list.
@@ -1417,6 +1432,8 @@ The gateway adds its own headers:
 | `X-Gateway-Target` | The model that was chosen, on every response where one was. Renamed by `server.targetHeader`. |
 | `X-Gateway-Dropped` | The client's fields a translation left out; see [Dropped fields](#dropped-fields). |
 | `X-Gateway-Estimated` | `true` on a token count the gateway estimated; see [Counting tokens](#counting-tokens). |
+| `X-Gateway-Config` | On `GET`, `PUT` and `DELETE` of `/amf/config`, which copy of the config the response is about, with what `/amf/config-status` says of it: `draft; source=files; edited=true; live=false; saved=false` for a draft edited and not applied, `live; source=files; edited=false; saved=true` for a running config as the files hold it. |
+| `ETag` | On the same responses, the tag of the node read or written, for `If-Match` and `If-None-Match`; see [Editing the config](#editing-the-config). |
 
 ### Status codes
 
@@ -1426,12 +1443,15 @@ The gateway's own errors use these codes:
 |--------|---------|
 | `400` | The body isn't a JSON object, or it repeats a key. Duplicate keys are rejected because the gateway patches the first occurrence while backends read the last, which would let a request slip values past the gateway's params. A translated request also gets `400` when it asks for something the backend's API has no counterpart for. |
 | `401` | `server.apiKeys` is set, `unknownKeys` is `reject`, and the request has no matching key. |
-| `403` | The caller may use the facade, but none of the backends its candidates are on, or the caller isn't in `server.adminApi.write`; see [Access](#access). |
-| `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, the path doesn't exist, or it is an admin endpoint with no `server.adminApi.write`. |
+| `403` | The caller may use the facade, but none of the backends its candidates are on, or the caller isn't in the `server.adminApi` list of an admin endpoint; see [Access](#access). |
+| `404` | The requested model isn't a facade, the caller may not use it, its `protocols` list leaves out the request's protocol, the path doesn't exist, it is an admin endpoint whose `server.adminApi` list is left out, or a path under `/amf/config` names no node. |
 | `405` | The path doesn't take this method. |
+| `409` | An edit of the draft would change a value shared through a YAML anchor by way of one of its users, or a save was refused before it wrote anything: a file changed on disk since the gateway read it, or a file can't be saved. See [Editing the config](#editing-the-config). |
+| `412` | An `If-Match` or `If-None-Match` on an edit, or an `If-Match` on an apply, doesn't hold for the copy it names. |
 | `413` | The body is over 100 MiB. |
-| `422` | `POST /amf/reload` found the config wrong, so the running config stays. |
-| `500` | `POST /amf/reload` couldn't read a config file, so the running config stays. |
+| `415` | A `PUT` to `/amf/config` has a `Content-Type` other than JSON or YAML. |
+| `422` | `POST /amf/reload` or `/amf/config-apply` found the config wrong, so the running config stays, or an edit of the draft is wrong by itself, such as an unknown key. |
+| `500` | `POST /amf/reload` couldn't read a config file, so the running config stays, or a save failed while writing, and put the files back. |
 | `502` | The backend couldn't be reached or failed the request, no backend's state could be read, or no candidate's backend can serve the request's protocol. |
 | `503` | No candidate is eligible. |
 | `508` | Routing loop: the request has already passed through this facade of this gateway, e.g. via Open WebUI back to itself. |
@@ -1502,6 +1522,92 @@ One reload runs at a time.
 A reload asked for while another runs waits for it, then runs once for every request that arrived in the meantime, and each gets that reload's outcome.
 It doesn't share the reload under way, which may have read the files before an edit that the request was sent for.
 The log line `config reloaded` or `config reload failed` names what asked for the reload, `SIGHUP` or the admin key, in `by`.
+
+A reload replaces the [draft](#editing-the-config) too, and what is running, so it discards draft edits not applied and running changes not saved.
+That is how an edit made on the host takes effect, so it is allowed; the reply then has `"discardedDraft": true` or `"discardedUnsaved": true`, and the log line the same.
+
+### Editing the config
+
+The admin endpoints edit the config over HTTP in steps, so an edit can be read back before it runs and run before it is kept.
+The gateway holds three copies of the config, and each step copies one over another:
+
+| Step | Copies | Over |
+|------|--------|------|
+| `PUT` and `DELETE` on `/amf/config` | the request's change | the draft |
+| `POST /amf/config-apply` | the draft | the running config |
+| `POST /amf/config-revert` | the running config | the draft |
+| `POST /amf/config-load` | the files as they are on disk now, or a backup | the draft |
+| `POST /amf/config-save` | the running config | the files |
+| `POST /amf/reload`, `SIGHUP` | the files | the running config and the draft |
+
+There is one draft, shared by every admin, since it is what the next apply puts into service.
+The draft and the running config live in memory, so a restart, like a reload, starts again from the files.
+A save writes the running config, not the draft, so what reaches the files has already built and served.
+So `config-revert` throws away draft edits not applied; `config-load` brings the files, or an earlier save, into the draft to read, edit and apply; and a reload takes the files as they are, running config and draft alike, with nothing to review.
+
+The endpoints show the config as one document: the [secrets file](#secrets-file) is merged in, and nothing says which file holds a value.
+`GET /amf/config` returns the draft, and `?live` the running config; a path reads one node, a key per segment, with a `/` inside a key escaped as `%2F`:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8088/amf/config/models/assistant
+```
+
+A reply is JSON unless `Accept` asks for `application/yaml`.
+YAML keeps the comments, anchors and aliases as the file has them; JSON has neither, so it shows each alias as the value of its anchor.
+A secret is never shown: a key in `server.apiKeys` given as `key` is shown as its `hash`, and every `apiKey` and `keyMap` value as `<redacted>`, while a `${NAME}` is shown as written.
+
+`PUT` with a path replaces the node there, or adds a key to the map that holds it, answering `201` for a key added and `200` for a node replaced; `PUT /amf/config` replaces the entire draft.
+The body is JSON, with `Content-Type: application/json` or none, or YAML with `Content-Type: application/yaml`, and a YAML body may use the config's anchors, as a YAML read shows them; any other type is `415`, so name the type with curl, whose `-d` sends a form's.
+A list is edited by sending the list wanted, since its order can carry its meaning, as a facade's `candidates` does; its items have no paths of their own.
+`DELETE` with a path removes the node there.
+A `PUT` or `DELETE` checks only what the change can get wrong by itself, such as an unknown key or a wrong type, and answers `422` for that; whether the config holds together, such as a facade naming a backend that was deleted, is checked at apply, so a change that spans several nodes can be made one node at a time.
+
+```bash
+curl -X PUT -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" http://127.0.0.1:8088/amf/config/models/assistant/description -d '"Answers questions"'
+curl -X POST -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8088/amf/config-apply
+curl -X POST -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8088/amf/config-save
+```
+
+A value sent as `<redacted>` keeps the value already there, and a `server.apiKeys` entry sent as `GET` shows it keeps its key, so a `GET` followed by a `PUT` keeps every secret.
+A new key sent as `key` is stored as its `hash`, so the key itself is never held.
+A secret is saved in the file it came from; a new one goes to the secrets file, or, if the gateway has none, to the config in plaintext, which the reply's `notes` say.
+
+A value shared through an anchor, such as an `*noThinking` alias in a facade's params, can't be edited by way of one of its users, since that would change every other user too; the edit answers `409` with where the anchor is defined.
+Edit it there, or replace the alias itself to give that user a value of its own.
+
+Every `GET` answers with an `ETag` for the node it read, and `PUT` and `DELETE` take `If-Match`, to change a node only if no one else has since, and `If-None-Match: *`, to add one only if it doesn't exist yet; each answers `412` when it doesn't hold.
+Neither is required.
+`POST /amf/config-apply` takes `If-Match` with the `ETag` of `GET /amf/config`, so an admin applies the draft they read.
+`GET /amf/config-status` reports, for the draft and for the running config, where its content came from, in `source`: `files` for one read from the files, at startup, on a reload or by `config-load`; `backup:<id>` for one loaded from a backup; `api` for one sent entire by a `PUT` of the config itself.
+`edited` says whether a path `PUT` or `DELETE` has changed it since, even if undone, and `live` and `saved` whether it holds what is running and what the files held when the gateway last read or wrote them; whether a file changed on disk since is that file's `changedOnDisk`.
+Each copy keeps these as it moves: a revert gives the draft the running config's, and an apply gives the running config the draft's.
+A save makes the running config's `files`, not edited, since it then holds what the files do, as after a reload; the draft, which a save doesn't touch, keeps its own.
+The `X-Gateway-Config` header of each reply says the same of the copy it is about.
+
+An apply builds the draft as a reload builds the files, under the same rules: a config with errors is `422` and the running config stays.
+It also refuses a draft that leaves no key in `server.apiKeys` that `server.adminApi.write` allows, since nothing over HTTP could then change the config again.
+
+A save writes only the files that differ from the running config.
+It refuses with `409`, before it writes anything, a file that changed on disk since the gateway last read or wrote it, so an edit made on the host isn't overwritten unseen; reload to take that edit, `config-load` it to review it first, or save with `?force` to overwrite it.
+A file `config-load` read counts as seen once the draft it gave is applied, edited or not, if the file hasn't changed again since, so a save after that needs no `?force`; files only loaded to look at, or edited again after the load, still count as changed.
+Each file is written to a new file beside it, with the mode of the file it replaces, and renamed into place, so no file is ever half-written.
+Before that, the save copies both files, whichever it changes, into a backup: a folder in `backups/` in the config's folder, named for the time of the save, such as `backups/20261118-140313/`, holding `config.yaml` and `secrets.yaml` whatever the files are called.
+Each backup is then a whole config by itself, and renaming the files keeps their backups.
+If a rename fails, the save puts back every file it already replaced from the backup, and answers `500`.
+`backups/` and each backup are mode 0700 and a backup of the secrets file 0600, and a save keeps the newest [`server.adminApi.configBackups`](#server) of them.
+`GET /amf/config-backups` lists them, and `POST /amf/config-load?backup=<id>` loads one into the draft, to apply and save like any edit; a backup's ID is the time of the save that replaced what it holds.
+A backup can also be named by its place from the newest, `-1` for the newest and `-2` for the one before, so going back one save needs no listing; the reply names the ID it loaded, and an index past the oldest backup is `404`.
+A backup made while the gateway's files were laid out differently, with a secrets file or without, has its secrets put where the gateway keeps them now: into the secrets file if the gateway was started with `--secrets`, else into the config, in plaintext; the reply's `notes` name each one moved.
+
+Saving needs the gateway to create files in each file's folder, so a read-only mount, a folder owned by another user, or a file mounted into a container by itself, which can't be renamed over, makes that file unsaveable; mount its folder, writable by the gateway's user.
+A save backs both files up first, so a `backups/` the gateway can't write makes every file unsaveable too.
+`GET /amf/config-status` says, for each file, whether its folder and the file itself can be written, whether it is mounted by itself, whether it changed on disk, and why a save would refuse it, and the same of `backups/`:
+
+```json
+{"draft":{"source":"backup:20261118-140313","edited":true,"live":false,"saved":false},"live":{"source":"files","edited":false,"saved":true},"files":[{"role":"config","path":"/config/config.yaml","changedOnDisk":false,"folderWritable":true,"fileWritable":true,"mountedAlone":false,"saveable":true}],"backups":{"path":"/config/backups","writable":true,"keep":10}}
+```
+
+The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded` and `config saved` name the admin key in `by`.
 
 ## Upgrading
 

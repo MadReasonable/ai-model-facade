@@ -175,6 +175,33 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 	return m, nil
 }
 
+// checkCandidates is the part of newCandidates that needs no backend.
+func checkCandidates(entry config.Entry) error {
+	var c candidatesConfig
+	if err := config.DecodeStrict(entry.Node, &c); err != nil {
+		return err
+	}
+	if _, err := parseProtocols(c.Protocols, entry.Node.Line); err != nil {
+		return err
+	}
+	if _, err := compileParams(&c.Params); err != nil {
+		return err
+	}
+	if len(c.Candidates) == 0 {
+		return fmt.Errorf("line %d: candidates is required", entry.Node.Line)
+	}
+	for i := range c.Candidates {
+		var cc candidateConfig
+		if err := config.DecodeStrict(&c.Candidates[i], &cc); err != nil {
+			return err
+		}
+		if _, err := compileParams(&cc.Params); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // protocolsFor returns the protocols a candidate's backend may be sent: the one
 // useProtocol names, which the backend must accept, or else all it accepts.
 func protocolsFor(name string, b backend.Backend, backendName string, line int) ([]backend.Protocol, error) {

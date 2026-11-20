@@ -28,6 +28,9 @@ type Config struct {
 	// meaning, such as one key listed under two names. They fail neither serve
 	// nor check: serve logs them, check prints them.
 	Notes []string `yaml:"-"`
+	// Source is the Document the Config was parsed from, which the admin
+	// endpoints show and a save writes.
+	Source *Document `yaml:"-"`
 }
 
 type Server struct {
@@ -37,8 +40,9 @@ type Server struct {
 	TargetHeader string    `yaml:"targetHeader"`
 	Responses    Responses `yaml:"responses"`
 	// Groups names sets of keys, by the names of their entries in APIKeys.
-	Groups   map[string][]string `yaml:"groups"`
-	AdminAPI AdminAPI            `yaml:"adminApi"`
+	Groups map[string][]string `yaml:"groups"`
+	// AdminAPI configures the endpoints that read and change the config.
+	AdminAPI AdminAPI `yaml:"adminApi"`
 	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
 	keys map[[sha256.Size]byte]string
 	// groupsOf holds each listed key's groups; see indexGroups.
@@ -169,6 +173,16 @@ func (r *Responses) applyDefaults() error {
 	return nil
 }
 
+// KeepBackups returns how many backups of the config files a save keeps:
+// server.adminApi.configBackups, 10 by default. With 0, a save removes its
+// own backup once it succeeds.
+func (a AdminAPI) KeepBackups() int {
+	if a.ConfigBackups == nil {
+		return 10
+	}
+	return *a.ConfigBackups
+}
+
 // UnknownClient is the client name logged for a key not in server.apiKeys.
 const UnknownClient = "unknown"
 
@@ -183,6 +197,21 @@ type Entry struct {
 // the secrets file at secretsPath merged in, or none if it is "". An error
 // names the file it is in.
 func Load(path, secretsPath string) (*Config, error) {
+	d, err := ReadFiles(path, secretsPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := d.Parse(os.LookupEnv)
+	if err != nil {
+		return nil, nameFile(err, path, secretsPath)
+	}
+	return cfg, nil
+}
+
+// ReadFiles reads the config file at path, and the secrets file at
+// secretsPath unless it is "", as a Document with the Origin of the bytes
+// read, without expanding or checking it. An error names the file it is in.
+func ReadFiles(path, secretsPath string) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -193,15 +222,25 @@ func Load(path, secretsPath string) (*Config, error) {
 			return nil, err
 		}
 	}
-	cfg, err := ParseWithSecrets(data, secretsData, os.LookupEnv)
+	d, err := ReadDocument(data, secretsData)
+	if err != nil {
+		return nil, nameFile(err, path, secretsPath)
+	}
+	d.Origin = &Origin{Main: sha256.Sum256(data)}
+	if secretsData != nil {
+		d.Origin.Secrets = sha256.Sum256(secretsData)
+	}
+	return d, nil
+}
+
+// nameFile puts the name of the file an error is in before it: the secrets
+// file for a *SecretsError, else the config.
+func nameFile(err error, path, secretsPath string) error {
 	var inSecrets *SecretsError
 	if errors.As(err, &inSecrets) {
-		return nil, fmt.Errorf("%s: %w", secretsPath, err)
+		return fmt.Errorf("%s: %w", secretsPath, err)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return cfg, nil
+	return fmt.Errorf("%s: %w", path, err)
 }
 
 // Listen reads server.listen from the config file at path, with ${NAME}
@@ -244,59 +283,11 @@ func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) 
 // ParseWithSecrets is Parse with a secrets file merged in, nil for none. An
 // error in the secrets file itself is a *SecretsError.
 func ParseWithSecrets(data, secretsData []byte, lookupEnv func(string) (string, bool)) (*Config, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	d, err := ReadDocument(data, secretsData)
+	if err != nil {
 		return nil, err
 	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return nil, fmt.Errorf("config is empty")
-	}
-	root := doc.Content[0]
-	if err := expandEnv(root, lookupEnv); err != nil {
-		return nil, err
-	}
-	var cfg Config
-	if err := DecodeStrict(root, &cfg); err != nil {
-		return nil, err
-	}
-	if cfg.Server.Listen == "" {
-		return nil, fmt.Errorf("server.listen is required")
-	}
-	if cfg.Server.TargetHeader == "" {
-		cfg.Server.TargetHeader = "X-Gateway-Target"
-	}
-	if err := cfg.API.applyDefaults(); err != nil {
-		return nil, err
-	}
-	if err := cfg.Server.Responses.applyDefaults(); err != nil {
-		return nil, err
-	}
-	if secretsData != nil {
-		s, err := parseSecrets(secretsData, lookupEnv)
-		if err != nil {
-			return nil, err
-		}
-		if err := cfg.mergeSecrets(s); err != nil {
-			return nil, err
-		}
-	}
-	if err := cfg.indexKeys(); err != nil {
-		return nil, err
-	}
-	if err := cfg.indexGroups(); err != nil {
-		return nil, err
-	}
-	if err := cfg.Server.checkAdmins(); err != nil {
-		return nil, err
-	}
-	switch cfg.Server.UnknownKeys {
-	case "":
-		cfg.Server.UnknownKeys = "reject"
-	case "reject", "allow":
-	default:
-		return nil, fmt.Errorf("server.unknownKeys: '%s' is not reject or allow", cfg.Server.UnknownKeys)
-	}
-	return &cfg, nil
+	return d.Parse(lookupEnv)
 }
 
 // Entries lists a section's named entries in file order. A repeated name is an

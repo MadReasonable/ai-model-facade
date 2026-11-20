@@ -32,13 +32,20 @@ And a facade never causes a model load its candidate list didn't ask for, which 
 
 The commands: `serve`, `check`, `health` and `version`.
 `run` takes the arguments and output writers and returns the exit code, so the commands are tested in-process.
-`serve` binds the port, serves a `gateway.Live` with the function that reads the config files, and reloads it from them on `SIGHUP`.
+`serve` binds the port, serves a `gateway.Live` with the config files (`configfile.Files`), and reloads it from them on `SIGHUP`.
 
 ### `internal/config`
 
 Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME}` in string values, decode strictly, and merge in the secrets file, if there is one (`secrets.go`), adding its backend values to their entries' nodes so each adapter decodes them as its own.
 `DecodeStrict` rejects unknown keys, which yaml.v3 doesn't do for node trees.
 Backend and facade entries stay as nodes, because each type decodes its own schema.
+A `Document` is the config as its files hold it, before `${NAME}` is expanded, and is what the admin endpoints show and edit (`edit.go`): one tree with the secrets file merged in and every secret hidden, edited by path, and split back into the two files, each secret to the file that holds it.
+An edit never changes a `Document` in place, but returns a new one, so the running config's can be read while the draft is edited.
+
+### `internal/configfile`
+
+Writes the running config to its files for a save: each changed file renamed into place, after a copy of both files into a backup folder in `backups/`, from which a save that fails partway puts the files back.
+It also reports whether each file can be saved, and lists and reads the backups.
 
 ### `internal/protocols`
 
@@ -51,6 +58,7 @@ Code that needs one of these reads the descriptor (`protocols.Of`) instead of sw
 Builds a running gateway from a config (`Build`) and serves it.
 `Build` creates every backend, links the ones that refer to others, lists every backend's models once, builds every facade, and runs the checks against those lists; problems that depend on a backend being up become `Gateway.Warnings` rather than errors.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds; a reload from the files, for `SIGHUP` or `POST /amf/reload`, runs in `Live` too, one at a time.
+It also holds the three copies of the config the admin endpoints report, the draft, the provenance of what is running, and the files' last-known content, under a lock held only to read them or commit a change, so reads never wait on a build; applies and saves take the build lock as a reload does (`admin.go`). `admin_http.go` serves `/amf/config` and its actions.
 `family.go` holds the API families, OpenAI's, Anthropic's and the gateway's own `/amf`: each family's routes come from its protocols' descriptors, less those `api.<family>.protocols` turns off, with its credential header, error shape and model list.
 `server.go` is the front end: auth, which facades a caller may ask for, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.

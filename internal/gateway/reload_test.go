@@ -17,11 +17,36 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 )
 
 // noFiles is the loader of a Live whose tests reload only from a config.
 func noFiles() (*config.Config, error) {
 	return nil, errors.New("this test has no config files")
+}
+
+// loadOnly is the ConfigFiles of a Live whose test reloads with a function
+// and has no files to save to.
+type loadOnly func() (*config.Config, error)
+
+func (f loadOnly) Load() (*config.Config, error) { return f() }
+
+func (loadOnly) Read() (*config.Document, error) {
+	return nil, errors.New("this test has no config files")
+}
+
+func (loadOnly) Save(running, saved *config.Document, force bool, keep int) (*configfile.Saved, error) {
+	return nil, &configfile.SaveError{Conflict: true, Err: errors.New("this test has no config files")}
+}
+
+func (loadOnly) Status(saved *config.Document, keep int) ([]configfile.FileStatus, configfile.BackupsStatus) {
+	return []configfile.FileStatus{}, configfile.BackupsStatus{}
+}
+
+func (loadOnly) Backups() ([]configfile.Backup, error) { return []configfile.Backup{}, nil }
+
+func (loadOnly) ReadBackup(ref string) (string, *config.Document, error) {
+	return "", nil, configfile.ErrNoBackup
 }
 
 // startLive serves a reloadable gateway built from the task config on swap.
@@ -31,7 +56,7 @@ func startLive(t *testing.T, swapURL string) (*Live, *gateway) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	live := NewLive(g, discard, new(slog.LevelVar), noFiles)
+	live := NewLive(g, discard, new(slog.LevelVar), loadOnly(noFiles))
 	srv := httptest.NewServer(live)
 	t.Cleanup(srv.Close)
 	return live, &gateway{Server: srv, g: g}
@@ -113,8 +138,8 @@ func startFileLive(t *testing.T, swapURL, src string) *fileLive {
 	t.Helper()
 	f := &fileLive{level: new(slog.LevelVar), path: filepath.Join(t.TempDir(), "config.yaml"), swap: swapURL}
 	f.write(t, src)
-	load := func() (*config.Config, error) { return config.Load(f.path, "") }
-	cfg, err := load()
+	files := configfile.Files{Config: f.path}
+	cfg, err := files.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +147,7 @@ func startFileLive(t *testing.T, swapURL, src string) *fileLive {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.live = NewLive(g, discard, f.level, load)
+	f.live = NewLive(g, discard, f.level, files)
 	srv := httptest.NewServer(f.live)
 	t.Cleanup(srv.Close)
 	f.gateway = &gateway{Server: srv, g: g}
@@ -201,17 +226,19 @@ func TestReloadFiles_ShareTheNextReload(t *testing.T) {
 		<-release
 		return config.Parse([]byte(strings.ReplaceAll(taskConfig, "${SWAP_URL}", swap.URL)), func(string) (string, bool) { return "", false })
 	}
-	live := NewLive(g, discard, new(slog.LevelVar), load)
+	live := NewLive(g, discard, new(slog.LevelVar), loadOnly(load))
 	results := make(map[string]chan *Gateway)
 	reload := func(by string) {
 		result := make(chan *Gateway, 1)
 		results[by] = result
 		go func() {
-			g, err := live.ReloadFiles(by)
+			reloaded, err := live.ReloadFiles(by)
 			if err != nil {
 				t.Error(by, err)
+				result <- nil
+				return
 			}
-			result <- g
+			result <- reloaded.Gateway
 		}()
 	}
 

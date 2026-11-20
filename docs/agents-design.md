@@ -141,7 +141,7 @@ That put model-list calls inside the refreshes that requests wait on, and only o
 Requests already in flight finish on the gateway that accepted them.
 A changed `server.listen` is rejected, because the port is already bound.
 
-`POST /amf/reload` reloads from the files as `SIGHUP` does, through one path: `Live.ReloadFiles`, given at `NewLive` the function that reads the files and the log level a reload sets.
+`POST /amf/reload` reloads from the files as `SIGHUP` does, through one path: `Live.ReloadFiles`, given at `NewLive` the files and the log level a reload sets.
 Reading the files, building, swapping and setting the level run under one lock, so two reloads can't read the files in one order and swap in the other, which would leave the older config running.
 A request arriving while a reload runs can't take that reload's outcome, because the reload may have read the files before the edit the request was sent for; it joins the next reload instead, which every request that arrived meanwhile shares, and which closes to new requests just before it reads the files.
 So every caller gets the outcome of a read made after it asked, and requests that pile up cost one more reload, not one each, as a state read in flight serves the requests that arrived before it began (Fetching).
@@ -149,6 +149,14 @@ The reload runs detached from the request, with its own timeout, so a caller tha
 The endpoint is answered by the gateway it replaces, which `Live` already allows.
 Its admin list, `server.adminApi.write`, defaults to no one, unlike the lists on facades and backends, because a config written before `adminApi` existed must not grant anyone the right to change what runs.
 Decided against: answering a waiting request with the outcome of the reload under way, which could report success without the caller's edit.
+
+The admin endpoints add two copies of the config to the files: the running config, and one draft that `PUT` and `DELETE` on `/amf/config` edit.
+`POST /amf/config-apply` builds the draft as a reload builds the files, under the same lock, so an apply and a reload can't interleave; a reload replaces the draft too.
+A save writes the running config, not the draft, so what reaches the files has built and served, and it holds the lock as well, so the running config can't change while it is written.
+`Live` holds the draft, the running config's provenance and the files' last-known content under a lock of its own, held only to read them or commit a change, apart from the lock that serializes builds, since a build can take as long as a slow backend's model list; so reading the config, its status, or editing the draft never waits on a reload.
+`POST /amf/config-load` brings the files on disk, or a backup, into the draft, and `POST /amf/reload` stays the one step that takes the files as they are, since it skips the review the other steps allow.
+A save refuses a file changed on disk since the gateway last read or wrote it, so a host edit isn't overwritten unseen; a file `config-load` read counts as seen once the draft it gave is applied, if it hasn't changed again since, so the last-known files become what was loaded (`Live.filesHold`).
+A backup is a folder holding both files, named by role, so each is a whole config and a rename of the files keeps them; one made with the other secrets layout is fitted to the gateway's own as it is loaded (`config.Document.Fit`).
 
 Because a failed build is thrown away, building has no side effects that outlive it: `Build` and every adapter's `New` start no goroutines.
 Background work, such as listing a backend again for its pending checks, starts in `Gateway.start`, after the new gateway has been swapped in, and stops when a later reload replaces it.

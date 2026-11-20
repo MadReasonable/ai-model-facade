@@ -32,16 +32,10 @@ type SecretsError struct {
 func (e *SecretsError) Error() string { return e.Err.Error() }
 func (e *SecretsError) Unwrap() error { return e.Err }
 
-// parseSecrets reads a secrets file, expanding ${NAME} as the config does.
-func parseSecrets(data []byte, lookupEnv func(string) (string, bool)) (*secrets, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, &SecretsError{err}
-	}
+// parseSecrets decodes a secrets file's tree, expanding ${NAME} as the config
+// does. The caller passes a copy, since expanding changes the tree.
+func parseSecrets(doc *yaml.Node, lookupEnv func(string) (string, bool)) (*secrets, error) {
 	var s secrets
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return &s, nil // an empty file holds no secrets
-	}
 	root := doc.Content[0]
 	if err := expandEnv(root, lookupEnv); err != nil {
 		return nil, &SecretsError{err}

@@ -57,7 +57,8 @@ Mistakes that compile, pass the nearby tests, and break a rule elsewhere:
 In pipeline order; `ARCHITECTURE.md` has the longer version.
 
 - `cmd/ai-model-facade`: the commands; `run` returns the exit code, so they're tested in-process.
-- `internal/config`: parsing, `${ENV}` expansion, strict decoding (`DecodeStrict`, since yaml.v3's `KnownFields(true)` doesn't apply to `yaml.Node.Decode`).
+- `internal/config`: parsing, `${ENV}` expansion, strict decoding (`DecodeStrict`, since yaml.v3's `KnownFields(true)` doesn't apply to `yaml.Node.Decode`), and the `Document` the admin endpoints read and edit.
+- `internal/configfile`: saving the config files, their backups, and whether each can be saved.
 - `internal/protocols`: one descriptor per protocol (path, family, stream framing, stream error event). Code reads the descriptor rather than switching on the protocol.
 - `internal/gateway`: building and reloading a gateway, the API families (`family.go`), and the front end. The front end does HTTP and SSE framing only; selection belongs to the facade, and everything after it to the pipeline.
 - `internal/virtualmodel`: facade types, which select a candidate and hand it to the pipeline. A new behaviour is a new type with its own schema, validator and handler, never a change to `candidates`.
@@ -73,7 +74,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 
 ## Program commands
 
-- `serve <config>` runs the gateway. `SIGHUP`, or `POST /amf/reload` from a key in `server.adminApi.write`, reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` is rejected.
+- `serve <config>` runs the gateway. `SIGHUP`, or `POST /amf/reload` from a key in `server.adminApi.write`, reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` is rejected. The admin endpoints under `/amf/config` edit a draft, load the files or a backup into it, apply it, revert it, and save the running config to the files, after a backup into `backups/`.
 - `check <config>` loads and validates the config, then prints each facade's resolved params per candidate.
 - `serve` and `check` take `--secrets <file>` after the config: a secrets file, holding only `server.apiKeys` entries and backends' `apiKey` and `keyMap`, merged into the config at load and on every reload.
 - `health <config>` exits 0 if the gateway at `server.listen` answers `/health`; the image's `HEALTHCHECK` uses it. It contacts no backend.
