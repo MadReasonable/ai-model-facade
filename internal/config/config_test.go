@@ -578,3 +578,25 @@ func TestLoad_NamesTheFileAnErrorIsIn(t *testing.T) {
 		t.Error("a missing secrets file loaded")
 	}
 }
+
+// A single name where a list of names goes is refused with the key and the
+// list it should be, not Decode's "cannot unmarshal !!str into []string".
+func TestDecodeStrict_OneNameWhereAListGoes(t *testing.T) {
+	var facade struct {
+		Access `yaml:",inline"`
+	}
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte("allowedKeys: alice\n"), &node); err != nil {
+		t.Fatal(err)
+	}
+	if err := DecodeStrict(node.Content[0], &facade); err == nil || err.Error() != "line 1: allowedKeys must be a list, such as [alice]" {
+		t.Errorf("inline access list: err = %v", err)
+	}
+	src := strings.Replace(minimal, "listen: 0.0.0.0:8090", "listen: x\n  apiKeys: [{name: alice, key: k}]\n  groups: {family: alice}", 1)
+	if _, err := Parse([]byte(src), env(nil)); err == nil || !strings.Contains(err.Error(), "family must be a list, such as [alice]") {
+		t.Errorf("group: err = %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(src, "family: alice", "family: [alice]", 1)), env(nil)); err != nil {
+		t.Errorf("a list: %v", err)
+	}
+}

@@ -10,6 +10,7 @@ Before 1.0, a minor release can change config keys.
 
 ### Changed
 
+- A single name where a list of names goes, such as `allowedKeys: alice` or a group given as `family: alice`, is refused with the key and the list it should be, `allowedKeys must be a list, such as [alice]`, instead of `cannot unmarshal !!str into []string`.
 - Release binaries and the Docker image are built with the newest Go release, which still gets security fixes, instead of Go 1.25. Building from source still needs Go 1.25 or newer.
 
 ### Fixed

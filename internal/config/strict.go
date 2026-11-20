@@ -52,6 +52,9 @@ func checkKnown(n *yaml.Node, t reflect.Type) error {
 				}
 				ft = fields.inlineMap // an inline map catches any leftover key
 			}
+			if err := checkShape(k, v, ft); err != nil {
+				return err
+			}
 			if err := checkKnown(v, ft); err != nil {
 				return err
 			}
@@ -59,6 +62,9 @@ func checkKnown(n *yaml.Node, t reflect.Type) error {
 	case reflect.Map:
 		if n.Kind == yaml.MappingNode {
 			for i := 1; i < len(n.Content); i += 2 {
+				if err := checkShape(n.Content[i-1], n.Content[i], t.Elem()); err != nil {
+					return err
+				}
 				if err := checkKnown(n.Content[i], t.Elem()); err != nil {
 					return err
 				}
@@ -72,6 +78,18 @@ func checkKnown(n *yaml.Node, t reflect.Type) error {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// checkShape refuses a value whose shape is wrong for its field, where
+// Decode's own message, such as "cannot unmarshal !!str into []string",
+// would name neither the key nor what is expected: a single name where a
+// list of names goes, as in allowedKeys: alice.
+func checkShape(k, v *yaml.Node, t reflect.Type) error {
+	v = resolve(v)
+	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.String && v.Kind == yaml.ScalarNode && v.Tag != "!!null" {
+		return fmt.Errorf("line %d: %s must be a list, such as [%s]", v.Line, k.Value, v.Value)
 	}
 	return nil
 }
