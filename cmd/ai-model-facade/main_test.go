@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/config"
+	"github.com/MadReasonable/ai-model-facade/internal/loghub"
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
 
@@ -460,5 +462,66 @@ func TestServe_ReloadsOnSIGHUPAndStopsOnSIGTERM(t *testing.T) {
 	p.waitForLog(t, `msg="shutting down"`)
 	if err := p.cmd.Wait(); err != nil {
 		t.Errorf("exit: %v", err)
+	}
+}
+
+// stalled is a stderr whose reader has stopped: every write waits until
+// released.
+type stalled struct{ released chan struct{} }
+
+func (s stalled) Write(p []byte) (int, error) {
+	<-s.released
+	return len(p), nil
+}
+
+// serve's logger hands a record to the copy of the log before stderr, so a
+// stderr write that stalls can't keep it from GET /amf/logs.
+func TestServe_LogCopyComesBeforeAStalledStderr(t *testing.T) {
+	cfg, err := config.Parse([]byte("server:\n  listen: :0\n  apiKeys: [{name: a, key: k}]\n  adminApi: {read: {allowedKeys: [a]}}\nmodels: {}\n"), func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := loghub.New()
+	logs.Configure(cfg)
+	stderr := stalled{make(chan struct{})}
+	defer close(stderr.released)
+	go newLogger(stderr, new(slog.LevelVar), logs).Info("before the stall")
+	deadline := time.Now().Add(2 * time.Second)
+	for len(logs.Read(loghub.Filter{})) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the record didn't reach the copy of the log while stderr was stalled")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// On SIGTERM, serve ends every log stream, so an open stream doesn't hold
+// shutdown open for its grace period.
+func TestServe_ShutdownEndsLogStreams(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts the program as a process")
+	}
+	addr := freeAddr(t)
+	src := "server:\n  listen: \"" + addr + "\"\n  apiKeys: [{name: alice, key: alices-key}]\n  adminApi: {read: {allowedKeys: [alice]}}\nbackends:\n  llamaSwap: {type: llamaSwap, baseUrl: \"http://127.0.0.1:1\"}\nmodels:\n  task: {backend: llamaSwap, candidates: [{model: m, loadIfNone: true}]}\n"
+	p := runProgram(t, "serve", writeConfig(t, src))
+	p.waitForLog(t, "msg=listening")
+	req, _ := http.NewRequest("GET", "http://"+addr+"/amf/logs?follow", nil)
+	req.Header.Set("Authorization", "Bearer alices-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	start := time.Now()
+	p.cmd.Process.Signal(syscall.SIGTERM)
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "event: end") {
+		t.Errorf("the stream ended without an end event:\n%s", body)
+	}
+	if err := p.cmd.Wait(); err != nil {
+		t.Errorf("exit: %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("shutdown took %v with a stream open", took)
 	}
 }

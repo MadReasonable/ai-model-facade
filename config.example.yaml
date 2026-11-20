@@ -49,15 +49,22 @@ server:
   # caller may use everything.
   # groups:
   #   family: [alice, bob]
-  # The admin API reads and changes the config over HTTP: read allows GET on
-  # /amf/config, -status and -backups; write allows editing the draft with
-  # PUT and DELETE on /amf/config, and POST /amf/config-apply, -load,
-  # -revert and -save, and POST /amf/reload, which reloads this file as
-  # SIGHUP does. A key in write may read too. Left out, no one may.
+  # The admin API reads and changes the config, and reads the log, over
+  # HTTP. read allows GET on /amf/config, -status, -backups and /amf/logs;
+  # write allows editing the draft with PUT and DELETE on /amf/config, and
+  # POST /amf/config-apply, -load, -revert and -save, and POST /amf/reload,
+  # which reloads this file as SIGHUP does. A key in write may read too.
+  # Left out, no one may.
+  # The gateway keeps its recent log lines in memory for /amf/logs; their
+  # level may be below logging.level, and maxBytes 0 keeps no history and
+  # only streams.
   # adminApi:
   #   read: {allowedGroups: [family]}
   #   write: {allowedKeys: [alice]}
   #   configBackups: 10               # backups a save keeps in backups/ beside this file
+  #   logs:
+  #     level: debug                  # default: logging.level
+  #     maxBytes: 1048576             # 1 MiB
   targetHeader: X-Gateway-Target    # response header naming the model that answered
   # The gateway keeps the conversations of Responses clients, which may send
   # only their new input and name the response they follow. Past maxBytes,

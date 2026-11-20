@@ -30,6 +30,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 	"github.com/MadReasonable/ai-model-facade/internal/gateway"
+	"github.com/MadReasonable/ai-model-facade/internal/loghub"
 )
 
 // about precedes the usage line, for someone who runs the binary without
@@ -193,6 +194,13 @@ func health(files configFiles, stdout, stderr io.Writer) error {
 	return gateway.CheckHealth(context.Background(), url)
 }
 
+// newLogger returns serve's logger: logs, the copy of the log for GET
+// /amf/logs, then stderr at level. The copy comes first, so a record is in
+// memory before a stderr write that stalls can hold it up.
+func newLogger(stderr io.Writer, level *slog.LevelVar, logs *loghub.Hub) *slog.Logger {
+	return slog.New(slog.NewMultiHandler(logs.Handler(), slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level})))
+}
+
 func serve(files configFiles, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -206,18 +214,22 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	}
 	var levelVar slog.LevelVar // reloadable
 	levelVar.Set(level)
-	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: &levelVar}))
+	logs := loghub.New()
+	logs.Configure(cfg)
+	log := newLogger(stderr, &levelVar, logs)
 	g, err := gateway.Build(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
 	live := gateway.NewLive(g, log, &levelVar, configfile.Files{Config: files.config, Secrets: files.secrets})
+	live.KeepLogs(logs)
 	srv := &http.Server{
 		Addr:              g.Config.Server.Listen,
 		Handler:           live,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	srv.RegisterOnShutdown(logs.EndStreams) // a log stream never ends by itself
 	// Listen before logging "listening", so the log line, and anything that
 	// waits for it, never comes before the port is open.
 	ln, err := net.Listen("tcp", srv.Addr)

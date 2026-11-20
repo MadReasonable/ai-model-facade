@@ -33,6 +33,7 @@ And a facade never causes a model load its candidate list didn't ask for, which 
 The commands: `serve`, `check`, `health` and `version`.
 `run` takes the arguments and output writers and returns the exit code, so the commands are tested in-process.
 `serve` binds the port, serves a `gateway.Live` with the config files (`configfile.Files`), and reloads it from them on `SIGHUP`.
+Its logger feeds two handlers through `slog.MultiHandler`: the log hub first, then the text handler on stderr, each at its own level.
 
 ### `internal/config`
 
@@ -41,6 +42,11 @@ Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME
 Backend and facade entries stay as nodes, because each type decodes its own schema.
 A `Document` is the config as its files hold it, before `${NAME}` is expanded, and is what the admin endpoints show and edit (`edit.go`): one tree with the secrets file merged in and every secret hidden, edited by path, and split back into the two files, each secret to the file that holds it.
 An edit never changes a `Document` in place, but returns a new one, so the running config's can be read while the draft is edited.
+
+### `internal/loghub`
+
+The gateway's copy of its log, for `GET /amf/logs`: an `slog.Handler` that keeps the newest records, each as a JSON and a text line, up to a byte limit, and passes each new one to the open streams through a bounded queue that drops rather than wait for a slow reader.
+`Live` configures it from each config it swaps in.
 
 ### `internal/configfile`
 

@@ -41,6 +41,9 @@ func (s *server) routeAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /amf/config-rename/{path...}", write("edit the config", s.renameConfig))
 	mux.HandleFunc("GET /amf/config-status", read(s.configStatus))
 	mux.HandleFunc("GET /amf/config-backups", read(s.configBackups))
+	if s.live.logs != nil {
+		mux.HandleFunc("GET /amf/logs", read(s.getLogs))
+	}
 	mux.HandleFunc("POST /amf/reload", write("reload the config", s.reloadConfig))
 	mux.HandleFunc("POST /amf/config-apply", write("apply the draft", s.applyConfig))
 	mux.HandleFunc("POST /amf/config-revert", write("revert the draft", s.revertConfig))

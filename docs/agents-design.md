@@ -212,6 +212,14 @@ Decided against: a param to choose whether candidates are returned, since they c
 `GET /v1/models` adds `current` as a non-standard field only with `api.openAi.addCurrent` on, because a gateway behind Open WebUI reports its facades' state to another gateway that way (Open WebUI).
 Decided: off by default, so a listing for an ordinary client answers from the config and contacts no backend.
 
+`GET /amf/logs` reads those lines over HTTP, from a copy the gateway keeps in memory (`internal/loghub`), so they can be watched without a shell on the host.
+The copy is an `slog.Handler` beside the stderr one, joined by `slog.MultiHandler`, so its level can be below stderr's, and first of the two, so a record is in memory before a stderr write that stalls can hold it up.
+Stderr stays blocking and stays the durable log: a writer that dropped lines when its reader fell behind would lose them from the only copy that lasts, and an operator who prefers dropping has Docker's `mode=non-blocking`.
+The copy is the opposite, an extra one: each stream gets a bounded queue, and a record that finds it full is dropped and counted, so a slow reader never holds up logging.
+The ring keeps the newest record even past `server.adminApi.logs.maxBytes`, because the last line logged is the one worth having when the gateway is stuck; `0` keeps no history, and the hub then takes records only while a stream is open, at the lowest level one asked for.
+A stream outlives a reload, since a long request finishes on the gateway that accepted it, so it checks the running config's `adminApi.read` with each line and each keep-alive, and ends once the caller is no longer listed.
+Decided against: a list of its own for the log; a key that may read the config is nearly always one trusted with the log, and a key in `write` could list itself in either.
+
 ## Backend state
 
 Selection is only as good as the state it reads, so state reads have their own rules, implemented once in `openaihttp.StateCache` and shared by every adapter.

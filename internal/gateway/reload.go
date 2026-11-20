@@ -11,6 +11,7 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
+	"github.com/MadReasonable/ai-model-facade/internal/loghub"
 )
 
 // reloadTimeout bounds a reload from the files, which reads backends' model
@@ -43,6 +44,9 @@ type Live struct {
 	draft   draftCopy
 	running provenance
 	saved   *config.Document
+	// logs is the gateway's copy of its log, for GET /amf/logs, configured
+	// from each config swapped in; nil leaves the endpoint out.
+	logs *loghub.Hub
 	// nextMu guards next.
 	nextMu sync.Mutex
 	// next is the reload from the files that hasn't read them yet, which a
@@ -96,6 +100,16 @@ func NewLive(g *Gateway, log *slog.Logger, level *slog.LevelVar, files ConfigFil
 	l.current.Store(&live{gateway: g, handler: l.handler(g)})
 	g.start(log)
 	return l
+}
+
+// KeepLogs serves logs, the copy of the log the logger feeds, on GET
+// /amf/logs, configured from the running config and from each one swapped
+// in after. Call it before serving.
+func (l *Live) KeepLogs(logs *loghub.Hub) {
+	l.logs = logs
+	g := l.Gateway()
+	logs.Configure(g.Config)
+	l.current.Store(&live{gateway: g, handler: l.handler(g)})
 }
 
 func (l *Live) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +223,9 @@ func (l *Live) apply(ctx context.Context, cfg *config.Config) (*Gateway, error) 
 		return nil, err
 	}
 	l.level.Set(level)
+	if l.logs != nil {
+		l.logs.Configure(cfg)
+	}
 	return g, nil
 }
 

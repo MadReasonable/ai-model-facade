@@ -77,13 +77,13 @@ func (s *Server) GroupsOf(name string) []string {
 	return s.groupsOf[name]
 }
 
-// AdminAPI configures the admin endpoints: the callers who may use them, and
-// the backups a save keeps. Unlike a facade's or a backend's list, a list
-// left out allows no one and turns off the endpoints it guards, since an
-// admin grant is never implicit.
+// AdminAPI configures the admin endpoints: the callers who may use them, the
+// backups a save keeps, and the copy of the log GET /amf/logs reads. Unlike
+// a facade's or a backend's list, a list left out allows no one and turns
+// off the endpoints it guards, since an admin grant is never implicit.
 type AdminAPI struct {
-	// Read guards the endpoints that show the config: GET /amf/config and
-	// its paths, /amf/config-status and /amf/config-backups.
+	// Read guards the endpoints that show the gateway: GET /amf/config and
+	// its paths, /amf/config-status, /amf/config-backups and /amf/logs.
 	Read Access `yaml:"read"`
 	// Write guards the endpoints that change the draft, what is running or
 	// the files: PUT and DELETE on /amf/config and its paths, and POST
@@ -92,6 +92,7 @@ type AdminAPI struct {
 	// ConfigBackups is how many backups of the config files a save keeps;
 	// nil means the default, KeepBackups.
 	ConfigBackups *int `yaml:"configBackups"`
+	Logs          Logs `yaml:"logs"`
 }
 
 // CanRead reports whether a caller with key name name and groups may use the
