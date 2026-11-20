@@ -187,6 +187,37 @@ func Load(path, secretsPath string) (*Config, error) {
 	return cfg, nil
 }
 
+// Listen reads server.listen from the config file at path, with ${NAME}
+// expanded, and nothing else, for the health command: it runs without the
+// secrets file, so it must not fail on what the rest of the config needs
+// that file for, such as an access list naming a key defined there.
+func Listen(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return "", fmt.Errorf("%s: config is empty", path)
+	}
+	server, _ := lookup(doc.Content[0], "server")
+	var listen *yaml.Node
+	if server != nil {
+		listen, _ = lookup(server, "listen")
+	}
+	if listen == nil || resolve(listen).Kind != yaml.ScalarNode || resolve(listen).Value == "" {
+		return "", fmt.Errorf("%s: server.listen is required", path)
+	}
+	value := *resolve(listen) // a copy, since expanding changes it
+	if err := expandEnv(&value, os.LookupEnv); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	return value.Value, nil
+}
+
 // Parse is Load without the file read or a secrets file, with an injectable
 // environment.
 func Parse(data []byte, lookupEnv func(string) (string, bool)) (*Config, error) {

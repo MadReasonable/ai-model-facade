@@ -177,12 +177,15 @@ func hashKey(fromStdin bool, stdin io.Reader, stdout io.Writer) error {
 
 // health checks a running gateway. It only parses the config to find
 // server.listen; it contacts no backend.
+// health reads only server.listen, since the image's health check passes
+// no secrets file, and a gateway that is up is healthy whatever else its
+// config holds.
 func health(files configFiles, stdout, stderr io.Writer) error {
-	cfg, err := config.Load(files.config, "")
+	listen, err := config.Listen(files.config)
 	if err != nil {
 		return err
 	}
-	url, err := gateway.HealthURL(cfg.Server.Listen)
+	url, err := gateway.HealthURL(listen)
 	if err != nil {
 		return err
 	}

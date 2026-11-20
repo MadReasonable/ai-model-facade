@@ -344,6 +344,26 @@ func TestHealth_ChecksTheGatewayAtServerListen(t *testing.T) {
 	}
 }
 
+// health reads only server.listen, so a config that needs its secrets file,
+// which the image's health check doesn't pass, or that is wrong elsewhere,
+// still gets checked at its address.
+func TestHealth_ReadsOnlyServerListen(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer up.Close()
+	t.Setenv("GATEWAY_LISTEN", strings.TrimPrefix(up.URL, "http://"))
+	src := "server:\n  listen: ${GATEWAY_LISTEN}\n  groups: {family: [lloyd]}\nbackends: {b: {type: nope}}\nmodels: {}\n"
+	if r := runArgs("health", writeConfig(t, src)); r.code != 0 {
+		t.Errorf("got %+v", r)
+	}
+	for _, bad := range []string{"server: {port: 1}\n", "server: [\n", ""} {
+		if r := runArgs("health", writeConfig(t, bad)); r.code != 1 || !strings.Contains(r.stderr, "config.yaml") {
+			t.Errorf("%q: got %+v", bad, r)
+		}
+	}
+}
+
 // freeAddr returns a loopback address nothing listens on.
 func freeAddr(t *testing.T) string {
 	t.Helper()

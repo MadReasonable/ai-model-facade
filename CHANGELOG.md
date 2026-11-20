@@ -14,6 +14,7 @@ Before 1.0, a minor release can change config keys.
 
 ### Fixed
 
+- `health`, which the Docker image's health check runs, reads only `server.listen`. It loaded the entire config without the secrets file, so a config whose groups or access lists name a key kept in the secrets file failed every health check, and the container showed as unhealthy while it served.
 - An Open WebUI reply now includes an outlet filter's rewrite of the finished message. Before, the reply could carry the message as it was before the rewrite. A stream carries a rewrite only if it adds to the end of what was already sent.
 
 ## [0.3.1] - 2026-11-16
