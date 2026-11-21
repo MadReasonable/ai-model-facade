@@ -227,6 +227,9 @@ type Status struct {
 	Live    LiveStatus                `json:"live"`
 	Files   []configfile.FileStatus   `json:"files"`
 	Backups *configfile.BackupsStatus `json:"backups,omitempty"`
+	// Restart lists the addresses the running config names that the
+	// gateway won't listen on until it restarts.
+	Restart []PendingRestart `json:"restart"`
 }
 
 // DraftStatus is where the draft came from, whether it was edited since,
@@ -267,6 +270,7 @@ func (l *Live) Status() Status {
 		files, backups := l.files.Status(saved, l.Gateway().Config.Server.AdminAPI.KeepBackups())
 		s.Files, s.Backups = files, &backups
 	}
+	s.Restart = l.Restart()
 	return s
 }
 

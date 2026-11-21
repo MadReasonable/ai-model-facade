@@ -1196,6 +1196,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
 | `adminApi.read` | The keys and groups that may read the config, its status, its backups and the log, with `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and `/amf/logs`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, through `PUT` and `DELETE` on `/amf/config` and `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and `POST /amf/reload`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
+| `adminApi.listen` | The address and port the admin endpoints and the [admin UI](#the-admin-ui) listen on, instead of `listen`, which then serves only the client APIs, `/health` and `/amf/models`. A client API can then face a wider network than the admin side, such as `listen` on `0.0.0.0` and this on `127.0.0.1`. It must differ from `listen`, and a change takes effect on restart; see [Reloading the config](#reloading-the-config). Default: the admin endpoints are served on `listen`. |
 | `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
@@ -1230,9 +1231,9 @@ All take these keys:
 | Key | Description |
 |-----|-------------|
 | `baseUrl` | The backend's address. Required. |
-| `allowedKeys`, `allowedGroups` | Which callers this backend may serve; a candidate on it is skipped for anyone else. Default: every caller. See [Access](#access). |
 | `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own key (or none). Default `false`. See [Keys](#keys). |
+| `allowedKeys`, `allowedGroups` | Which callers this backend may serve; a candidate on it is skipped for anyone else. Default: every caller. See [Access](#access). |
 | `keyMap` | The key to send instead, on a caller's behalf, by the caller's key name or group; it takes precedence over `passthroughAuth` and `apiKey`. Optional. See [Keys](#keys). |
 | `stateCacheSeconds` | How long to cache the list of loaded models. Default `0`, which asks once per request: a request reads each backend's state once, even for several facades in a `/amf/models` listing, or when it loops back to the gateway through Open WebUI. Concurrent requests share one in-flight check either way. |
 | `stateTimeoutSeconds` | Timeout for the state and model-list calls. Default `10`. |
@@ -1415,9 +1416,12 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /amf/config-revert` | Replaces the draft with the running config. For `server.adminApi.write`. |
 | `POST /amf/config-save` | Writes the running config to its files, after a backup. For `server.adminApi.write`. |
 | `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, into the running config and the draft; see [Reloading the config](#reloading-the-config). For `server.adminApi.write`. |
-| `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, and whether each file can be saved. For `server.adminApi.read`. |
+| `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, whether each file can be saved, which addresses wait for a restart, and, in `caller`, the caller's key name and whether it may change the config. For `server.adminApi.read`. |
+| `GET /amf/config-anchors` | Each anchor in the draft, or with `?live` in the running config, with where it is defined and the paths that read it, by alias or by merge. For `server.adminApi.read`; see [Editing the config](#editing-the-config). |
+| `GET /amf/schema` | Every key the config takes, with its type, default, allowed values and description, for the config and for an entry of each backend type and facade type. For `server.adminApi.read`. |
 | `GET /amf/config-backups` | The backups of the files, newest first. For `server.adminApi.read`. |
 | `GET /amf/logs` | The gateway's recent log lines, as JSON lines or stderr's text, and with `?follow` each new one as it is logged. For `server.adminApi.read`; see [Reading the log](#reading-the-log). |
+| `GET /amf/ui/` | The [admin UI](#the-admin-ui). Needs no key to load, and signs in to the endpoints above; served while `server.adminApi` lists a reader or a writer. |
 | `GET /health` | `{"status":"ok"}` while the gateway is up. Needs no API key and doesn't contact any backend. |
 
 Model objects on `/v1/models` have the standard OpenAI fields, and also `current` if you turn on [`api.openAi.addCurrent`](#api); `api.anthropic.addCurrent` does the same for Anthropic's list.
@@ -1498,7 +1502,15 @@ On Ctrl+C or `SIGTERM`, `serve` stops accepting requests and gives those in flig
 `serve` reloads its config without a restart, from the same files it started with: the config and the [secrets file](#secrets-file), but not the environment, which is fixed when the gateway starts.
 The new config is loaded and validated in full first, and replaces the running one only if it has no errors; otherwise the running config stays.
 Requests already in flight, including streams, finish on the config that accepted them.
-Everything can change on reload except `server.listen`, which needs a restart; a reload that changes it is rejected.
+Everything can change on reload, but a changed `server.listen` or `server.adminApi.listen` takes effect only on a restart, since those addresses are already bound: the reload takes the rest, the gateway goes on listening where it started, and the log line `restart needed` names the address waiting.
+`GET /amf/config-status` lists each such address in `restart`, with where the gateway listens, what the running config says, and whether the files hold it yet, which is when a restart takes it:
+
+```json
+"restart": [{"key": "server.listen", "listening": "127.0.0.1:8088", "running": "0.0.0.0:8088", "saved": true}]
+```
+
+Once the files hold a new `server.listen`, `health`, and so a Docker health check, probes that address, and reports the gateway unhealthy until it restarts.
+An apply takes a changed address the same way, and says so in its `notes`, as a reload does.
 Run `check` first to see what a reload would load.
 
 A `SIGHUP` reloads it and logs the outcome:
@@ -1586,6 +1598,11 @@ JSON has no anchors or comments, so a JSON `PUT` keeps each part of its body tha
 A `GET`'s JSON sent back with one value changed changes only that value, and a list item that moved is matched where it was.
 A key renamed in a `PUT`'s body is a new entry, written without the old one's aliases and comments, so rename a key with `config-rename`, below.
 A key a merge brings can be given a value of its own beside the merge, but not left out, since the merge would still bring it; that is `409`.
+`GET /amf/config-anchors` lists each anchor with the paths that read it, in the paths `GET` shows, so a client can tell which values it can only edit at their anchor:
+
+```json
+{"anchors":[{"name":"noThinking","path":["vars","noThinking"],"users":[{"path":["models","assistant","params","openAiChat"],"via":"alias"}]}]}
+```
 
 `POST /amf/config-rename/<path>?to=<name>` renames a key, such as a facade, a backend or a keyMap entry, in its place: the value keeps its comments, anchors and aliases, and a secret stays in the file that holds it.
 It is also the way to rename a keyMap entry, whose key a `PUT` can't send back as `<redacted>` under a new name.
@@ -1662,6 +1679,44 @@ A stream ends with an `event: end` that gives the reason: when a reload or an ap
 
 With `server.adminApi.logs.maxBytes: 0` the gateway keeps no history: a read answers empty, with `X-Gateway-Logs: streaming-only`, and `?follow` sends only new lines.
 It then takes no line at all while no stream is open, so logging costs what it would without the endpoint.
+
+### The admin UI
+
+The gateway serves a page for editing its config and watching its log from a browser, at `/amf/ui/` on the address the admin endpoints listen on:
+
+```
+http://127.0.0.1:8088/amf/ui/
+```
+
+It is built into the binary, with nothing to install or build, and does everything through the admin endpoints above, so it can do what a key can do over HTTP and no more.
+Sign in with a key that [`server.adminApi`](#server) lists: a key in `write` edits, applies and saves; a key only in `read` sees everything with every control off.
+The page itself holds no secret, so it loads without a key, and only while `server.adminApi` lists a reader or a writer; otherwise it is `404`, as the endpoints are.
+The key stays in the browser tab, or with **Stay signed in** in the browser until **Sign out**, and is sent as a bearer key, never as a cookie, so no other site can make the browser use it.
+
+The page shows the config as a tree on the left, Server, Backends and Models, with each facade's candidates under it, and the sheet of what is selected on the right:
+
+- **The Server sheet** holds what applies to the gateway as a whole: its address, the client keys and groups, who may use the admin API, logging, the files and their backups, the client APIs and the Responses conversations. A client's name and key can be edited in place, and the button beside each key makes a new one; a key is hashed in the browser and only its hash is sent, so the gateway never holds it, and the page keeps it until the draft is applied, to be given to its client.
+Every field that holds a key shows it as dots, with a button at its end that shows it.
+A group's name is edited in place too, and a rename of either leaves the places that name the old name as they are, which the gateway refuses to apply: a note at the bottom of the card lists every name used that no key or group has, and, for one renamed on the page, offers to give every place the new name.
+- **Backends** and **Models** list their entries, to add, delete, rename and reorder; the order of the facades is the order of the model lists clients read.
+- **A backend, facade or candidate** has a sheet of its keys, built from [`GET /amf/schema`](#api-reference), each with its default and what it does. A facade's sheet lists its candidates in order, with where a request would go now, and a candidate's state on its backend; the tree marks the same with a dot.
+
+Each change goes into the draft as a `PUT` does, half a second after typing in a field stops, on Enter, or when the field is left, and the actions below first send anything not sent yet, and the bar at the top says how the draft, the running config and the files compare, as `/amf/config-status` does.
+A **restart needed** pill means the running config names an address the gateway doesn't listen on yet; it, and **can't save**, show their details on hover or on a click.
+**Diff** shows what applying the draft would change, **Apply** puts it into service, **Revert** throws its edits away, and **Save** writes the running config to the files; the **...** menu loads the files on disk or a backup into the draft, or reloads the files as `SIGHUP` does.
+See [Editing the config](#editing-the-config) for what each step does.
+
+A value shared through an anchor is marked with the anchor's name, and stays read-only on its users' sheets until it is given a value of its own; a key a merge brings is marked too, and setting it overrides the merge for that entry alone.
+**&vars**, beside each sheet's **YAML** view, edits `vars`, where the anchors are defined, beside a list of the values that read each one.
+**YAML** edits the selected node as the files hold it, comments and anchors included.
+
+**Log** opens the gateway's log, followed as it grows, as `GET /amf/logs?follow` reads it, filtered by level and text: below the sheet at a height it can be dragged to, or in place of it.
+
+Each selection is in the page's address, so the browser's back and forward buttons step through what was shown, and a link or a reload opens it again.
+On a phone, the tree slides in from the left with the button at the top left and closes once something is picked, and the log takes the entire screen.
+The bar's buttons and the sheet's name row move out of the way as the sheet scrolls down, and back as soon as it scrolls up.
+
+To keep the admin side off a network the client APIs face, give it an address of its own with [`server.adminApi.listen`](#server): the admin endpoints and the page then answer there and nowhere else.
 
 ## Upgrading
 

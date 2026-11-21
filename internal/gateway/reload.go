@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,9 @@ type Live struct {
 	draft   draftCopy
 	running provenance
 	saved   *config.Document
+	// listening are the addresses the gateway listens on: those of the
+	// config it started with, which only a restart changes.
+	listening addresses
 	// logs is the gateway's copy of its log, for GET /amf/logs, configured
 	// from each config swapped in; nil leaves the endpoint out.
 	logs *loghub.Hub
@@ -57,6 +61,18 @@ type Live struct {
 type live struct {
 	gateway *Gateway
 	handler http.Handler
+	// admin serves server.adminApi.listen, when the gateway listens there;
+	// nil otherwise.
+	admin http.Handler
+}
+
+// addresses are what a config says the gateway listens on.
+type addresses struct {
+	main, admin string // server.listen, server.adminApi.listen
+}
+
+func addressesOf(cfg *config.Config) addresses {
+	return addresses{cfg.Server.Listen, cfg.Server.AdminAPI.Listen}
 }
 
 // fileReload is one reload from the files, shared by every request for one
@@ -96,8 +112,8 @@ type ConfigFiles interface {
 // hold, and is the draft's first content.
 func NewLive(g *Gateway, log *slog.Logger, level *slog.LevelVar, files ConfigFiles) *Live {
 	fromFiles := provenance{source: sourceFiles}
-	l := &Live{log: log, level: level, files: files, saved: g.Config.Source, draft: draftCopy{doc: g.Config.Source.Copy(), provenance: fromFiles}, running: fromFiles}
-	l.current.Store(&live{gateway: g, handler: l.handler(g)})
+	l := &Live{log: log, level: level, files: files, saved: g.Config.Source, draft: draftCopy{doc: g.Config.Source.Copy(), provenance: fromFiles}, running: fromFiles, listening: addressesOf(g.Config)}
+	l.current.Store(l.serving(g))
 	g.start(log)
 	return l
 }
@@ -109,11 +125,20 @@ func (l *Live) KeepLogs(logs *loghub.Hub) {
 	l.logs = logs
 	g := l.Gateway()
 	logs.Configure(g.Config)
-	l.current.Store(&live{gateway: g, handler: l.handler(g)})
+	l.current.Store(l.serving(g))
 }
 
+// ServeHTTP serves server.listen.
 func (l *Live) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.current.Load().handler.ServeHTTP(w, r)
+}
+
+// Admin serves server.adminApi.listen, which the gateway listens on only if
+// the config it started with sets it.
+func (l *Live) Admin() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.current.Load().admin.ServeHTTP(w, r)
+	})
 }
 
 // Gateway returns the gateway currently serving requests.
@@ -121,14 +146,23 @@ func (l *Live) Gateway() *Gateway {
 	return l.current.Load().gateway
 }
 
-func (l *Live) handler(g *Gateway) http.Handler {
-	return g.handler(l.log, l)
+// serving returns what serves g: on server.listen, and on
+// server.adminApi.listen if the gateway listens there. The split follows
+// the addresses listened on, not g's config, which may name others until
+// a restart.
+func (l *Live) serving(g *Gateway) *live {
+	if l.listening.admin == "" {
+		return &live{gateway: g, handler: g.handler(l.log, l, allEndpoints)}
+	}
+	return &live{gateway: g, handler: g.handler(l.log, l, clientEndpoints), admin: g.handler(l.log, l, adminEndpoints)}
 }
 
 // Reload builds a gateway from cfg and, only if that fully succeeds, swaps
 // it in, with the Responses conversations of the one it replaces. On any
-// error the running gateway is untouched. server.listen can't change without
-// a restart, because the port is already bound.
+// error the running gateway is untouched. A changed server.listen or
+// server.adminApi.listen is taken, but the gateway goes on listening where
+// it started until a restart, since those ports are bound; Restart reports
+// what is pending.
 func (l *Live) Reload(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -232,19 +266,69 @@ func (l *Live) apply(ctx context.Context, cfg *config.Config) (*Gateway, error) 
 // swap is Reload for a caller that holds l.mu.
 func (l *Live) swap(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 	old := l.current.Load().gateway
-	if cfg.Server.Listen != old.Config.Server.Listen {
-		return nil, fmt.Errorf("server.listen changed from '%s' to '%s'; restart to apply", old.Config.Server.Listen, cfg.Server.Listen)
-	}
 	g, err := build(ctx, cfg, l.log, old.history)
 	if err != nil {
 		return nil, err
 	}
 	g.history.SetLimits(historyLimits(cfg))
-	l.current.Store(&live{gateway: g, handler: l.handler(g)})
+	l.current.Store(l.serving(g))
 	g.start(l.log)
 	old.stop()
 	old.closeIdleConnections()
+	for _, p := range pendingRestarts(l.listening, addressesOf(cfg)) {
+		l.log.Warn("restart needed", "key", p.Key, "listening", p.Listening, "running", p.Running)
+	}
 	return g, nil
+}
+
+// PendingRestart is an address the running config names that the gateway
+// doesn't listen on yet, because it started with another.
+type PendingRestart struct {
+	Key       string `json:"key"`       // server.listen or server.adminApi.listen
+	Listening string `json:"listening"` // where the gateway listens, "" for nowhere
+	Running   string `json:"running"`   // what the running config says, "" for nowhere
+	// Saved is whether the files hold Running too, so a restart takes it,
+	// and the health check probes it already.
+	Saved bool `json:"saved"`
+}
+
+func pendingRestarts(listening, running addresses) []PendingRestart {
+	var out []PendingRestart
+	if running.main != listening.main {
+		out = append(out, PendingRestart{Key: "server.listen", Listening: listening.main, Running: running.main})
+	}
+	if running.admin != listening.admin {
+		out = append(out, PendingRestart{Key: "server.adminApi.listen", Listening: listening.admin, Running: running.admin})
+	}
+	return out
+}
+
+// Restart returns what a restart would change of where the gateway
+// listens, and whether the files hold it yet; none if nothing.
+func (l *Live) Restart() []PendingRestart {
+	pending := pendingRestarts(l.listening, addressesOf(l.Gateway().Config))
+	if len(pending) == 0 {
+		return []PendingRestart{}
+	}
+	l.stateMu.Lock()
+	_, running := l.copies()
+	saved := l.saved
+	l.stateMu.Unlock()
+	files := addresses{}
+	if running.Saved {
+		files = addressesOf(l.Gateway().Config)
+	} else if cfg, err := saved.Parse(os.LookupEnv); err == nil {
+		files = addressesOf(cfg)
+	}
+	for i := range pending {
+		p := &pending[i]
+		if p.Key == "server.listen" {
+			p.Saved = files.main == p.Running
+		} else {
+			p.Saved = files.admin == p.Running
+		}
+	}
+	return pending
 }
 
 // closeIdleConnections releases pooled connections a replaced gateway no

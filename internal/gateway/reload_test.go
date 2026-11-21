@@ -86,9 +86,14 @@ func TestReload_SwapsInOnlyAValidConfig(t *testing.T) {
 	if err != nil || len(g.Warnings) != 1 || !strings.Contains(g.Warnings[0].Error(), "not-a-model") || facadeIDs(t, gw) != `"task"` {
 		t.Errorf("only warnings: %v, warnings %v, facades %s", err, g, facadeIDs(t, gw))
 	}
+	// A changed address is taken, but the gateway listens where it started
+	// until a restart, and says so.
 	moved := edit(t, renamed, "listen: :0", "listen: :9999")
-	if _, err := live.Reload(context.Background(), parseConfig(t, moved, vars)); err == nil || !strings.Contains(err.Error(), "restart") || live.Gateway().Config.Server.Listen != ":0" {
-		t.Errorf("listen change: %v, listen %s", err, live.Gateway().Config.Server.Listen)
+	if _, err := live.Reload(context.Background(), parseConfig(t, moved, vars)); err != nil || facadeIDs(t, gw) != `"renamed"` {
+		t.Errorf("listen change: %v, facades %s", err, facadeIDs(t, gw))
+	}
+	if got := live.Restart(); len(got) != 1 || got[0] != (PendingRestart{Key: "server.listen", Listening: ":0", Running: ":9999"}) {
+		t.Errorf("restart: %+v", got)
 	}
 }
 

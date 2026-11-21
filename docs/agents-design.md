@@ -139,7 +139,8 @@ That put model-list calls inside the refreshes that requests wait on, and only o
 
 `SIGHUP` builds a complete new gateway from the file and swaps it in only if that succeeds (`gateway.Live`), so a broken edit leaves the running gateway as it was.
 Requests already in flight finish on the gateway that accepted them.
-A changed `server.listen` is rejected, because the port is already bound.
+A changed `server.listen` or `server.adminApi.listen` is taken, but the gateway goes on listening on the addresses it started with, which are bound, and decides which endpoints each serves from those (`Live.listening`); `Live.Restart` reports what a restart would change, for `/amf/config-status`.
+Decided against: refusing the change, as the gateway did at first. Once the admin endpoints edit the config, a refused address can't reach the files at all, since a save writes the running config: the only way to change it was an edit on the host.
 
 `POST /amf/reload` reloads from the files as `SIGHUP` does, through one path: `Live.ReloadFiles`, given at `NewLive` the files and the log level a reload sets.
 Reading the files, building, swapping and setting the level run under one lock, so two reloads can't read the files in one order and swap in the other, which would leave the older config running.
@@ -687,6 +688,31 @@ A few rules guard the byte-level design:
 - **Everything buffered is capped:** request bodies at 100 MiB (413 beyond), backend response bodies at 100 MiB, SSE lines at 1 MiB and events at 8 MiB. A client body must arrive within 2 minutes.
 - **A started response that goes silent is ended after `stallTimeoutSeconds`, 600 s by default.** `requestTimeoutSeconds` ends at the headers, so without it a backend that stops mid-response without closing would hold the request and its client forever. Only time spent waiting in a body read counts (`openaihttp`'s `stallBody`), so a client slow to take a stream doesn't end it. Open WebUI's replies arrive by polling, each poll a complete response, so the adapter applies the limit to the time since the message last changed, and stops the task. Decided: on by default, unlike the other timeouts, whose right value depends on the network or the load time; ten minutes without a byte mid-response is long for any backend, and a limit left off would leave the hang in place for everyone who hasn't set it.
 - **SSE is parsed per spec.** An event left unterminated at the end of a stream is discarded, and a stream that ends without `[DONE]` is an error that includes the last line, since llama-server may write a bare JSON error before closing.
+
+## Admin UI
+
+The admin UI is a page for editing the config and following the log, served at `/amf/ui/` from files built into the binary (`internal/webui`).
+It does everything through the admin endpoints, so it can do nothing a key can't do over HTTP, and the endpoints stay the one interface to test and keep compatible.
+
+Decided: no build step and no framework of the usual kind.
+The UI's modules are served as written, with Preact and htm vendored unchanged from npm, about 17 KB, and an import map for the one bare import between them.
+Decided against: React with a bundler, which would bring a Node toolchain, a build step in CI and release, and hundreds of packages into a project whose Go side allows three dependencies; and jQuery, which papers over browser differences that modern browsers no longer have.
+
+Decided: the page signs in with a key in a form and sends it as a bearer key, kept in `sessionStorage`, or `localStorage` with "stay signed in".
+Decided against: HTTP Basic auth, as llama-swap uses, and cookies.
+A browser sends either by itself, to a request any site makes, so every write endpoint would need origin checks against cross-site requests, and Basic auth can't be signed out of.
+Its one gain, that `EventSource` can follow the log, costs a few lines without it: the page reads `?follow` with `fetch` and parses the events.
+The page is served under a Content-Security-Policy that runs only the gateway's own scripts and the import map, by its hash, and sets text, never HTML, since log lines and config values come from clients and admins.
+
+Decided: the forms come from the config's own structs.
+`GET /amf/schema` is made by reflection over the structs `DecodeStrict` decodes into, with a `doc` tag for each key's description and a `schema` tag for its default, allowed values and references, so the schema can't list a key the gateway refuses or leave one out, and a test fails on a key without a description.
+The backend types are one table, `gateway.backendTypes`, that both building a backend and the schema read.
+
+Decided: a sheet edits a node by sending all of it back as JSON, with the `ETag` it read, and the edit endpoints keep each part sent unchanged as the file holds it, aliases, merges and comments included (Config loading).
+Values shared through an anchor are read-only on their users' sheets until the user asks for a value of its own, since an edit there would silently stop sharing it; `GET /amf/config-anchors` says which values those are.
+
+Decided: `server.adminApi.listen` moves the admin endpoints and the page together.
+A port for the page alone would protect nothing, since the endpoints it calls would still answer on `server.listen`.
 
 ## Implementation choices
 

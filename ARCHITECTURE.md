@@ -42,6 +42,7 @@ Turns the YAML file into a `Config`: parse to a `yaml.Node` tree, expand `${NAME
 Backend and facade entries stay as nodes, because each type decodes its own schema.
 A `Document` is the config as its files hold it, before `${NAME}` is expanded, and is what the admin endpoints show and edit (`edit.go`): one tree with the secrets file merged in and every secret hidden, edited by path, and split back into the two files, each secret to the file that holds it.
 An edit never changes a `Document` in place, but returns a new one, so the running config's can be read while the draft is edited.
+`schema.go` describes the config for `GET /amf/schema` from the same structs, by reflection, with each key's `doc` and `schema` tags.
 
 ### `internal/loghub`
 
@@ -52,6 +53,12 @@ The gateway's copy of its log, for `GET /amf/logs`: an `slog.Handler` that keeps
 
 Writes the running config to its files for a save: each changed file renamed into place, after a copy of both files into a backup folder in `backups/`, from which a save that fails partway puts the files back.
 It also reports whether each file can be saved, and lists and reads the backups.
+
+### `internal/webui`
+
+The admin UI: a page and its JavaScript modules in `static/`, built into the binary with `embed` and served under `/amf/ui/` with a Content-Security-Policy.
+There is no build step: the modules are served as written, and Preact and htm, the only third-party code, are vendored unchanged in `static/vendor`.
+The page does everything through the admin endpoints.
 
 ### `internal/protocols`
 
@@ -130,7 +137,7 @@ One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged; `llamaswap` and `llamaserver` also forward a token count, and `localai` tokenizes text for one.
 `anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, removes what the gateway made that only Claude may write, and adds the MCP beta header where a request needs it.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
-A new kind of backend is a new package here, built on `openaihttp`, plus one case in `gateway.newBackend`.
+A new kind of backend is a new package here, built on `openaihttp`, plus one entry in `gateway.backendTypes`.
 
 ### `internal/testkit`
 
@@ -143,6 +150,8 @@ Fake llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI an
 - A new rule about which model wins: the selector, or a new facade type if it isn't load-aware selection.
 - A new rule about how backend state is read or reused: `openaihttp.StateCache`.
 - A new endpoint or response header: `internal/gateway/server.go`, or `family.go` for a family's own endpoints.
+- A new config key: its struct, with a `doc` tag and, where it has one, a `schema` tag, which `GET /amf/schema` and the admin UI read.
+- A change to the admin UI: `internal/webui/static`.
 - A new protocol: a descriptor in `internal/protocols`, a module in `internal/translate`, and a translator for each pair it joins.
 - A field or tool that crosses a translation differently: the pair's file, or the protocol's module if every pair from or to it shares the change.
 - A new step every request takes after selection: `internal/pipeline`.

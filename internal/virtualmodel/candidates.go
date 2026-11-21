@@ -22,29 +22,29 @@ import (
 )
 
 type candidatesConfig struct {
-	Type        string      `yaml:"type"`
-	Backend     string      `yaml:"backend"`
-	Description string      `yaml:"description"`
-	Protocols   []string    `yaml:"protocols"` // default: every protocol
-	Params      yaml.Node   `yaml:"params"`
-	Candidates  []yaml.Node `yaml:"candidates"`
+	Type        string      `yaml:"type" doc:"The facade type; candidates is the only one." schema:"default=candidates"`
+	Backend     string      `yaml:"backend" doc:"The backend of every candidate that doesn't name its own. Required unless every candidate names one." schema:"ref=backends"`
+	Description string      `yaml:"description" doc:"Shown in the model lists and /amf/models."`
+	Protocols   []string    `yaml:"protocols" doc:"The protocols this facade serves; a request in another gets 404. Naming one a candidate's backend can't accept is an error. Left out, all of them." schema:"ref=protocols"` // default: every protocol
+	Params      yaml.Node   `yaml:"params" doc:"Merge patches applied to every request for this facade, before the winning candidate's: in all for every protocol, or in a block named for the protocol the backend is sent." schema:"kind=params"`
+	Candidates  []yaml.Node `yaml:"candidates" doc:"The models to choose from, in order of preference: the first loaded wins, else the first loading, else the first with loadIfNone." schema:"required"`
 
 	// Access says who may ask for the facade.
 	config.Access `yaml:",inline"`
 }
 
 type candidateConfig struct {
-	Model      string    `yaml:"model"`
-	Backend    string    `yaml:"backend"` // default: the virtual model's backend
-	LoadIfNone bool      `yaml:"loadIfNone"`
-	Params     yaml.Node `yaml:"params"`
+	Model      string    `yaml:"model" doc:"A model ID or alias the backend lists, or a pattern using *, ? or [...]." schema:"required"`
+	Backend    string    `yaml:"backend" doc:"The backend this candidate is on. Left out, the facade's." schema:"ref=backends"` // default: the virtual model's backend
+	LoadIfNone bool      `yaml:"loadIfNone" doc:"If no candidate is loaded or loading, the first loadIfNone candidate is used, and its backend loads it. Must be an exact ID."`
+	Params     yaml.Node `yaml:"params" doc:"Merge patches applied after the facade's when this candidate wins." schema:"kind=params"`
 	// ResponsesHistory says who keeps the Responses conversations the
 	// candidate serves: the gateway (default) or the service.
-	ResponsesHistory string `yaml:"responsesHistory"`
+	ResponsesHistory string `yaml:"responsesHistory" doc:"Who keeps the Responses conversations this candidate serves: the gateway, or the service, on a backend that keeps them, openAi." schema:"enum=gateway|service,default=gateway"`
 	// UseProtocol is the protocol the backend receives for this candidate, one
 	// it accepts; default: the client's, else the first it can be translated
 	// to.
-	UseProtocol string `yaml:"useProtocol"`
+	UseProtocol string `yaml:"useProtocol" doc:"The protocol the backend is sent for this candidate, one it accepts, such as openAiResponses for a model OpenAI serves only through Responses. Left out, the client's own, else the first the request can be translated to." schema:"ref=protocols"`
 }
 
 // candidates is the default type: route params, then the first eligible

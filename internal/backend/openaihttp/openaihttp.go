@@ -33,25 +33,25 @@ const maxResponseBytes = 100 << 20
 // Config holds the keys every adapter built on Client accepts. Adapters embed
 // it with `yaml:",inline"` next to their own `type`.
 type Config struct {
+	BaseURL         string `yaml:"baseUrl" doc:"The backend's address." schema:"required"`
+	APIKey          string `yaml:"apiKey" doc:"Sent to the backend as a bearer key on the gateway's own calls, and on a caller's requests unless a keyMap entry exists for the caller, or passthroughAuth is on." schema:"secret"` // startup and state calls; a caller's too unless keyMap or passthroughAuth
+	PassthroughAuth bool   `yaml:"passthroughAuth" doc:"Completion requests carry the client's own key, or none, instead of apiKey."`                                                                                              // chat requests carry the client's own Authorization
 	// Access says which callers may use the backend; the gateway skips its
 	// candidates for anyone else.
 	config.Access         `yaml:",inline"`
-	BaseURL               string  `yaml:"baseUrl"`
-	APIKey                string  `yaml:"apiKey"`          // startup and state calls; chat too unless passthroughAuth
-	PassthroughAuth       bool    `yaml:"passthroughAuth"` // chat requests carry the client's own Authorization
-	StateCacheSeconds     float64 `yaml:"stateCacheSeconds"`
-	StateTimeoutSeconds   float64 `yaml:"stateTimeoutSeconds"` // state and model-list calls; default 10
-	LoopsBack             bool    `yaml:"loopsBack"`           // a state read can reach this gateway's /v1/models
-	ListRetrySeconds      float64 `yaml:"listRetrySeconds"`    // asking again for the models of a backend that couldn't be listed; default 30
-	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds"`
-	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds"` // until response headers arrive
+	StateCacheSeconds     float64 `yaml:"stateCacheSeconds" doc:"How long to reuse the list of loaded models. 0 reads it once per request; concurrent requests share one read either way." schema:"default=0,min=0,unit=seconds"`
+	StateTimeoutSeconds   float64 `yaml:"stateTimeoutSeconds" doc:"Timeout for the state and model-list calls." schema:"default=10,min=0,unit=seconds"`                                                                                                                                                 // state and model-list calls; default 10
+	LoopsBack             bool    `yaml:"loopsBack" doc:"Reading this backend's state can lead back to this gateway's /v1/models, as reading Open WebUI can when this gateway is one of its connections. /v1/models then doesn't wait for a read already in flight, which would be waiting on itself."` // a state read can reach this gateway's /v1/models
+	ListRetrySeconds      float64 `yaml:"listRetrySeconds" doc:"If the backend couldn't be listed at startup, how often to ask it for its models again." schema:"default=30,min=0,unit=seconds"`                                                                                                        // asking again for the models of a backend that couldn't be listed; default 30
+	ConnectTimeoutSeconds float64 `yaml:"connectTimeoutSeconds" doc:"Connection timeout; 0 sets no limit." schema:"default=0,min=0,unit=seconds"`
+	RequestTimeoutSeconds float64 `yaml:"requestTimeoutSeconds" doc:"How long to wait for the backend to start responding; allow for a cold load of a loadIfNone candidate. 0 sets no limit." schema:"default=0,min=0,unit=seconds"` // until response headers arrive
 	// StallTimeoutSeconds limits how long a response may go without a byte
 	// once its headers have arrived; nil is the default, 600, and 0 no limit.
-	StallTimeoutSeconds *float64 `yaml:"stallTimeoutSeconds"`
+	StallTimeoutSeconds *float64 `yaml:"stallTimeoutSeconds" doc:"How long a response that has started may go without the backend sending anything before the gateway ends it. On openWebUi, the time since the reply last changed. 0 sets no limit." schema:"default=600,min=0,unit=seconds"`
 
 	// KeyMap holds, by key name or group name, the key sent on a caller's
 	// behalf in place of passthroughAuth's or apiKey's; see mappedKey.
-	KeyMap config.KeyMap `yaml:"keyMap"`
+	KeyMap config.KeyMap `yaml:"keyMap" doc:"The key to send on a caller's behalf, by the caller's key name or group, in place of passthroughAuth's or apiKey's." schema:"ref=names"`
 }
 
 type Client struct {
@@ -216,12 +216,16 @@ func NewListedBackend(entry config.Entry, list func(ctx context.Context) ([]back
 	return &Backend{Client: client, State: state}, listed, nil
 }
 
+// EntryConfig is the entry of a backend that takes Config's keys and its
+// type, and nothing else.
+type EntryConfig struct {
+	Type   string `yaml:"type" doc:"The adapter: which server this is, which decides how the gateway reads its state." schema:"required"`
+	Config `yaml:",inline"`
+}
+
 // decodeEntry decodes a config entry that takes Config's keys and its type.
 func decodeEntry(entry config.Entry) (Config, error) {
-	var c struct {
-		Type   string `yaml:"type"`
-		Config `yaml:",inline"`
-	}
+	var c EntryConfig
 	err := config.DecodeStrict(entry.Node, &c)
 	return c.Config, err
 }

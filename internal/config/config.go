@@ -18,12 +18,12 @@ import (
 )
 
 type Config struct {
-	Server   Server    `yaml:"server"`
-	Logging  Logging   `yaml:"logging"`
-	API      API       `yaml:"api"`
-	Vars     yaml.Node `yaml:"vars"` // ignored; a home for anchors
-	Backends yaml.Node `yaml:"backends"`
-	Models   yaml.Node `yaml:"models"`
+	Server   Server    `yaml:"server" doc:"How the gateway listens, which keys it accepts, and who may use the admin API."`
+	Logging  Logging   `yaml:"logging" doc:"What the gateway logs to stderr."`
+	API      API       `yaml:"api" doc:"What the gateway presents to the clients of each API family."`
+	Vars     yaml.Node `yaml:"vars" doc:"YAML anchors that entries use explicitly with an alias or a merge; the gateway reads nothing here itself." schema:"kind=anchors"` // ignored; a home for anchors
+	Backends yaml.Node `yaml:"backends" doc:"The servers that run models, each named, with type selecting its adapter." schema:"kind=backends"`
+	Models   yaml.Node `yaml:"models" doc:"The facades: model names that exist only here, each choosing a real model from its candidates." schema:"kind=models"`
 	// Notes are what loading found that is likely a mistake but has a defined
 	// meaning, such as one key listed under two names. They fail neither serve
 	// nor check: serve logs them, check prints them.
@@ -34,16 +34,16 @@ type Config struct {
 }
 
 type Server struct {
-	Listen       string    `yaml:"listen"`
-	APIKeys      []APIKey  `yaml:"apiKeys"`
-	UnknownKeys  string    `yaml:"unknownKeys"` // reject (default) | allow
-	TargetHeader string    `yaml:"targetHeader"`
-	Responses    Responses `yaml:"responses"`
+	Listen       string    `yaml:"listen" doc:"Address and port to listen on. 127.0.0.1 accepts local connections only; 0.0.0.0 or a specific IP accepts them from other machines, so set apiKeys too. A change takes effect on restart." schema:"required"`
+	APIKeys      []APIKey  `yaml:"apiKeys" doc:"The keys clients may send, each with a name that appears in the log and in access lists. Left out, every request is accepted."`
+	UnknownKeys  string    `yaml:"unknownKeys" doc:"What happens to a key not in apiKeys: reject answers 401; allow accepts it and logs it as unknown with a fingerprint." schema:"enum=reject|allow,default=reject"` // reject (default) | allow
+	TargetHeader string    `yaml:"targetHeader" doc:"The response header that names the model that answered." schema:"default=X-Gateway-Target"`
+	Responses    Responses `yaml:"responses" doc:"Limits on the Responses conversations the gateway keeps for clients that send previous_response_id."`
 	// Groups names sets of keys, by the names of their entries in APIKeys.
-	Groups map[string][]string `yaml:"groups"`
+	Groups map[string][]string `yaml:"groups" doc:"Named groups of keys, each a list of names from apiKeys, for access lists. all and unknown are built in." schema:"ref=keys"`
 	// AdminAPI configures the endpoints that read and change the config and
 	// read the log.
-	AdminAPI AdminAPI `yaml:"adminApi"`
+	AdminAPI AdminAPI `yaml:"adminApi" doc:"Who may read and change the config and read the log over /amf, and where those endpoints listen."`
 	// keys finds a listed key's name by the key's SHA-256; see indexKeys.
 	keys map[[sha256.Size]byte]string
 	// groupsOf holds each listed key's groups; see indexGroups.
@@ -53,8 +53,8 @@ type Server struct {
 // Responses limits the conversations the gateway keeps for Responses clients
 // that name an earlier response in previous_response_id.
 type Responses struct {
-	MaxBytes      int64   `yaml:"maxBytes"`      // default 256 MiB
-	MaxAgeMinutes float64 `yaml:"maxAgeMinutes"` // since a conversation's last turn; default 1440
+	MaxBytes      int64   `yaml:"maxBytes" doc:"The most the kept conversations may hold; past it, the least recently used are evicted." schema:"default=268435456,min=0,unit=bytes"` // default 256 MiB
+	MaxAgeMinutes float64 `yaml:"maxAgeMinutes" doc:"How long a conversation is kept after its last turn." schema:"default=1440,min=0,unit=minutes"`                                  // since a conversation's last turn; default 1440
 }
 
 // APIKey is one entry of server.apiKeys: a name for a caller, and either the
@@ -62,9 +62,9 @@ type Responses struct {
 // one given as an empty value, as a variable set to nothing expands to, is
 // told apart from one left out.
 type APIKey struct {
-	Name string  `yaml:"name"`
-	Key  *string `yaml:"key"`
-	Hash *string `yaml:"hash"` // "sha256:" and 64 hex characters, as hash-key prints
+	Name string  `yaml:"name" doc:"The caller's name, in the log and in access lists. A name may have several entries, one per key; all and unknown are reserved." schema:"required"`
+	Key  *string `yaml:"key" doc:"The key itself, which the gateway hashes when the config loads. Give key or hash, not both." schema:"secret"`
+	Hash *string `yaml:"hash" doc:"The key's hash, as hash-key prints it: sha256: and 64 hex characters. The hash can't be used as a key."` // "sha256:" and 64 hex characters, as hash-key prints
 }
 
 // Logs configures the gateway's own copy of its log, which GET /amf/logs
@@ -73,12 +73,12 @@ type Logs struct {
 	// Level is the lowest level the copy keeps, which may be below
 	// logging.level, so the endpoint can show debug lines while stderr
 	// doesn't. Left out, it is logging.level.
-	Level string `yaml:"level"`
+	Level string `yaml:"level" doc:"The lowest level the copy keeps. It may be below logging.level, so the log endpoint shows debug lines while stderr doesn't. Left out, it is logging.level." schema:"enum=debug|info|warning|error"`
 	// MaxBytes is the most the copy holds; past it, the oldest lines are
 	// dropped, though the newest is always kept, so the last line logged can
 	// be read when nothing else can. 0 keeps none, so the endpoint only
 	// streams. nil means the default, 1 MiB; see KeepBytes.
-	MaxBytes *int64 `yaml:"maxBytes"`
+	MaxBytes *int64 `yaml:"maxBytes" doc:"The most the copy holds; past it, the oldest lines are dropped, but the newest is always kept. 0 keeps no history, so the endpoint only streams." schema:"default=1048576,min=0,unit=bytes"`
 }
 
 // KeepBytes returns the most the copy of the log holds:
@@ -113,8 +113,8 @@ func (l Logs) SlogLevel(fallback slog.Level) slog.Level {
 }
 
 type Logging struct {
-	Level        string `yaml:"level"`
-	LogSelection bool   `yaml:"logSelection"`
+	Level        string `yaml:"level" doc:"The lowest level written to stderr." schema:"enum=debug|info|warning|error,default=info"`
+	LogSelection bool   `yaml:"logSelection" doc:"Log one line per request: facade, candidates checked, winner and reason. Failed requests are always logged."`
 }
 
 // SlogLevel returns Level as a slog level, info when it is left out.
@@ -145,9 +145,9 @@ func parseLevel(name string) (slog.Level, error) {
 type API struct {
 	// Default is the family served at the root, bare /v1, so that clients
 	// and configs written before families keep working. Default "openAi".
-	Default   string    `yaml:"default"`
-	OpenAI    APIFamily `yaml:"openAi"`
-	Anthropic APIFamily `yaml:"anthropic"`
+	Default   string    `yaml:"default" doc:"The API served at the root, bare /v1, so clients written before API families keep working." schema:"enum=openAi|anthropic,default=openAi"`
+	OpenAI    APIFamily `yaml:"openAi" doc:"OpenAI's API: Chat Completions, legacy completions and Responses."`
+	Anthropic APIFamily `yaml:"anthropic" doc:"Anthropic's API: Messages."`
 }
 
 // The API families. A family owns a base path and a model-list format, and
@@ -162,13 +162,13 @@ type APIFamily struct {
 	// BasePath is the path in front of the family's own paths, /v1 included.
 	// Families overlap under /v1 (both have /v1/models, with different
 	// shapes), so each needs its own. Default "/openai" and "/anthropic".
-	BasePath string `yaml:"basePath"`
+	BasePath string `yaml:"basePath" doc:"The path in front of the API's own paths, /v1 included. Default /openai and /anthropic."`
 	// AddCurrent adds `current` to the family's model objects. Off by default,
 	// since it makes a listing read backend state.
-	AddCurrent bool `yaml:"addCurrent"`
+	AddCurrent bool `yaml:"addCurrent" doc:"Add current, where a request would go now, to the API's model list. Off, the list reads no backend's state."`
 	// Protocols are the family's protocols the gateway serves; nil means
 	// every one, and an empty list turns the family off.
-	Protocols []string `yaml:"protocols"`
+	Protocols []string `yaml:"protocols" doc:"The API's protocols the gateway serves; a protocol left out has no endpoint, and an empty list turns the API off. Left out, all of them." schema:"ref=protocols"`
 }
 
 // applyDefaults fills in the defaults and checks what clients would reach.

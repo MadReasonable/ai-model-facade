@@ -465,6 +465,38 @@ func TestServe_ReloadsOnSIGHUPAndStopsOnSIGTERM(t *testing.T) {
 	}
 }
 
+// With server.adminApi.listen set, serve listens there too, for the admin
+// endpoints alone, and logs both addresses.
+func TestServe_ListensForTheAdminAPIOnItsOwnAddress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts the program as a process")
+	}
+	addr, adminAddr := freeAddr(t), freeAddr(t)
+	src := "server:\n  listen: \"" + addr + "\"\n  apiKeys: [{name: alice, key: alices-key}]\n  adminApi: {read: {allowedKeys: [alice]}, listen: \"" + adminAddr + "\"}\nbackends:\n  llamaSwap: {type: llamaSwap, baseUrl: \"http://127.0.0.1:1\"}\nmodels:\n  task: {backend: llamaSwap, candidates: [{model: m, loadIfNone: true}]}\n"
+	p := runProgram(t, "serve", writeConfig(t, src))
+	p.waitForLog(t, "msg=listening addr="+addr+" admin="+adminAddr)
+	status := func(base, path string) int {
+		req, _ := http.NewRequest("GET", "http://"+base+path, nil)
+		req.Header.Set("Authorization", "Bearer alices-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := status(adminAddr, "/amf/config-status"); got != http.StatusOK {
+		t.Errorf("the admin address: %d", got)
+	}
+	if got := status(addr, "/amf/config-status"); got != http.StatusNotFound {
+		t.Errorf("server.listen still serves the admin endpoints: %d", got)
+	}
+	p.cmd.Process.Signal(syscall.SIGTERM)
+	if err := p.cmd.Wait(); err != nil {
+		t.Errorf("exit: %v", err)
+	}
+}
+
 // stalled is a stderr whose reader has stopped: every write waits until
 // released.
 type stalled struct{ released chan struct{} }

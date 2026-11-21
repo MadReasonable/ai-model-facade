@@ -19,8 +19,8 @@ const (
 // its key is in AllowedKeys or one of its groups is in AllowedGroups, so an
 // empty list allows no one.
 type Access struct {
-	AllowedKeys   []string `yaml:"allowedKeys"`
-	AllowedGroups []string `yaml:"allowedGroups"`
+	AllowedKeys   []string `yaml:"allowedKeys" doc:"List key names from server.apiKeys here to restrict access to those keys." schema:"ref=keys"`
+	AllowedGroups []string `yaml:"allowedGroups" doc:"List group names from server.groups, or the built-in all and unknown, here to restrict access to the keys in those groups." schema:"ref=groups"`
 }
 
 // Allows reports whether a caller with key name name and groups may use what
@@ -84,15 +84,19 @@ func (s *Server) GroupsOf(name string) []string {
 type AdminAPI struct {
 	// Read guards the endpoints that show the gateway: GET /amf/config and
 	// its paths, /amf/config-status, /amf/config-backups and /amf/logs.
-	Read Access `yaml:"read"`
+	Read Access `yaml:"read" doc:"Who may read the config, its status, its backups and the log. The keys in write may too. Left out, with write left out too, the endpoints answer 404."`
 	// Write guards the endpoints that change the draft, what is running or
 	// the files: PUT and DELETE on /amf/config and its paths, and POST
 	// /amf/config-apply, -load, -revert and -save, and POST /amf/reload.
-	Write Access `yaml:"write"`
+	Write Access `yaml:"write" doc:"Who may edit the draft, apply, load, revert and save it, and reload the files. Left out, no one may, and those endpoints answer 404."`
 	// ConfigBackups is how many backups of the config files a save keeps;
 	// nil means the default, KeepBackups.
-	ConfigBackups *int `yaml:"configBackups"`
-	Logs          Logs `yaml:"logs"`
+	ConfigBackups *int `yaml:"configBackups" doc:"How many backups of the config files a save keeps, a folder each in backups/ beside the config. With 0, a save removes its own backup once it succeeds." schema:"default=10,min=0"`
+	Logs          Logs `yaml:"logs" doc:"The gateway's in-memory copy of its log, which the log endpoint reads and streams."`
+	// Listen, if set, is the address the admin endpoints and the admin UI
+	// are served on, instead of server.listen, which then serves only the
+	// client APIs.
+	Listen string `yaml:"listen" doc:"The address and port the admin endpoints and the admin UI listen on, instead of server.listen, which then serves only the client APIs. Left out, they are served on server.listen. A change takes effect on restart."`
 }
 
 // CanRead reports whether a caller with key name name and groups may use the

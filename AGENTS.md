@@ -50,7 +50,7 @@ Mistakes that compile, pass the nearby tests, and break a rule elsewhere:
 - **Printing or logging from a map in iteration order.** Go randomizes it, so sort first, or `check`'s output and its golden files differ between runs.
 - **An adapter that shadows `Client.Chat` without shadowing `Client.Protocols`.** It inherits the forwarding protocols, so the gateway sends it requests its `Chat` wasn't written for (Interfaces).
 - **Passing on another backend header.** Only `Retry-After` is passed on, deliberately; add one through `backend.ChatResponse` only on purpose (Errors).
-- **Adding a config key without its docs.** Update the README's config section, `config.example.yaml` where it belongs, and the golden files if `check` prints it.
+- **Adding a config key without its docs.** Give its field a `doc` tag, and a `schema` tag for its default or allowed values, which `GET /amf/schema` and the admin UI show; update the README's config section, `config.example.yaml` where it belongs, and the golden files if `check` prints it.
 
 ## Code map
 
@@ -70,12 +70,13 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/translate`: converting a request and its reply between protocols: a module per protocol (`chat.go`, `messages.go`, `responses.go`) that reads its requests and writes its replies, and a file per pair holding its translators. A new pair is a translator registered in `translate.direct`.
 - `internal/backend`: the interfaces adapters implement, optional capabilities (`backend.Has`), and the context helpers for sharing state reads.
 - `internal/backend/openaihttp`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
-- `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`: one adapter per backend. A new backend is a package here plus a case in `gateway.newBackend`.
+- `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`: one adapter per backend. A new backend is a package here plus an entry in `gateway.backendTypes`.
+- `internal/webui`: the admin UI at `/amf/ui/`, plain JavaScript modules served from `embed` with no build step; Preact and htm are vendored in `static/vendor`, unchanged.
 - `internal/testkit`: fake backends. Tests live in the package they test; see `CONTRIBUTING.md`.
 
 ## Program commands
 
-- `serve <config>` runs the gateway. `SIGHUP`, or `POST /amf/reload` from a key in `server.adminApi.write`, reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` is rejected. The admin endpoints under `/amf/config` edit a draft, load the files or a backup into it, apply it, revert it, and save the running config to the files, after a backup into `backups/`.
+- `serve <config>` runs the gateway. `SIGHUP`, or `POST /amf/reload` from a key in `server.adminApi.write`, reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` or `server.adminApi.listen` is taken but waits for a restart, which `/amf/config-status` reports in `restart`. The admin endpoints under `/amf/config` edit a draft, load the files or a backup into it, apply it, revert it, and save the running config to the files, after a backup into `backups/`. `/amf/ui/` serves the admin UI, which does all of that through those endpoints; `server.adminApi.listen` moves the admin endpoints and the UI to an address of their own.
 - `check <config>` loads and validates the config, then prints each facade's resolved params per candidate.
 - `serve` and `check` take `--secrets <file>` after the config: a secrets file, holding only `server.apiKeys` entries and backends' `apiKey` and `keyMap`, merged into the config at load and on every reload.
 - `health <config>` exits 0 if the gateway at `server.listen` answers `/health`; the image's `HEALTHCHECK` uses it. It contacts no backend.
@@ -125,5 +126,5 @@ The reader knows the code as of the parent commit.
 
 Standard library first: `net/http` for server and client, `log/slog`, `path.Match` for candidate patterns.
 The only third-party modules are `gopkg.in/yaml.v3`, `github.com/tidwall/gjson` and `github.com/tidwall/sjson`; add nothing else without asking.
-No web framework.
+No web framework. The admin UI's only third-party code is Preact and htm, vendored unchanged; add nothing else to it without asking.
 The image is a static binary on distroless.

@@ -116,6 +116,15 @@ func Build(entry config.Entry, env Env) (Handler, error) {
 	return nil, fmt.Errorf("unknown type '%s'", entry.Type)
 }
 
+// Schemas returns the schema of an entry of each facade type, by the type
+// that selects it, for GET /amf/schema. An entry with no type is a
+// candidates entry.
+func Schemas() config.Properties {
+	c := config.SchemaOf(candidatesConfig{})
+	c.Property("candidates").Items = config.SchemaOf(candidateConfig{})
+	return config.Properties{{Name: "candidates", Schema: c}}
+}
+
 // Check checks what a facade entry can get wrong by itself, without the
 // backends it names: unknown keys, wrong types, and values that are wrong
 // whatever else the config holds. Build checks the rest.

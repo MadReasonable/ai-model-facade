@@ -40,12 +40,12 @@ import (
 )
 
 type Config struct {
-	Type                string `yaml:"type"`
+	Type                string `yaml:"type" doc:"The adapter: which server this is, which decides how the gateway reads its state." schema:"required"`
 	openaihttp.Config   `yaml:",inline"`
-	Chats               string       `yaml:"chats"`               // delete (default) | archive | keep
-	PollIntervalSeconds float64      `yaml:"pollIntervalSeconds"` // default 0.25
-	Links               []LinkConfig `yaml:"links"`
-	LlamaSwap           *LinkConfig  `yaml:"llamaSwap"` // one more link, to a llamaSwap backend only
+	Chats               string       `yaml:"chats" doc:"What happens to the chat each request creates in Open WebUI, once it is answered." schema:"enum=delete|archive|keep,default=delete"` // delete (default) | archive | keep
+	PollIntervalSeconds float64      `yaml:"pollIntervalSeconds" doc:"How often to read the chat while the answer is generated." schema:"default=0.25,min=0,unit=seconds"`                   // default 0.25
+	Links               []LinkConfig `yaml:"links" doc:"Backends of this gateway that reach the same servers as Open WebUI's connections, whose state is read instead of the state Open WebUI passes on, which most servers don't report exactly."`
+	LlamaSwap           *LinkConfig  `yaml:"llamaSwap" doc:"One more link, to a llamaSwap backend only."` // one more link, to a llamaSwap backend only
 }
 
 // LinkConfig takes the state of the Open WebUI models that one of its
@@ -54,8 +54,8 @@ type Config struct {
 // /v1/models: no state at all for most servers, and for llama-swap a `status`
 // that reads `loaded` while starting and stopping too.
 type LinkConfig struct {
-	Backend  string `yaml:"backend"`
-	PrefixID string `yaml:"prefixId"` // the Open WebUI connection's prefix_id, if any
+	Backend  string `yaml:"backend" doc:"The backend of this gateway that reaches the server." schema:"required,ref=backends"`
+	PrefixID string `yaml:"prefixId" doc:"The prefix Open WebUI's connection puts in front of the server's model IDs, if any."` // the Open WebUI connection's prefix_id, if any
 }
 
 // linkConfig is a LinkConfig with the key it came from, links or llamaSwap.

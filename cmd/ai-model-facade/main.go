@@ -229,21 +229,36 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	srv.RegisterOnShutdown(logs.EndStreams) // a log stream never ends by itself
+	servers := []*http.Server{srv}
+	if addr := g.Config.Server.AdminAPI.Listen; addr != "" {
+		servers = append(servers, &http.Server{
+			Addr:              addr,
+			Handler:           live.Admin(),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+		})
+	}
+	servers[len(servers)-1].RegisterOnShutdown(logs.EndStreams) // a log stream never ends by itself
 	// Listen before logging "listening", so the log line, and anything that
 	// waits for it, never comes before the port is open.
-	ln, err := net.Listen("tcp", srv.Addr)
-	if err != nil {
-		return err
+	errs := make(chan error, len(servers))
+	for _, s := range servers {
+		ln, err := net.Listen("tcp", s.Addr)
+		if err != nil {
+			return err
+		}
+		go func() {
+			errs <- s.Serve(ln)
+		}()
 	}
-	errs := make(chan error, 1)
-	go func() {
-		errs <- srv.Serve(ln)
-	}()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	log.Info("listening", "addr", srv.Addr, "models", len(g.Models), "version", currentVersion())
+	if len(servers) > 1 {
+		log.Info("listening", "addr", srv.Addr, "admin", servers[1].Addr, "models", len(g.Models), "version", currentVersion())
+	} else {
+		log.Info("listening", "addr", srv.Addr, "models", len(g.Models), "version", currentVersion())
+	}
 	for running := true; running; {
 		select {
 		case err := <-errs:
@@ -257,8 +272,10 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	for _, s := range servers {
+		if err := s.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/backend/localai"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openai"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/history"
@@ -319,25 +320,33 @@ func (g *Gateway) relist(ctx context.Context, name string, answered chan<- relis
 }
 
 func newBackend(e config.Entry, log *slog.Logger) (backend.Backend, error) {
-	switch e.Type {
-	case "llamaSwap":
-		return llamaswap.New(e)
-	case "llamaServer":
-		return llamaserver.New(e)
-	case "lmStudio":
-		return lmstudio.New(e)
-	case "localAi":
-		return localai.New(e)
-	case "ollama":
-		return ollama.New(e)
-	case "openAi":
-		return openai.New(e)
-	case "anthropic":
-		return anthropic.New(e)
-	case "openWebUi":
-		return openwebui.New(e, log.With("backend", e.Name))
-	case "":
+	if e.Type == "" {
 		return nil, fmt.Errorf("line %d: type is required", e.Node.Line)
 	}
+	for _, t := range backendTypes {
+		if t.name == e.Type {
+			return t.build(e, log)
+		}
+	}
 	return nil, fmt.Errorf("line %d: unknown type '%s'", e.Node.Line, e.Type)
+}
+
+// backendTypes are the backend adapters, each with the type that selects it,
+// the struct its entry decodes into, for GET /amf/schema, and how it is
+// built, in the order the README lists them.
+var backendTypes = []struct {
+	name   string
+	config any
+	build  func(config.Entry, *slog.Logger) (backend.Backend, error)
+}{
+	{"llamaSwap", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaswap.New(e) }},
+	{"llamaServer", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaserver.New(e) }},
+	{"lmStudio", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return lmstudio.New(e) }},
+	{"localAi", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return localai.New(e) }},
+	{"ollama", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return ollama.New(e) }},
+	{"openAi", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return openai.New(e) }},
+	{"anthropic", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return anthropic.New(e) }},
+	{"openWebUi", openwebui.Config{}, func(e config.Entry, log *slog.Logger) (backend.Backend, error) {
+		return openwebui.New(e, log.With("backend", e.Name))
+	}},
 }

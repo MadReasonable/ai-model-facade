@@ -151,6 +151,9 @@ func (d *Document) parseSchema(lookupEnv func(string) (string, bool)) (*Config, 
 	if cfg.Server.Listen == "" {
 		return nil, fmt.Errorf("server.listen is required")
 	}
+	if cfg.Server.AdminAPI.Listen != "" && cfg.Server.AdminAPI.Listen == cfg.Server.Listen {
+		return nil, fmt.Errorf("server.adminApi.listen is server.listen, '%s'; give the admin endpoints an address of their own, or leave it out to serve them on server.listen", cfg.Server.Listen)
+	}
 	if cfg.Server.TargetHeader == "" {
 		cfg.Server.TargetHeader = "X-Gateway-Target"
 	}

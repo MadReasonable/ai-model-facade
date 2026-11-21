@@ -45,12 +45,22 @@ type server struct {
 // Handler returns the front end for every client API: HTTP and SSE framing
 // only.
 func (g *Gateway) Handler(log *slog.Logger) http.Handler {
-	return g.handler(log, nil)
+	return g.handler(log, nil, allEndpoints)
 }
 
-// handler is Handler with the Live that serves g, for the admin endpoints,
-// or nil to leave them out.
-func (g *Gateway) handler(log *slog.Logger, live *Live) http.Handler {
+// The sets of endpoints a handler serves. With server.adminApi.listen set,
+// server.listen serves the client APIs and that address the admin
+// endpoints and the admin UI; without it, server.listen serves them all.
+// Both serve /health and /amf/models, which any client may read.
+const (
+	allEndpoints = iota
+	clientEndpoints
+	adminEndpoints
+)
+
+// handler is Handler for one set of endpoints, with the Live that serves g,
+// for the admin endpoints, or nil to leave them out.
+func (g *Gateway) handler(log *slog.Logger, live *Live, endpoints int) http.Handler {
 	s := &server{gateway: g, models: map[string]virtualmodel.Handler{}, log: log, started: time.Now().Unix(), live: live}
 	for _, m := range g.Models {
 		s.models[m.Name] = m.Handler
@@ -59,16 +69,18 @@ func (g *Gateway) handler(log *slog.Logger, live *Live) http.Handler {
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /amf/models", s.authenticated(amfFamily, s.listFacades))
 	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(amfFamily, s.getFacade))
-	if live != nil {
+	if live != nil && endpoints != clientEndpoints {
 		s.routeAdmin(mux)
 	}
-	api := g.Config.API
-	s.routeOpenAI(mux, api.OpenAI.BasePath)
-	s.routeAnthropic(mux, api.Anthropic.BasePath)
-	if api.Default == config.FamilyOpenAI {
-		s.routeOpenAI(mux, "")
-	} else {
-		s.routeAnthropic(mux, "")
+	if endpoints != adminEndpoints {
+		api := g.Config.API
+		s.routeOpenAI(mux, api.OpenAI.BasePath)
+		s.routeAnthropic(mux, api.Anthropic.BasePath)
+		if api.Default == config.FamilyOpenAI {
+			s.routeOpenAI(mux, "")
+		} else {
+			s.routeAnthropic(mux, "")
+		}
 	}
 	// Every request carries its arrival time, so its state reads reuse any
 	// state fetched since then (backend.WithRequestStart).

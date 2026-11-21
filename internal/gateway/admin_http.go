@@ -11,10 +11,14 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
+	"github.com/MadReasonable/ai-model-facade/internal/protocols"
+	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
+	"github.com/MadReasonable/ai-model-facade/internal/webui"
 )
 
 // configHeader names, on every response of GET, PUT and DELETE on
@@ -39,6 +43,8 @@ func (s *server) routeAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /amf/config/{path...}", write("edit the config", s.putConfig))
 	mux.HandleFunc("DELETE /amf/config/{path...}", write("edit the config", s.deleteConfig))
 	mux.HandleFunc("POST /amf/config-rename/{path...}", write("edit the config", s.renameConfig))
+	mux.HandleFunc("GET /amf/config-anchors", read(s.configAnchors))
+	mux.HandleFunc("GET /amf/schema", read(s.getSchema))
 	mux.HandleFunc("GET /amf/config-status", read(s.configStatus))
 	mux.HandleFunc("GET /amf/config-backups", read(s.configBackups))
 	if s.live.logs != nil {
@@ -49,7 +55,31 @@ func (s *server) routeAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /amf/config-revert", write("revert the draft", s.revertConfig))
 	mux.HandleFunc("POST /amf/config-load", write("load the config", s.loadConfig))
 	mux.HandleFunc("POST /amf/config-save", write("save the config", s.saveConfig))
+	mux.HandleFunc("GET /amf/ui", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/amf/ui/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("GET /amf/ui/{file...}", s.adminUI)
 }
+
+// adminUI serves the admin UI's files, which need no key, since the page
+// holds no secret and signs in to the endpoints it calls. With the read
+// endpoints off, it is off too, as they are.
+func (s *server) adminUI(w http.ResponseWriter, r *http.Request) {
+	if !s.gateway.Config.Server.AdminAPI.ReadOn() {
+		s.reject(amfFamily, w, r, backend.Client{}, http.StatusNotFound, "not_found", "/amf/ui is off; list its admins in server.adminApi.read or server.adminApi.write to turn it on")
+		return
+	}
+	ui, err := adminUIFiles()
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	ui.ServeHTTP(w, r, "/amf/ui/")
+}
+
+// adminUIFiles reads the admin UI's files once, the first time they are
+// asked for.
+var adminUIFiles = sync.OnceValues(webui.New)
 
 // admin admits a caller that server.adminApi lists for the endpoint: write for
 // one that changes something, read or write for one that only shows. With no
@@ -363,6 +393,22 @@ func newChangeResult(g *Gateway) changeResult {
 	return result
 }
 
+// restartNotes says, for a reply, what a restart is needed for.
+func restartNotes(pending []PendingRestart) []string {
+	var notes []string
+	for _, p := range pending {
+		switch {
+		case p.Running == "":
+			notes = append(notes, fmt.Sprintf("%s is left out now, but the gateway listens on '%s' until it restarts; then the admin endpoints move to server.listen", p.Key, p.Listening))
+		case p.Listening == "":
+			notes = append(notes, fmt.Sprintf("%s is '%s' now, but the gateway serves the admin endpoints on server.listen until it restarts", p.Key, p.Running))
+		default:
+			notes = append(notes, fmt.Sprintf("%s is '%s' now, but the gateway listens on '%s' until it restarts", p.Key, p.Running, p.Listening))
+		}
+	}
+	return notes
+}
+
 // reloadConfig serves POST /amf/reload: a reload from the config
 // files, as SIGHUP does, into the running config and the draft. A config
 // that fails to load is a 422, a file that can't be read a 500, and either
@@ -380,6 +426,7 @@ func (s *server) reloadConfig(w http.ResponseWriter, r *http.Request, client bac
 		return
 	}
 	result := newChangeResult(reloaded.Gateway)
+	result.Notes = append(result.Notes, restartNotes(s.live.Restart())...)
 	result.Reloaded, result.DiscardedDraft, result.DiscardedUnsaved = true, reloaded.DiscardedDraft, reloaded.DiscardedUnsaved
 	writeJSON(w, http.StatusOK, result)
 }
@@ -398,6 +445,7 @@ func (s *server) applyConfig(w http.ResponseWriter, r *http.Request, client back
 		return
 	}
 	result := newChangeResult(g)
+	result.Notes = append(result.Notes, restartNotes(s.live.Restart())...)
 	result.Applied = true
 	writeJSON(w, http.StatusOK, result)
 }
@@ -469,9 +517,68 @@ func (s *server) saveConfig(w http.ResponseWriter, r *http.Request, client backe
 	}{saved.Written, saved.Backup, notes})
 }
 
-// configStatus serves GET /amf/config-status.
+// configAnchors serves GET /amf/config-anchors: the anchors of the draft, or
+// with ?live of the running config, each with the paths that read it, as
+// config.Document.Anchors gives them.
+func (s *server) configAnchors(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	live := liveCopy(r)
+	doc := s.live.Draft()
+	if live {
+		doc = s.live.Gateway().Config.Source
+	}
+	s.setConfigHeader(w, live)
+	writeJSON(w, http.StatusOK, struct {
+		Anchors []config.Anchor `json:"anchors"`
+	}{doc.Anchors()})
+}
+
+// schema is the body of GET /amf/schema: the schema of the config, of an
+// entry of each backend type and each facade type, by its type, and the
+// names of the protocols, which the config refers to.
+type schema struct {
+	Config       *config.Schema     `json:"config"`
+	BackendTypes config.Properties  `json:"backendTypes"`
+	ModelTypes   config.Properties  `json:"modelTypes"`
+	Protocols    []backend.Protocol `json:"protocols"`
+}
+
+// schemaBody is the body of GET /amf/schema, which is the same for every
+// config, since it is made from the structs the gateway decodes.
+var schemaBody = sync.OnceValue(func() []byte {
+	sc := schema{Config: config.SchemaOf(config.Config{}), ModelTypes: virtualmodel.Schemas(), Protocols: protocols.Names()}
+	for _, t := range backendTypes {
+		entry := config.SchemaOf(t.config)
+		entry.Property("type").Enum = []string{t.name}
+		sc.BackendTypes = append(sc.BackendTypes, config.Property{Name: t.name, Schema: entry})
+	}
+	body, err := json.Marshal(sc)
+	if err != nil {
+		panic(fmt.Sprintf("GET /amf/schema: %v", err)) // a test reads it
+	}
+	return body
+})
+
+// getSchema serves GET /amf/schema; see schema.
+func (s *server) getSchema(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(schemaBody())
+}
+
+// configStatus serves GET /amf/config-status, with what the caller may do,
+// so a client such as the admin UI can offer only that.
 func (s *server) configStatus(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	writeJSON(w, http.StatusOK, s.live.Status())
+	admins := s.gateway.Config.Server.AdminAPI
+	writeJSON(w, http.StatusOK, struct {
+		Status
+		Caller callerStatus `json:"caller"`
+	}{s.live.Status(), callerStatus{client.Name, admins.Write.On() && admins.Write.Allows(client.Name, client.Groups)}})
+}
+
+// callerStatus is who made a request, by key name, "" for a caller with no
+// key, and whether server.adminApi.write lets it change the config.
+type callerStatus struct {
+	Name  string `json:"name"`
+	Write bool   `json:"write"`
 }
 
 // configBackups serves GET /amf/config-backups, newest first.
