@@ -2,3 +2,4 @@
 config.yaml
 **/*.local.md
 dev-env
+**/*.local.toml

@@ -11,6 +11,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# .dockerignore leaves dev-env out, but the index still lists its files, so
+# without this git would see them as deleted and go build would add +dirty
+# to the version. A context without .git builds as before, unversioned.
+RUN if [ -d .git ]; then git ls-files -z dev-env | xargs -0r git update-index --skip-worktree; fi
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /ai-model-facade ./cmd/ai-model-facade
 
 FROM gcr.io/distroless/static-debian12:nonroot

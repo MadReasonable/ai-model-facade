@@ -2,6 +2,12 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Fixed
+
+- A Docker image built from a clean checkout without `--build-arg VERSION` reports the checkout's version, without `+dirty`. Every such image reported `+dirty`, because the build context leaves out `dev-env`, whose tracked files git then saw as deleted.
+
 ## [0.4.0] - 2026-11-22
 
 The config can be edited, applied and saved over HTTP, through the admin API or the Web UI built into the binary, and `ai-model-facade init` writes a starting config to set a gateway up that way. An `openWebUi` backend's `llamaSwap` block is removed; see Removed.
