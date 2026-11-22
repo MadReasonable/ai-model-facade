@@ -23,6 +23,7 @@ export const state = {
 	backups: [],
 	selection: { kind: 'server' },
 	view: 'properties', // properties | yaml | vars
+	scrollTo: null, // the id of a Card to scroll to once the sheet shows it
 };
 
 function changed() {
@@ -245,9 +246,10 @@ export function remove(path) {
 // in the browser's history, so back and forward step through what was
 // shown and a reload returns to it. With replace, it takes the place of
 // the entry shown, as after a rename or a delete, whose old entry would
-// show what no longer exists.
-export function select(selection, view = state.view, { replace = false } = {}) {
-	set({ selection, view });
+// show what no longer exists. With scrollTo, the sheet scrolls to that
+// Card once it shows it; any other selection drops the request.
+export function select(selection, view = state.view, { replace = false, scrollTo = null } = {}) {
+	set({ selection, view, scrollTo });
 	const parts = [selection.kind];
 	if (selection.name !== undefined) {
 		parts.push(encodeURIComponent(selection.name));

@@ -3,10 +3,10 @@
 // the draft through useEntry, so a change is in the draft at once and runs
 // only once the draft is applied.
 
-import { useRef, useState } from './vendor/hooks.mjs';
+import { useEffect, useRef, useState } from './vendor/hooks.mjs';
 import { clone, configURL, entriesOf, isObject, keysOf, request, setKey, withOrder } from './api.mjs';
 import { Chips, EntryBanners, SharedNote, Sheet, TextInput, useEntry, waiting, withKey } from './fields.mjs';
-import { edit, errorText, freshKey, get, recordRename, refresh, rememberKey, remove, renamedTo, renameNode, select, settle, sharing, state, useStore } from './store.mjs';
+import { edit, errorText, freshKey, get, recordRename, refresh, rememberKey, remove, renamedTo, renameNode, select, set, settle, sharing, state, useStore } from './store.mjs';
 import { Banner, confirm, Copy, Dialog, focusOnMount, html, Icon, openDialog, pathText, plural, Reveal, toast } from './ui.mjs';
 import { keyHash } from './sha256.mjs';
 
@@ -41,9 +41,18 @@ export function Head({ crumbs = [], title, subtitle, tools }) {
 	`;
 }
 
-function Card({ title, intro, tools, children }) {
+// Card scrolls itself into view if select asked for its id: only the card
+// knows when it is on the page, since a sheet waits for its entries first.
+function Card({ id, title, intro, tools, children }) {
+	const ref = useRef(null);
+	useEffect(() => {
+		if (id && state.scrollTo === id) {
+			set({ scrollTo: null });
+			ref.current.scrollIntoView();
+		}
+	});
 	return html`
-		<section class="card">
+		<section class="card" id=${id} ref=${ref}>
 			<h2>${title}${tools && html`<span class="tools">${tools}</span>`}</h2>
 			${intro && html`<p class="intro">${intro}</p>`}
 			${children}
@@ -436,7 +445,7 @@ function Backups({ server, setAdmin }) {
 		}
 	};
 	return html`
-		<${Card} title="Files and backups" intro="A save writes the running config to these files, after copying both into a backup folder. A backup loaded into the draft runs once the draft is applied." tools=${!ro && html`<button class="btn small" onClick=${() => load()}>Load the current save</button>`}>
+		<${Card} id="backups" title="Files and backups" intro="A save writes the running config to these files, after copying both into a backup folder. A backup loaded into the draft runs once the draft is applied." tools=${!ro && html`<button class="btn small" onClick=${() => load()}>Load the current save</button>`}>
 			<table class="list">
 				<thead><tr><th>File</th><th>Path</th><th>State</th></tr></thead>
 				<tbody>

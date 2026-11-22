@@ -163,7 +163,7 @@ function More() {
 			${open && html`
 				<div class="card" style="position:absolute;right:0;top:34px;z-index:10;min-width:260px;padding:6px;display:flex;flex-direction:column;gap:2px">
 					<button class="btn ghost" style="justify-content:flex-start" onClick=${loadFiles}>Load the current save</button>
-					<button class="btn ghost" style="justify-content:flex-start" onClick=${() => select({ kind: 'server' }, 'properties')}>Load a backup...</button>
+					<button class="btn ghost" style="justify-content:flex-start" onClick=${() => select({ kind: 'server' }, 'properties', { scrollTo: 'backups' })}>Load a backup...</button>
 					<button class="btn ghost danger" style="justify-content:flex-start" onClick=${reload}>Reload: load and run the current save</button>
 				</div>
 			`}
@@ -466,7 +466,8 @@ function Ready() {
 
 // useScrollAway, on a narrow screen, where the bar is a fixed row with the
 // buttons on rows below it, keeps --bar-height at the height of it all,
-// which the panes below start at. While moving is on, it moves the bar's
+// which the panes below start at, and --bar-row-height at the height of
+// its first row. While moving is on, it moves the bar's
 // buttons and then the sheet's name row, which sticks below them, out of
 // the way as the sheet scrolls: up under the first row by as much as the
 // sheet scrolls down, and back by as much as it scrolls back, the name row
@@ -483,8 +484,11 @@ function useScrollAway(narrow, moving, bar, content) {
 		const wrap = header.querySelector('.actions-wrap');
 		const buttons = header.querySelector('.actions');
 		// The bar's height with its buttons all shown, whatever part of them
-		// is away now.
-		const measure = () => app.style.setProperty('--bar-height', header.offsetHeight - wrap.offsetHeight + buttons.offsetHeight + 'px');
+		// is away now, and with them all away.
+		const measure = () => {
+			app.style.setProperty('--bar-height', header.offsetHeight - wrap.offsetHeight + buttons.offsetHeight + 'px');
+			app.style.setProperty('--bar-row-height', header.offsetHeight - wrap.offsetHeight + 'px');
+		};
 		measure();
 		const resize = new ResizeObserver(measure);
 		resize.observe(row);
@@ -492,6 +496,7 @@ function useScrollAway(narrow, moving, bar, content) {
 		return () => {
 			resize.disconnect();
 			app.style.removeProperty('--bar-height');
+			app.style.removeProperty('--bar-row-height');
 		};
 	}, [narrow]);
 	useEffect(() => {

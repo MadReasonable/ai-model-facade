@@ -820,6 +820,8 @@ button.pill:hover {
 	border-radius: 8px;
 	margin-bottom: 18px;
 	box-shadow: var(--shadow);
+	/* A card scrolled to keeps two thirds of the gap between cards above it. */
+	scroll-margin-top: 12px;
 }
 
 .card > h2 {
@@ -1547,6 +1549,12 @@ button.link {
 
 	.main .content {
 		padding-top: var(--bar-height, 0);
+	}
+
+	/* A card scrolled to lands below the bar's first row: scrolling down
+	   that far puts the buttons and the sheet's name row away. */
+	.card {
+		scroll-margin-top: calc(var(--bar-row-height, 0px) + 12px);
 	}
 
 	.main.log-full .log {

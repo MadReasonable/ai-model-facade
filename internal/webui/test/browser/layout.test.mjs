@@ -83,3 +83,21 @@ test('on a phone, the tree is a drawer, the log takes the screen, and the bar mo
 	assert.equal(await page.run(() => !!document.querySelector('.log-bar .seg')), false, 'no docked mode on a phone');
 	assert.deepEqual(page.problems, []);
 });
+
+for (const [device, width] of [['a desktop', 1280], ['a phone', 400]]) {
+	test(`on ${device}, Load a backup... shows Files and backups below the bar`, { skip }, async t => {
+		const { gw, page } = await session(t, { width, height: 820 });
+		await signIn(page, gw, '#/model/swap');
+		await page.click('button[title="More"]');
+		await page.click('.btn.ghost', 'Load a backup...');
+		await sleep(500);
+		const [hash, card, bar] = JSON.parse(await page.run(() => JSON.stringify([
+			location.hash,
+			Math.round(document.getElementById('backups').getBoundingClientRect().top),
+			Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom),
+		])));
+		assert.equal(hash, '#/server');
+		assert.ok(Math.abs(card - bar - 12) <= 1, `card at ${card}, bar ends at ${bar}; want 12px between`);
+		assert.deepEqual(page.problems, []);
+	});
+}
