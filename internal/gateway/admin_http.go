@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -619,13 +620,88 @@ func (s *server) getSchema(w http.ResponseWriter, r *http.Request, client backen
 }
 
 // configStatus serves GET /amf/config-status, with what the caller may do,
-// so a client such as the admin UI can offer only that.
+// so a client such as the admin UI can offer only that. With ?follow, it
+// streams the status instead (followStatus).
 func (s *server) configStatus(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	if r.URL.Query().Has("follow") {
+		s.followStatus(w, r, client)
+		return
+	}
 	admins := s.gateway.Config.Server.AdminAPI
-	writeJSON(w, http.StatusOK, struct {
-		Status
-		Caller callerStatus `json:"caller"`
-	}{s.live.Status(), callerStatus{client.Name, admins.Write.On() && admins.Write.Allows(client.Name, client.Groups)}})
+	writeJSON(w, http.StatusOK, statusBody{s.live.Status(), callerStatus{client.Name, admins.Write.On() && admins.Write.Allows(client.Name, client.Groups)}})
+}
+
+// statusBody is the body of GET /amf/config-status, and each event of its
+// stream.
+type statusBody struct {
+	Status
+	Caller callerStatus `json:"caller"`
+}
+
+// followStatus streams the status as server-sent events: the status now,
+// then the status again each time it changes, so a client such as the admin
+// UI reads the draft or the running config again only when its ETag does.
+// A stream outlives a reload, so it ends once the running config no longer
+// lets the caller read the config, checked with each event and each
+// keep-alive, and what the caller may do is worked out from the running
+// config each time too.
+func (s *server) followStatus(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	status, next := s.live.followStatus()
+	defer s.live.unfollowStatus()
+	ended := s.live.statusStreamsEnded()
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // so nginx passes each event on as it comes
+	w.WriteHeader(http.StatusOK)
+	var last []byte
+	send := func() bool {
+		if !s.mayStillRead(client) {
+			endStatusRevoked(w, rc)
+			return false
+		}
+		cfg := s.live.Gateway().Config.Server
+		admins := cfg.AdminAPI
+		body, err := json.Marshal(statusBody{status, callerStatus{client.Name, admins.Write.On() && admins.Write.Allows(client.Name, cfg.GroupsOf(client.Name))}})
+		if err == nil && !bytes.Equal(body, last) {
+			writeSSE(w, "", body)
+			last = body
+		}
+		rc.Flush()
+		return true
+	}
+	if !send() {
+		return
+	}
+	keepAlive := time.NewTicker(keepAliveInterval)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ended:
+			writeSSE(w, "end", []byte(`{"reason":"the gateway ended the stream: it is shutting down"}`))
+			rc.Flush()
+			return
+		case <-next:
+			status, next = s.live.statusNow()
+			if !send() {
+				return
+			}
+		case <-keepAlive.C:
+			if !s.mayStillRead(client) {
+				endStatusRevoked(w, rc)
+				return
+			}
+			fmt.Fprint(w, ": keep-alive\n\n")
+			rc.Flush()
+		}
+	}
+}
+
+func endStatusRevoked(w http.ResponseWriter, rc *http.ResponseController) {
+	writeSSE(w, "end", []byte(`{"reason":"server.adminApi no longer lets this client read the config"}`))
+	rc.Flush()
 }
 
 // callerStatus is who made a request, by key name, "" for a caller with no

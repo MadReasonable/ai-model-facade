@@ -117,14 +117,24 @@ export function configURL(path) {
 	return '/amf/config' + path.map(k => '/' + encodeURIComponent(k)).join('');
 }
 
-// followLogs reads GET /amf/logs?follow, which EventSource can't, since it
-// sends no Authorization header. onEvent gets each event as {event, data};
-// the returned function stops the stream. The promise it holds settles when
-// the stream ends, for whatever reason.
+// followLogs reads GET /amf/logs?follow; see follow.
 export function followLogs(query, onEvent) {
+	return follow('/amf/logs', query, onEvent);
+}
+
+// followStatus reads GET /amf/config-status?follow; see follow.
+export function followStatus(onEvent) {
+	return follow('/amf/config-status', {}, onEvent);
+}
+
+// follow reads the server-sent events of path with ?follow, which
+// EventSource can't, since it sends no Authorization header. onEvent gets
+// each event as {event, data}; the returned function stops the stream. The
+// promise it holds settles when the stream ends, for whatever reason.
+function follow(path, query, onEvent) {
 	const abort = new AbortController();
 	const done = (async () => {
-		const resp = await fetch('/amf/logs?' + new URLSearchParams({ follow: '', ...query }), { headers: headers({ Accept: 'text/event-stream' }), signal: abort.signal });
+		const resp = await fetch(path + '?' + new URLSearchParams({ follow: '', ...query }), { headers: headers({ Accept: 'text/event-stream' }), signal: abort.signal });
 		if (!resp.ok) {
 			let message = resp.statusText;
 			try {

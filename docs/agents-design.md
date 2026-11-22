@@ -157,6 +157,14 @@ A save writes the running config, not the draft, so what reaches the files has b
 `Live` holds the draft, the running config's provenance and the files' last-known content under a lock of its own, held only to read them or commit a change, apart from the lock that serializes builds, since a build can take as long as a slow backend's model list; so reading the config, its status, or editing the draft never waits on a reload.
 `POST /amf/config-load` brings the files on disk, or a backup, into the draft, and `POST /amf/reload` stays the one step that takes the files as they are, since it skips the review the other steps allow.
 A save refuses a file changed on disk since the gateway last read or wrote it, so a host edit isn't overwritten unseen; a file `config-load` read counts as seen once the draft it gave is applied, if it hasn't changed again since, so the last-known files become what was loaded (`Live.filesHold`).
+`GET /amf/config-status?follow` streams the status, so the admin UI sees another admin's edit, a reload or a host edit without polling (`statusWatch`).
+Each change made through the gateway pokes one goroutine, which works the status out and publishes it to every stream; while a stream is open, it also works the status out every 2 s, since a host edit or a folder's permissions change without passing through the gateway, and publishes that only if it differs.
+So the files are read once per check however many streams are open, and not at all while none is.
+A poke is published even if the status reads the same, because each event also says what its caller may do, which a reload can change; each stream drops an event equal to the last it sent.
+The goroutine belongs to `Live`, which outlives reloads, not to a gateway a build starts.
+The status carries each copy's `ETag`, so a client reads the draft or the running config again only when it changed.
+Decided against: the UI reading the draft every 5 s to compare its `ETag`, as it did at first; the status said how the copies compare but not which version each is, so every poll sent the entire draft.
+Decided against: watching the files with inotify, which the standard library doesn't offer.
 A backup is a folder holding both files, named by role, so each is a whole config and a rename of the files keeps them; one made with the other secrets layout is fitted to the gateway's own as it is loaded (`config.Document.Fit`).
 
 Because a failed build is thrown away, building has no side effects that outlive it: `Build` and every adapter's `New` start no goroutines.
@@ -701,7 +709,7 @@ Decided against: React with a bundler, which would bring a Node toolchain, a bui
 Decided: the page signs in with a key in a form and sends it as a bearer key, kept in `sessionStorage`, or `localStorage` with "stay signed in".
 Decided against: HTTP Basic auth, as llama-swap uses, and cookies.
 A browser sends either by itself, to a request any site makes, so every write endpoint would need origin checks against cross-site requests, and Basic auth can't be signed out of.
-Its one gain, that `EventSource` can follow the log, costs a few lines without it: the page reads `?follow` with `fetch` and parses the events.
+Its one gain, that `EventSource` can follow the log and the status, costs a few lines without it: the page reads `?follow` with `fetch` and parses the events.
 The page is served under a Content-Security-Policy that runs only the gateway's own scripts and the import map, by its hash, and sets text, never HTML, since log lines and config values come from clients and admins.
 
 Decided: the forms come from the config's own structs.

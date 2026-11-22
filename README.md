@@ -1448,7 +1448,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /amf/config-save` | Writes the running config to its files, after a backup. For `server.adminApi.write`. |
 | `POST /amf/backend-test/<name>` | Asks the draft's backend `<name>` for its models, with the address and key the draft gives it, so they can be checked before they are applied: `ok`, with the IDs in `models` or the backend's error in `error`. For `server.adminApi.write`. |
 | `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, into the running config and the draft; see [Reloading the config](#reloading-the-config). For `server.adminApi.write`. |
-| `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, whether each file can be saved, which addresses wait for a restart, and, in `caller`, the caller's key name and whether it may change the config. For `server.adminApi.read`. |
+| `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, each copy's `ETag`, whether each file can be saved, which addresses wait for a restart, and, in `caller`, the caller's key name and whether it may change the config; with `?follow`, the status again each time it changes. For `server.adminApi.read`. |
 | `GET /amf/config-anchors` | Each anchor in the draft, or with `?live` in the running config, with where it is defined and the paths that read it, by alias or by merge. For `server.adminApi.read`; see [Editing the config](#editing-the-config). |
 | `GET /amf/schema` | Every key the config takes, with its type, default, allowed values and description, for the config and for an entry of each backend type and facade type. For `server.adminApi.read`. |
 | `GET /amf/config-backups` | The backups of the files, newest first. For `server.adminApi.read`. |
@@ -1682,8 +1682,20 @@ A save backs both files up first, so a `backups/` the gateway can't write makes 
 `GET /amf/config-status` says, for each file, whether its folder and the file itself can be written, whether it is mounted by itself, whether it changed on disk, and why a save would refuse it, and the same of `backups/`:
 
 ```json
-{"draft":{"source":"backup:20261118-140313","edited":true,"live":false,"saved":false},"live":{"source":"files","edited":false,"saved":true},"files":[{"role":"config","path":"/config/config.yaml","changedOnDisk":false,"folderWritable":true,"fileWritable":true,"mountedAlone":false,"saveable":true}],"backups":{"path":"/config/backups","writable":true,"keep":10}}
+{"draft":{"source":"backup:20261118-140313","edited":true,"live":false,"saved":false,"etag":"\"5d1f0c9a2be47e6038a1c4f2\""},"live":{"source":"files","edited":false,"saved":true,"etag":"\"a07e3b18c5d2946f1e0b7d33\""},"files":[{"role":"config","path":"/config/config.yaml","changedOnDisk":false,"folderWritable":true,"fileWritable":true,"mountedAlone":false,"saveable":true}],"backups":{"path":"/config/backups","writable":true,"keep":10}}
 ```
+
+`etag` is each copy's `ETag`, as `GET /amf/config` and `GET /amf/config?live` give it, so a client can tell from the status alone whether a copy changed and needs reading again.
+`?follow` streams the status as server-sent events, so a client watching for changes, such as the [admin UI](#the-admin-ui), needs no polling:
+
+```bash
+curl -N -H "Authorization: Bearer $ADMIN_KEY" "http://127.0.0.1:8088/amf/config-status?follow"
+```
+
+The first event is the status as `GET` gives it, `caller` included, and each later one the status again after a change.
+A change made through the gateway is sent at once: an edit, a rename, an apply, a revert, a load, a save or a reload.
+A change made around it, such as an edit to the files on the host, is found by a check of the files every 2 seconds, which the gateway makes once for all the streams open, and only while one is.
+An event is sent only if it differs from the last one that stream sent, and keep-alives and `event: end` work as on the [log's stream](#reading-the-log), for a caller no longer allowed to read the config, or a gateway shutting down.
 
 The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded` and `config saved` name the admin key in `by`.
 

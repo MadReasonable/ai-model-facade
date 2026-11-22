@@ -336,6 +336,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 		})
 	}
 	servers[len(servers)-1].RegisterOnShutdown(logs.EndStreams) // a log stream never ends by itself
+	servers[len(servers)-1].RegisterOnShutdown(live.EndStreams) // nor does a status stream
 	// Listen before logging "listening", so the log line, and anything that
 	// waits for it, never comes before the port is open.
 	errs := make(chan error, len(servers))

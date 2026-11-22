@@ -7,7 +7,7 @@ import { render } from 'preact';
 import { useEffect, useRef, useState } from './vendor/hooks.mjs';
 import { ApiError, currentKey, entriesOf, hasKey, isObject, request, signIn, signOut } from './api.mjs';
 import { keyHash } from './sha256.mjs';
-import { errorText, followHistory, forgetKeys, freshKey, load, poll, refresh, refreshFacades, select, selectionFromHash, set, settle, state, useStore } from './store.mjs';
+import { errorText, followHistory, forgetKeys, freshKey, load, refresh, refreshFacades, select, selectionFromHash, set, settle, state, useStore, watch } from './store.mjs';
 import { confirm, Dialog, Dialogs, html, Icon, openDialog, plural, Reveal, toast, useNarrow } from './ui.mjs';
 import { BackendSheet, CandidateSheet, ModelSheet, SectionList, ServerSheet, stateClass } from './sheets.mjs';
 import { DiffDialog, VarsEditor, YAMLEditor } from './editors.mjs';
@@ -433,7 +433,7 @@ function Ready() {
 	const [logMode, setLogMode] = useLogMode();
 	const [treeOpen, setTreeOpen] = useState(false);
 	const narrow = useNarrow();
-	useEffect(() => poll(), []);
+	useEffect(() => watch(), []);
 	useEffect(() => followHistory(), []);
 	useEffect(() => {
 		if (!treeOpen) {

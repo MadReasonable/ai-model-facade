@@ -56,6 +56,8 @@ type Live struct {
 	// next is the reload from the files that hasn't read them yet, which a
 	// request for one joins; nil when none is waiting.
 	next *fileReload
+	// watch publishes the status to GET /amf/config-status?follow.
+	watch statusWatch
 }
 
 type live struct {
@@ -264,6 +266,7 @@ func (l *Live) reloadFiles(ctx context.Context) (*Reloaded, error) {
 	result := &Reloaded{Gateway: g, DiscardedDraft: !l.draft.doc.Equal(replaced), DiscardedUnsaved: !replaced.Equal(l.saved)}
 	l.saved, l.running = cfg.Source, fromFiles
 	l.draft = draftCopy{doc: cfg.Source.Copy(), provenance: fromFiles}
+	l.changed()
 	return result, nil
 }
 
@@ -298,6 +301,7 @@ func (l *Live) swap(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 	g.start(l.log)
 	old.stop()
 	old.closeIdleConnections()
+	l.changed()
 	for _, p := range pendingRestarts(l.listening, now.uiPath, cfg) {
 		l.log.Warn("restart needed", "key", p.Key, "listening", p.Listening, "running", p.Running)
 	}

@@ -79,6 +79,7 @@ func (l *Live) EditDraft(whole bool, edit func(*config.Document) (*config.Docume
 	} else {
 		l.draft.edited = true
 	}
+	l.changed()
 	return d, nil
 }
 
@@ -130,6 +131,7 @@ func (l *Live) ApplyDraft(by, ifMatch string) (*Gateway, error) {
 		l.saved = draft.loaded
 	}
 	l.stateMu.Unlock()
+	l.changed()
 	l.log.Info("draft applied", "by", by, "models", len(g.Models), "adoptedFiles", adopted)
 	return g, nil
 }
@@ -153,6 +155,7 @@ func (l *Live) RevertDraft(by string) {
 	l.stateMu.Lock()
 	l.draft = draftCopy{doc: l.Gateway().Config.Source.Copy(), provenance: l.running}
 	l.stateMu.Unlock()
+	l.changed()
 	l.log.Info("draft reverted", "by", by)
 }
 
@@ -189,6 +192,7 @@ func (l *Live) LoadDraft(by, backup string) (id string, notes []string, err erro
 	l.stateMu.Lock()
 	l.draft = draft
 	l.stateMu.Unlock()
+	l.changed()
 	l.log.Info("draft loaded", "by", by, "from", draft.source)
 	return id, notes, nil
 }
@@ -214,6 +218,7 @@ func (l *Live) SaveRunning(by string, force bool) (*configfile.Saved, error) {
 	l.saved = saved.Document
 	l.running = provenance{source: sourceFiles} // what runs is what the files hold, as after a reload of them
 	l.stateMu.Unlock()
+	l.changed()
 	l.log.Info("config saved", "by", by, "files", saved.Written, "backup", saved.Backup)
 	return saved, nil
 }
@@ -239,6 +244,9 @@ type DraftStatus struct {
 	Edited bool   `json:"edited"`
 	Live   bool   `json:"live"`
 	Saved  bool   `json:"saved"`
+	// ETag is the draft's, as GET /amf/config gives it, so a client can
+	// tell from the status whether to read the draft again.
+	ETag string `json:"etag"`
 }
 
 // LiveStatus is where the running config came from, whether it was edited
@@ -247,14 +255,18 @@ type LiveStatus struct {
 	Source string `json:"source"`
 	Edited bool   `json:"edited"`
 	Saved  bool   `json:"saved"`
+	// ETag is the running config's, as GET /amf/config?live gives it.
+	ETag string `json:"etag"`
 }
 
 // copies compares the draft and the running config with each other and
 // with the files as last read or written. The caller holds l.stateMu.
 func (l *Live) copies() (DraftStatus, LiveStatus) {
 	running := l.Gateway().Config.Source
-	return DraftStatus{Source: l.draft.source, Edited: l.draft.edited, Live: l.draft.doc.Equal(running), Saved: l.draft.doc.Equal(l.saved)},
-		LiveStatus{Source: l.running.source, Edited: l.running.edited, Saved: running.Equal(l.saved)}
+	draftTag, _ := l.draft.doc.ETag(nil)
+	runningTag, _ := running.ETag(nil)
+	return DraftStatus{Source: l.draft.source, Edited: l.draft.edited, Live: l.draft.doc.Equal(running), Saved: l.draft.doc.Equal(l.saved), ETag: draftTag},
+		LiveStatus{Source: l.running.source, Edited: l.running.edited, Saved: running.Equal(l.saved), ETag: runningTag}
 }
 
 // Status returns how the copies stand, and what a save would find of the

@@ -5,7 +5,7 @@
 // when it is done, so every view shows the draft as it now is.
 
 import { useEffect, useState } from './vendor/hooks.mjs';
-import { ApiError, configURL, entriesOf, request } from './api.mjs';
+import { ApiError, configURL, entriesOf, followStatus, request } from './api.mjs';
 
 const listeners = new Set();
 
@@ -16,7 +16,6 @@ export const state = {
 	schema: null,
 	draft: null, // the draft's JSON
 	draftETag: null,
-	configHeader: null,
 	anchors: [],
 	status: null,
 	facades: new Map(), // by name, from GET /amf/models
@@ -58,21 +57,21 @@ export async function load() {
 	await refresh();
 }
 
-// refresh reads the draft, its anchors and the status again.
-export async function refresh() {
+// refresh reads the draft, its anchors and the status again; given the
+// status, as the status stream sends it, it reads the rest only.
+export async function refresh(given) {
 	const [draft, anchors, status, backups] = await Promise.all([
 		request('GET', '/amf/config'),
 		request('GET', '/amf/config-anchors'),
-		request('GET', '/amf/config-status'),
+		given ?? request('GET', '/amf/config-status').then(r => r.data),
 		request('GET', '/amf/config-backups').catch(() => null),
 	]);
 	set({
 		draft: draft.data,
 		draftETag: draft.etag,
-		configHeader: draft.config,
 		anchors: anchors.data.anchors,
-		status: status.data,
-		caller: status.data.caller,
+		status,
+		caller: status.caller,
 		backups: backups ? backups.data.backups : state.backups,
 		phase: 'ready',
 	});
@@ -89,39 +88,73 @@ export async function refreshFacades() {
 	}
 }
 
-// poll checks the status every few seconds, so a change another admin or a
-// reload made shows here, and reads the draft again only if it changed.
-export function poll() {
+// watch keeps the status current, so a change another admin or a reload
+// made shows here, and reads the draft and the rest again with refresh only
+// when the status says the draft or the running config changed (took). It
+// follows GET /amf/config-status?follow; while the stream can't be had, it
+// reads the status every 5 s instead, while the page is on screen, and tries
+// the stream again each time.
+// It reads what each facade routes to every 15 s while the page is on
+// screen. It returns a function that stops it all.
+export function watch() {
 	let stopped = false;
-	let ticks = 0;
-	const tick = async () => {
-		if (stopped) {
-			return;
+	let stream = null;
+	let timer = null;
+	const fallBack = () => {
+		stream = null;
+		if (!stopped) {
+			timer = setTimeout(tick, 5000);
 		}
-		if (document.visibilityState === 'visible' && state.phase === 'ready') {
-			try {
-				const r = await request('GET', '/amf/config');
-				if (r.etag !== state.draftETag || r.config !== state.configHeader) {
-					await refresh();
-				} else {
-					const status = await request('GET', '/amf/config-status');
-					set({ status: status.data, caller: status.data.caller });
-				}
-				if (ticks++ % 3 === 0) {
-					await refreshFacades();
-				}
-			} catch (e) {
-				if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
-					set({ phase: 'signin', signInError: 'The gateway no longer accepts this key for the admin API: ' + e.message });
-				}
-			}
-		}
-		setTimeout(tick, 5000);
 	};
-	setTimeout(tick, 5000);
+	const tick = async () => {
+		if (stopped || state.phase !== 'ready' || document.visibilityState !== 'visible') {
+			return fallBack();
+		}
+		try {
+			await took((await request('GET', '/amf/config-status')).data);
+		} catch (e) {
+			signedOutBy(e);
+			return fallBack();
+		}
+		stream = followStatus(({ event, data }) => {
+			if (event === 'message') {
+				took(JSON.parse(data)).catch(signedOutBy);
+			}
+		});
+		stream.done.then(fallBack, e => {
+			signedOutBy(e);
+			fallBack();
+		});
+	};
+	timer = setTimeout(tick, 0);
+	const facades = setInterval(() => {
+		if (document.visibilityState === 'visible' && state.phase === 'ready') {
+			refreshFacades();
+		}
+	}, 15000);
 	return () => {
 		stopped = true;
+		clearTimeout(timer);
+		clearInterval(facades);
+		stream?.stop();
 	};
+}
+
+// took shows status, and, if the draft's ETag or the running config's state
+// differs from what the page last read, reads the rest again with it.
+async function took(status) {
+	if (status.draft.etag !== state.draftETag || JSON.stringify(status.live) !== JSON.stringify(state.status?.live)) {
+		return refresh(status);
+	}
+	set({ status, caller: status.caller });
+}
+
+// signedOutBy sends the page back to sign-in if e says the gateway no longer
+// accepts its key for the admin API.
+function signedOutBy(e) {
+	if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+		set({ phase: 'signin', signInError: 'The gateway no longer accepts this key for the admin API: ' + e.message });
+	}
 }
 
 // sharing returns, for the path of a value in the config, the anchor it

@@ -163,7 +163,8 @@ func (s *server) followLogs(w http.ResponseWriter, r *http.Request, client backe
 }
 
 // mayStillRead reports whether the running config, which may have replaced
-// the one the stream started under, lets client read the log.
+// the one the stream started under, lets client read the log, or the
+// config's status, which server.adminApi.read allows together.
 func (s *server) mayStillRead(client backend.Client) bool {
 	cfg := s.live.Gateway().Config.Server
 	return cfg.AdminAPI.CanRead(client.Name, cfg.GroupsOf(client.Name))

@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromePath, launch } from './chrome.mjs';
-import { signIn, start } from './gateway.mjs';
+import { adminKey, signIn, start } from './gateway.mjs';
 
 const skip = !chromePath() && 'no Chrome on the PATH; set CHROME to one';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -137,5 +137,29 @@ test('back and forward step through what was shown', { skip }, async t => {
 	await page.until(() => document.querySelector('.head-row h1')?.textContent.startsWith('local'));
 	await page.run(() => history.forward());
 	await page.until(() => document.querySelector('.head-row h1')?.textContent.startsWith('swap'));
+	assert.deepEqual(page.problems, []);
+});
+
+test('another admin\'s edit shows from the status stream, which leaves the draft unread until it changes', { skip }, async t => {
+	const { gw, page } = await session(t);
+	await signIn(page, gw, '#/model/swap');
+	await page.until(() => document.querySelector('.topbar').textContent.includes('config live'));
+	await page.run(() => {
+		window.reads = [];
+		const fetch = window.fetch;
+		window.fetch = (url, options) => {
+			window.reads.push(String(url));
+			return fetch(url, options);
+		};
+		return true;
+	});
+	await sleep(6000); // longer than the 5 s the page used to read the draft at
+	assert.deepEqual(await page.run(() => window.reads.filter(u => u.startsWith('/amf/config') && !u.startsWith('/amf/config-status?follow'))), [], 'nothing read while nothing changes');
+
+	const edit = await fetch(gw.url + '/amf/config/models/swap/description', { method: 'PUT', headers: { Authorization: 'Bearer ' + adminKey, 'Content-Type': 'application/json' }, body: '"Another admin"' });
+	assert.equal(edit.status, 201); // swap has no description yet
+	await page.until(() => document.querySelector('.topbar').textContent.includes('changes staged'), 1000);
+	assert.ok((await page.run(() => window.reads)).includes('/amf/config'), 'the draft is read once it changed');
+	assert.ok(!(await page.run(() => window.reads)).includes('/amf/config-status'), 'the status comes from the stream, not read again');
 	assert.deepEqual(page.problems, []);
 });

@@ -4,6 +4,11 @@ Before 1.0, a minor release can change config keys.
 
 ## [Unreleased]
 
+### Added
+
+- `GET /amf/config-status?follow` streams the status as server-sent events: the status at once, then again each time it changes, after an edit, apply, revert, load, save or reload, or, by a check every 2 seconds while a stream is open, after an edit to the files on the host. The admin UI follows it instead of reading the draft and the status every 5 seconds, and reads the status every 5 seconds only while it can't follow the stream.
+- `GET /amf/config-status` gives each copy's `ETag`, in `draft.etag` and `live.etag`, so a client can tell from the status whether a copy changed.
+
 ### Changed
 
 - The admin UI's **Diff** button looks disabled while the draft holds what is running, as **Revert** is, but can still be clicked to confirm there is nothing to show.
