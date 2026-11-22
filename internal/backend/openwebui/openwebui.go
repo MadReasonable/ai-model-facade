@@ -33,15 +33,15 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 type Config struct {
 	Type                string `yaml:"type" doc:"The adapter: which server this is, which decides how the gateway reads its state." schema:"required"`
-	openaihttp.Config   `yaml:",inline"`
+	httpbackend.Config  `yaml:",inline"`
 	Chats               string       `yaml:"chats" doc:"What happens to the chat each request creates in Open WebUI, once it is answered." schema:"enum=delete|archive|keep,default=delete"` // delete (default) | archive | keep
 	PollIntervalSeconds float64      `yaml:"pollIntervalSeconds" doc:"How often to read the chat while the answer is generated." schema:"default=0.25,min=0,unit=seconds"`                   // default 0.25
 	Links               []LinkConfig `yaml:"links" doc:"Backends of this gateway that reach the same servers as Open WebUI's connections, whose state is read instead of the state Open WebUI passes on, which most servers don't report exactly."`
@@ -58,16 +58,16 @@ type LinkConfig struct {
 }
 
 type Backend struct {
-	*openaihttp.Client        // its Chat is shadowed by the chat flow below
-	name               string // its entry under backends
-	state              *openaihttp.StateCache
-	chats              string
-	poll               time.Duration
-	linkConfigs        []LinkConfig
-	links              []*link                       // set by Link
-	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkLinks
-	linkList           atomic.Pointer[linkList]      // from the latest-started state fetch, with links
-	log                *slog.Logger
+	*httpbackend.Client        // its Chat is shadowed by the chat flow below
+	name                string // its entry under backends
+	state               *httpbackend.StateCache
+	chats               string
+	poll                time.Duration
+	linkConfigs         []LinkConfig
+	links               []*link                       // set by Link
+	listed              atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkLinks
+	linkList            atomic.Pointer[linkList]      // from the latest-started state fetch, with links
+	log                 *slog.Logger
 }
 
 // New builds the adapter from its config entry. log receives what the
@@ -101,12 +101,12 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 			return nil, fmt.Errorf("links.backend is required")
 		}
 	}
-	client, err := openaihttp.NewClient(c.Config)
+	client, err := httpbackend.NewClient(c.Config)
 	if err != nil {
 		return nil, err
 	}
 	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, linkConfigs: c.Links, log: log}
-	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
+	b.state = httpbackend.NewStateCache(c.Config, b.fetchState)
 	return b, nil
 }
 
@@ -121,7 +121,7 @@ type link struct {
 
 // linkTarget is a backend a link can name: one that reads its state from its
 // server, and in which a request through Open WebUI can count as pending.
-// Every adapter built on openaihttp.NewBackend is one; an openWebUi backend
+// Every adapter built on httpbackend.NewBackend is one; an openWebUi backend
 // is not.
 type linkTarget interface {
 	backend.Backend
@@ -685,7 +685,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	// Open WebUI passes max_completion_tokens on to Ollama, which ignores it,
 	// and takes max_tokens for every connection: it reaches OpenAI's newer
 	// models too, which refuse that name directly (verified on v0.12.3).
-	limited, limitErr := openaihttp.UseMaxTokens(req.Body)
+	limited, limitErr := httpbackend.UseMaxTokens(req.Body)
 	if limitErr != nil {
 		return backend.ChatResult{}, limitErr
 	}
@@ -757,7 +757,7 @@ func (r *run) createChat(ctx context.Context, body []byte) error {
 	if err != nil {
 		return err
 	}
-	data, err := openaihttp.ReadBody(resp)
+	data, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return err
 	}
@@ -812,7 +812,7 @@ func (r *run) start(ctx context.Context, req backend.ChatRequest) (*backend.Chat
 	if err != nil {
 		return nil, err
 	}
-	data, err := openaihttp.ReadBody(resp)
+	data, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -970,7 +970,7 @@ func (r *run) get(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := openaihttp.ReadBody(resp)
+	data, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -1017,7 +1017,7 @@ func (r *run) afterwards(method, path string) {
 	resp, err := r.b.Do(ctx, method, path, nil, "", r.client)
 	if err == nil {
 		var data []byte
-		if data, err = openaihttp.ReadBody(resp); err == nil && resp.StatusCode/100 != 2 {
+		if data, err = httpbackend.ReadBody(resp); err == nil && resp.StatusCode/100 != 2 {
 			err = fmt.Errorf("%s: %s", resp.Status, snippet(data))
 		}
 	}

@@ -13,13 +13,13 @@ import (
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/anthropic"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaserver"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/llamaswap"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/lmstudio"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/localai"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/ollama"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openai"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
 	"github.com/MadReasonable/ai-model-facade/internal/backend/openwebui"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/history"
@@ -185,13 +185,13 @@ func historyLimits(cfg *config.Config) history.Limits {
 }
 
 // accessor is a backend with an access list; every adapter has one, through
-// openaihttp.Config. A backend without one allows every caller.
+// httpbackend.Config. A backend without one allows every caller.
 type accessor interface {
 	Access() config.Access
 }
 
 // keyMapper is a backend with a keyMap; every adapter has one, through
-// openaihttp.Config.
+// httpbackend.Config.
 type keyMapper interface {
 	KeyMap() config.KeyMap
 }
@@ -310,7 +310,7 @@ func (g *Gateway) relist(ctx context.Context, name string, answered chan<- relis
 	b := g.backends[name]
 	retry, ok := b.(interface{ ListRetry() time.Duration })
 	if !ok {
-		return // every adapter has it, through openaihttp.Client
+		return // every adapter has it, through httpbackend.Client
 	}
 	for {
 		select {
@@ -348,13 +348,13 @@ var backendTypes = []struct {
 	config any
 	build  func(config.Entry, *slog.Logger) (backend.Backend, error)
 }{
-	{"llamaSwap", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaswap.New(e) }},
-	{"llamaServer", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaserver.New(e) }},
-	{"lmStudio", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return lmstudio.New(e) }},
-	{"localAi", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return localai.New(e) }},
-	{"ollama", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return ollama.New(e) }},
-	{"openAi", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return openai.New(e) }},
-	{"anthropic", openaihttp.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return anthropic.New(e) }},
+	{"llamaSwap", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaswap.New(e) }},
+	{"llamaServer", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return llamaserver.New(e) }},
+	{"lmStudio", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return lmstudio.New(e) }},
+	{"localAi", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return localai.New(e) }},
+	{"ollama", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return ollama.New(e) }},
+	{"openAi", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return openai.New(e) }},
+	{"anthropic", httpbackend.EntryConfig{}, func(e config.Entry, _ *slog.Logger) (backend.Backend, error) { return anthropic.New(e) }},
 	{"openWebUi", openwebui.Config{}, func(e config.Entry, log *slog.Logger) (backend.Backend, error) {
 		return openwebui.New(e, log.With("backend", e.Name))
 	}},

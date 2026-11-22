@@ -61,7 +61,7 @@ Decided: the pipeline is a package of its own, not part of the facade type, so a
 
 Three interfaces separate the stages, and each one is where a kind of extension goes.
 
-- `backend.Backend` is the adapter: `ListModels`, `Chat` and `Protocols`, the formats its `Chat` accepts. Selection runs over the candidates that can serve the request's protocol, directly or through a translator, so a ready model that can't never wins over one that can. A new kind of backend is a new package implementing it, usually on the shared `openaihttp` client and state cache, plus one case in `gateway.newBackend`.
+- `backend.Backend` is the adapter: `ListModels`, `Chat` and `Protocols`, the formats its `Chat` accepts. Selection runs over the candidates that can serve the request's protocol, directly or through a translator, so a ready model that can't never wins over one that can. A new kind of backend is a new package implementing it, usually on the shared `httpbackend` client and state cache, plus one case in `gateway.newBackend`.
 - `backend.ModelStateProvider` is an optional capability: `LoadedModels` reports ready, starting and unknown models. It is optional because a backend that can't report state can still serve a facade whose selector doesn't need it.
 - `selector.Selector` declares the capabilities it `Requires`, and the gateway checks them against each candidate's backend when the config loads, so a facade that can't work is a startup error, not a request-time one.
 
@@ -219,7 +219,7 @@ Decided against: a param to choose whether candidates are returned, since they c
 `/amf` belongs to the gateway rather than to a client API, so it needs no client's format and can always read state.
 `GET /amf/models?follow` streams that list (`modelsWatch`), so the admin UI shows a load without polling.
 A backend tells the gateway nothing of a load another client starts, so the stream can't avoid reading state: while a stream is open, one goroutine on `Live` starts a check every 15 s, a state snapshot (`backend.WithStateSnapshot`) that every stream lists its caller's facades under, so each backend is read once per check however many streams are open.
-What the gateway changes itself starts a check at once, at most one a second: a reload or apply, and each change of a backend's pending count (`backend.PendingWatcher`, which `openaihttp.StateCache` implements), which is when a load the gateway sent starts and ends.
+What the gateway changes itself starts a check at once, at most one a second: a reload or apply, and each change of a backend's pending count (`backend.PendingWatcher`, which `httpbackend.StateCache` implements), which is when a load the gateway sent starts and ends.
 The pending count is wired in `Gateway.start`, not `Build`, so a failed build leaves nothing pointing at `Live`.
 Each stream lists its own caller's facades, since what a caller may use differs, and finds the caller again by its credential under the running config before each event, ending once that config refuses it.
 Decided against: each tab reading `/amf/models` on its own timer, as the UI did at first, which read every backend once per tab.
@@ -237,7 +237,7 @@ Decided against: a list of its own for the log; a key that may read the config i
 
 ## Backend state
 
-Selection is only as good as the state it reads, so state reads have their own rules, implemented once in `openaihttp.StateCache` and shared by every adapter.
+Selection is only as good as the state it reads, so state reads have their own rules, implemented once in `httpbackend.StateCache` and shared by every adapter.
 
 ### Fetching
 
@@ -259,8 +259,8 @@ So the cache counts each request sent and not yet released (`StateCache.Pending`
 What the backend itself reports as ready or starting is kept.
 The count is taken before and after the backend read, so a load that ends or begins during the read still shows.
 
-Counting is wired by the adapter's base: `openaihttp.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai` and `anthropic` are built on it.
-An adapter built on `openaihttp.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
+Counting is wired by the adapter's base: `httpbackend.NewBackend` builds the client and the state cache together, with the client's chat requests counted, and `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai` and `anthropic` are built on it.
+An adapter built on `httpbackend.NewClient` and `NewStateCache` instead still works, but its loads never show as starting, so concurrent requests fall through to a `loadIfNone` fallback and cause the swap the count exists to avoid.
 A request is released when its response headers arrive, since llama-swap, llama-server's router, LM Studio, LocalAI and Ollama all send headers only once the model is loaded (verified on Ollama 0.40.8, where headers arrive with the first token, on llama-server b11580, on LM Studio's llmster 0.0.25-1 and on LocalAI v4.11.0).
 The Open WebUI adapter releases at the first output its polling sees, because Open WebUI answers the start of a chat at once.
 On release, if the cached state didn't list the model as ready, a load just finished or failed and may have evicted other models, so the cache is dropped (`StateCache.Invalidate`); a refresh already in flight is then neither cached nor joined, since it may predate the change.
@@ -291,8 +291,8 @@ The cost is that the copy of this gateway's list Open WebUI caches during the lo
 ## Backend adapters
 
 Each adapter maps one backend's API onto `Backend` and, where it can, `ModelStateProvider`.
-`llamaSwap`, `llamaServer`, `lmStudio`, `localAi`, `ollama` and `openAi` forward requests unchanged through `openaihttp.Client`; `anthropic` forwards Messages to the Claude API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
-Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `openaihttp.Config`.
+`llamaSwap`, `llamaServer`, `lmStudio`, `localAi`, `ollama` and `openAi` forward requests unchanged through `httpbackend.Client`; `anthropic` forwards Messages to the Claude API; `openWebUi` runs Open WebUI's chat flow and builds the response itself.
+Every adapter takes the same connection keys (`baseUrl`, `apiKey`, `passthroughAuth`, the timing keys), because they all come from `httpbackend.Config`.
 
 ### llama-swap
 
@@ -407,11 +407,11 @@ A bare name is not mapped to `name:latest`, which would be implicit matching by 
 
 OpenAI's API serves Chat Completions, Responses and legacy Completions at their own paths, and so do other hosted APIs, such as OpenRouter's, which the same adapter serves by `baseUrl` (Responses not checked on any API but OpenAI's).
 The adapter declares Responses, so a Responses request reaches it untranslated, and implements `backend.ResponsesKeeper`, reading a kept response's conversation back for the store (Responses conversations).
-Chat Completions has two names for the token limit, and no one name works everywhere (verified 2026-11-08): OpenAI's models from `gpt-5` on, and `o3`, refuse `max_tokens` even beside the other; Ollama 0.40.8 ignores `max_completion_tokens` with a 200; llama-swap v263, llama-server b11580, LM Studio and LocalAI honour either; Open WebUI v0.12.3 takes `max_tokens` for every connection tried. So `openAi` sends `max_completion_tokens`, `ollama` and `openWebUi` send `max_tokens`, renaming in place (`openaihttp.UseMaxCompletionTokens`, `UseMaxTokens`), and the translator sends `max_tokens`. With both names, `max_completion_tokens`' value wins, as on the backends that honour both.
+Chat Completions has two names for the token limit, and no one name works everywhere (verified 2026-11-08): OpenAI's models from `gpt-5` on, and `o3`, refuse `max_tokens` even beside the other; Ollama 0.40.8 ignores `max_completion_tokens` with a 200; llama-swap v263, llama-server b11580, LM Studio and LocalAI honour either; Open WebUI v0.12.3 takes `max_tokens` for every connection tried. So `openAi` sends `max_completion_tokens`, `ollama` and `openWebUi` send `max_tokens`, renaming in place (`httpbackend.UseMaxCompletionTokens`, `UseMaxTokens`), and the translator sends `max_tokens`. With both names, `max_completion_tokens`' value wins, as on the backends that honour both.
 Everything here is from OpenAI's API documentation; the testkit's live claim, run with `OPENAI_API_KEY` set, checked the model list, a chat and the refusal of an unknown model against the API.
 
 A hosted model needs no load, so every model `/v1/models` lists is ready while the API answers.
-The state is the latest list (`openaihttp.ListedState`), read at startup and on a reload, and read again in two cases: when a request to the API gets no answer or a 5xx, which drops the list and the cached state, and when the list is older than `stateCacheSeconds`, if that is set.
+The state is the latest list (`httpbackend.ListedState`), read at startup and on a reload, and read again in two cases: when a request to the API gets no answer or a 5xx, which drops the list and the cached state, and when the list is older than `stateCacheSeconds`, if that is set.
 A listing that fails leaves no list, so the backend reads as unavailable and selection passes over its candidates, and every state read lists again until one succeeds.
 So a healthy API costs no call per request, an outage costs one listing per request until it ends, and a backend that goes away stops ending the walk through a facade's list.
 A client that leaves mid-request isn't the API failing, so it drops nothing; a 429 doesn't either, since it means not now rather than down, and it is passed on with its `Retry-After`.
@@ -431,12 +431,12 @@ Decided: the Messages API, which other protocols reach through a translator, not
 The compatible endpoint takes the gateway's bodies unchanged, but with Anthropic's limits: responses carry no thinking, prompt caching isn't supported, and many fields are ignored; Anthropic calls it mainly for testing and comparison.
 Through Messages a facade gets what that endpoint can't give: thinking in the response, and prompt caching, thinking settings and effort set through its params.
 The cost is a second exception to bodies passing through as bytes, beside the Open WebUI adapter's response, on translated routes only.
-Decided against: Anthropic's Go SDK. Its typed params would drop or hide the Messages fields that params pass on, and its own HTTP client would bypass `openaihttp`'s failure hook, timeouts and `Retry-After`, and retry by itself the failures the gateway must notice.
+Decided against: Anthropic's Go SDK. Its typed params would drop or hide the Messages fields that params pass on, and its own HTTP client would bypass `httpbackend`'s failure hook, timeouts and `Retry-After`, and retry by itself the failures the gateway must notice.
 
 Both endpoints need an `anthropic-version` header, which the documentation lists as optional (verified: the API refuses either call without one, with 400 "anthropic-version: header is required"), and both take the key as a bearer token (verified).
 The adapter sends `2023-06-01`, through `Client.GetJSONWith` for the model list and `Client.Send` for chats: `2026-10-21` refuses `temperature`, `top_p` and `top_k` on every model, which Chat Completions clients send routinely.
 Models come from `GET /v1/models`, a page at a time, up to 1000 a page, following `last_id` while `has_more` is set; by default it lists active and deprecated models, not retired ones.
-As for OpenAI, every listed model is ready while the API answers, and the list is read again after a failed request or once older than `stateCacheSeconds` (`openaihttp.ListedState`); `Client.Send` reports a failed chat to it as `Client.Chat` does.
+As for OpenAI, every listed model is ready while the API answers, and the list is read again after a failed request or once older than `stateCacheSeconds` (`httpbackend.ListedState`); `Client.Send` reports a failed chat to it as `Client.Chat` does.
 The adapter declares only `anthropicMessages`, so a legacy completion can't reach it, and params for it are always in Messages spelling.
 Limit: a key that isn't scoped to one workspace needs `anthropic-workspace-id` on every request, which the gateway doesn't send.
 
@@ -499,7 +499,7 @@ Each entry's state depends on where Open WebUI got it:
 
 Links remove the misreads and the unknowns for a server the gateway also has a backend for: `links: [{backend, prefixId}]` takes the state of that server's models from the gateway's backend for it.
 The older `llamaSwap: {backend, prefixId}` block, which did the same for llama-swap alone, was removed in 0.4.0; a config that still has it is refused with the `links` entry to write instead.
-A link may name any backend built on `openaihttp.NewBackend`, since each reads its state from its server and has a state cache to count pending requests in (`Pending`); an `openWebUi` backend can't be linked.
+A link may name any backend built on `httpbackend.NewBackend`, since each reads its state from its server and has a state cache to count pending requests in (`Pending`); an `openWebUi` backend can't be linked.
 
 An entry belongs to a link when its ID, prefix removed, is a model or alias the linked backend lists, and Open WebUI's list doesn't say it came from another kind of server: an entry with `meta.llamaswap` matches only a link to a `llamaSwap` backend, an Ollama connection's (`owned_by: ollama`) only a link to an `ollama` backend, and a facade's (`current`) never, since its state is exact already.
 `prefixId` is needed because Open WebUI applies a connection's prefix to the model ID in place, so the original ID can't be read back from the entry.
@@ -700,7 +700,7 @@ A few rules guard the byte-level design:
 
 - **Duplicate body keys are rejected (400).** gjson and sjson act on a key's first occurrence while backends keep the last, so a duplicate could carry a value past the gateway's params and the `model` rewrite.
 - **Everything buffered is capped:** request bodies at 100 MiB (413 beyond), backend response bodies at 100 MiB, SSE lines at 1 MiB and events at 8 MiB. A client body must arrive within 2 minutes.
-- **A started response that goes silent is ended after `stallTimeoutSeconds`, 600 s by default.** `requestTimeoutSeconds` ends at the headers, so without it a backend that stops mid-response without closing would hold the request and its client forever. Only time spent waiting in a body read counts (`openaihttp`'s `stallBody`), so a client slow to take a stream doesn't end it. Open WebUI's replies arrive by polling, each poll a complete response, so the adapter applies the limit to the time since the message last changed, and stops the task. Decided: on by default, unlike the other timeouts, whose right value depends on the network or the load time; ten minutes without a byte mid-response is long for any backend, and a limit left off would leave the hang in place for everyone who hasn't set it.
+- **A started response that goes silent is ended after `stallTimeoutSeconds`, 600 s by default.** `requestTimeoutSeconds` ends at the headers, so without it a backend that stops mid-response without closing would hold the request and its client forever. Only time spent waiting in a body read counts (`httpbackend`'s `stallBody`), so a client slow to take a stream doesn't end it. Open WebUI's replies arrive by polling, each poll a complete response, so the adapter applies the limit to the time since the message last changed, and stops the task. Decided: on by default, unlike the other timeouts, whose right value depends on the network or the load time; ten minutes without a byte mid-response is long for any backend, and a limit left off would leave the hang in place for everyone who hasn't set it.
 - **SSE is parsed per spec.** An event left unterminated at the end of a stream is discarded, and a stream that ends without `[DONE]` is an error that includes the last line, since llama-server may write a bare JSON error before closing.
 
 ## Admin UI

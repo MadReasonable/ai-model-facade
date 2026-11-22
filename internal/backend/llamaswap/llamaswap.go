@@ -6,14 +6,14 @@ import (
 	"context"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Backend serves both completion endpoints through the embedded client, since
 // llama-swap serves them at their OpenAI paths.
 type Backend struct {
-	*openaihttp.Backend
+	*httpbackend.Backend
 }
 
 // CountTokens forwards to the server's own count, which matches what a chat
@@ -26,7 +26,7 @@ func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*ba
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, err := openaihttp.NewBackend(entry, b.fetchState)
+	base, err := httpbackend.NewBackend(entry, b.fetchState)
 	if err != nil {
 		return nil, err
 	}

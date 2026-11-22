@@ -16,7 +16,7 @@
 // A hosted model needs no load, so every listed model is ready while the API
 // answers, and a state read answers from the latest list without calling the
 // API; a failed request, or a list older than stateCacheSeconds, makes the
-// next state read list the API again (openaihttp.ListedState).
+// next state read list the API again (httpbackend.ListedState).
 package anthropic
 
 import (
@@ -34,7 +34,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/protocols"
 )
@@ -42,15 +42,15 @@ import (
 // Backend sends chats to the Messages API through the embedded client's
 // Send, translating them both ways.
 type Backend struct {
-	*openaihttp.Backend
-	listed     *openaihttp.ListedState
+	*httpbackend.Backend
+	listed     *httpbackend.ListedState
 	outputCaps atomic.Pointer[map[string]int64] // model -> max_tokens, from the latest list
 }
 
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, listed, err := openaihttp.NewListedBackend(entry, b.list)
+	base, listed, err := httpbackend.NewListedBackend(entry, b.list)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.Ch
 	if req.Stream && resp.StatusCode/100 == 2 && mediaType == "text/event-stream" {
 		return backend.ChatResult{Stream: protocols.Stream(backend.AnthropicMessages, resp.Body)}, nil
 	}
-	data, err := openaihttp.ReadBody(resp)
+	data, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return backend.ChatResult{}, err
 	}

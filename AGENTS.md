@@ -44,7 +44,7 @@ Each has its reasoning in `docs/agents-design.md`, in the section named after it
 Mistakes that compile, pass the nearby tests, and break a rule elsewhere:
 
 - **Decoding config with `node.Decode`.** Every config struct goes through `config.DecodeStrict`, or misspelled keys are silently ignored (Config loading).
-- **A new forwarding adapter built on `openaihttp.NewClient` instead of `openaihttp.NewBackend`.** Its chats aren't counted as pending, so its loads never show as starting, and concurrent requests fall through to `loadIfNone` and cause a swap (Loads the gateway started).
+- **A new forwarding adapter built on `httpbackend.NewClient` instead of `httpbackend.NewBackend`.** Its chats aren't counted as pending, so its loads never show as starting, and concurrent requests fall through to `loadIfNone` and cause a swap (Loads the gateway started).
 - **Starting goroutines in `Build` or an adapter's `New`.** A failed reload throws that gateway away, and the goroutine leaks; background work starts in `Gateway.start` (Reload).
 - **Running a state fetch or Open WebUI cleanup on the request's context.** Concurrent requests share one fetch, so one client leaving would fail them all (Fetching); cleanup runs after the response has ended, when the request's context may already be cancelled (Open WebUI). Both run detached with their own timeout.
 - **Putting data into an sjson path unescaped.** Model names such as `qwen3.6` contain path syntax; escape every key segment, including a leading `:` (The walker).
@@ -70,7 +70,7 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 - `internal/mergepatch`: params compiled from YAML and applied to raw bodies.
 - `internal/translate`: converting a request and its reply between protocols: a module per protocol (`chat.go`, `messages.go`, `responses.go`) that reads its requests and writes its replies, and a file per pair holding its translators. A new pair is a translator registered in `translate.direct`.
 - `internal/backend`: the interfaces adapters implement, optional capabilities (`backend.Has`), and the context helpers for sharing state reads.
-- `internal/backend/openaihttp`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
+- `internal/backend/httpbackend`: the shared client and `StateCache`. Rules about reading, caching or adjusting backend state go here, once, not in an adapter.
 - `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui`: one adapter per backend. A new backend is a package here plus an entry in `gateway.backendTypes`.
 - `internal/webui`: the admin UI at `/amf/ui/`, plain JavaScript modules served from `embed` with no build step; Preact and htm are vendored in `static/vendor`, unchanged.
 - `internal/testkit`: fake backends. Tests live in the package they test; see `CONTRIBUTING.md`.

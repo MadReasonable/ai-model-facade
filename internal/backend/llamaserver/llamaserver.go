@@ -27,14 +27,14 @@ import (
 	"slices"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Backend serves both completion endpoints through the embedded client, since
 // llama-server serves them at their OpenAI paths.
 type Backend struct {
-	*openaihttp.Backend
+	*httpbackend.Backend
 }
 
 // CountTokens forwards to the server's own count, which matches what a chat
@@ -47,7 +47,7 @@ func (b *Backend) CountTokens(ctx context.Context, req backend.ChatRequest) (*ba
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, err := openaihttp.NewBackend(entry, b.fetchState)
+	base, err := httpbackend.NewBackend(entry, b.fetchState)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 		IsSleeping bool   `json:"is_sleeping"`
 	}
 	err := b.GetJSON(ctx, "/props", &props)
-	var status *openaihttp.StatusError
+	var status *httpbackend.StatusError
 	if errors.As(err, &status) && status.Code == http.StatusServiceUnavailable {
 		return nil, fmt.Errorf("%w: %w", backend.ErrLoading, err) // a single model loading; see the package comment
 	}

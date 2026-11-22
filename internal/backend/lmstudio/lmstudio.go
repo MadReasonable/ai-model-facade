@@ -32,20 +32,20 @@ import (
 	"net/http"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Backend serves both completion endpoints through the embedded client, since
 // LM Studio serves them at their OpenAI paths.
 type Backend struct {
-	*openaihttp.Backend
+	*httpbackend.Backend
 }
 
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, err := openaihttp.NewBackend(entry, b.fetchState)
+	base, err := httpbackend.NewBackend(entry, b.fetchState)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (b *Backend) LoadsOneAtATime() {}
 // wrong apiKey or a 404 for a wrong baseUrl, is an error of its own.
 func (b *Backend) fetchState(ctx context.Context) ([]backend.ModelInfo, error) {
 	listed, err := b.listed(ctx)
-	var status *openaihttp.StatusError
+	var status *httpbackend.StatusError
 	if errors.As(err, &status) && status.Code == http.StatusInternalServerError {
 		return nil, fmt.Errorf("%w: %w", backend.ErrLoading, err)
 	}

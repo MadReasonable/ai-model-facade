@@ -6,7 +6,7 @@
 // A hosted model needs no load, so every listed model is ready while the API
 // answers, and a state read answers from the latest list without calling the
 // API; a failed request, or a list older than stateCacheSeconds, makes the
-// next state read list the API again (openaihttp.ListedState). The list
+// next state read list the API again (httpbackend.ListedState). The list
 // holds OpenAI's embedding, image and audio models too, since it doesn't say
 // what each one does.
 package openai
@@ -21,21 +21,21 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Backend serves every endpoint through the embedded client, since OpenAI
 // serves them at their own paths.
 type Backend struct {
-	*openaihttp.Backend
-	listed *openaihttp.ListedState
+	*httpbackend.Backend
+	listed *httpbackend.ListedState
 }
 
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, listed, err := openaihttp.NewListedBackend(entry, b.list)
+	base, listed, err := httpbackend.NewListedBackend(entry, b.list)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func New(entry config.Entry) (*Backend, error) {
 // other (read 2026-11-08, not run). Legacy Completions has only max_tokens.
 func (b *Backend) Chat(ctx context.Context, req backend.ChatRequest) (backend.ChatResult, error) {
 	if req.Protocol == backend.OpenAIChat {
-		body, err := openaihttp.UseMaxCompletionTokens(req.Body)
+		body, err := httpbackend.UseMaxCompletionTokens(req.Body)
 		if err != nil {
 			return backend.ChatResult{}, err
 		}
@@ -108,7 +108,7 @@ func (b *Backend) get(ctx context.Context, path string, client backend.Client) (
 	if err != nil {
 		return nil, err
 	}
-	body, err := openaihttp.ReadBody(resp)
+	body, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return nil, err
 	}

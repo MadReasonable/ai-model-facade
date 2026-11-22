@@ -42,21 +42,21 @@ import (
 	"sync/atomic"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
-	"github.com/MadReasonable/ai-model-facade/internal/backend/openaihttp"
+	"github.com/MadReasonable/ai-model-facade/internal/backend/httpbackend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 )
 
 // Backend serves both completion endpoints through the embedded client, since
 // LocalAI serves them at their OpenAI paths.
 type Backend struct {
-	*openaihttp.Backend
+	*httpbackend.Backend
 	limited atomic.Bool // the latest state fetch found a limit on loaded models, or couldn't tell
 }
 
 // New builds the adapter from its config entry.
 func New(entry config.Entry) (*Backend, error) {
 	b := &Backend{}
-	base, err := openaihttp.NewBackend(entry, b.fetchState)
+	base, err := httpbackend.NewBackend(entry, b.fetchState)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func (b *Backend) Tokenize(ctx context.Context, model, text string, client backe
 	if err != nil {
 		return 0, err
 	}
-	data, err := openaihttp.ReadBody(resp)
+	data, err := httpbackend.ReadBody(resp)
 	if err != nil {
 		return 0, err
 	}
@@ -194,7 +194,7 @@ func (b *Backend) readLimit(ctx context.Context) (bool, error) {
 		SingleBackend     bool `json:"single_backend"`
 	}
 	err := b.GetJSON(ctx, "/api/settings", &settings)
-	var status *openaihttp.StatusError
+	var status *httpbackend.StatusError
 	if errors.As(err, &status) && status.Code == http.StatusNotFound {
 		return true, nil
 	}

@@ -54,7 +54,7 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 
 | Package | What its tests cover |
 |---|---|
-| `internal/backend/openaihttp` | The shared HTTP client and state cache: auth, timeouts, caching, single-flight fetches, pending counts. Adapters build on these and don't test them again. |
+| `internal/backend/httpbackend` | The shared HTTP client and state cache: auth, timeouts, caching, single-flight fetches, pending counts. Adapters build on these and don't test them again. |
 | `internal/backend/llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama`, `openai`, `anthropic`, `openwebui` | What is specific to each adapter: reading its backend's state and model list, its config errors, and, for Open WebUI, the chat flow and its links. |
 | `internal/selector` | The selection order and how patterns and aliases match. |
 | `internal/protocols` | Each protocol's descriptor: how its stream is framed and ended, and its stream error event. |
@@ -125,7 +125,7 @@ The tools, by what a test waits for:
 - **A request reaching a fake:** `WaitFor(t, "POST /v1/chat/completions", n)`.
 - **A chat reaching the backend in a claim, which runs against the fake and live:** `waitForChats(t, b, n)`. It waits for the fake's record of the chats, and against a real backend, which doesn't show a request arriving, waits a fixed 300 ms instead.
 - **A load or chat to proceed:** `HoldLoads` returns a `Gate` that holds every load until `Open`; an Open WebUI `Chat` takes a `PollGate`, which lets one poll through per value sent, and a `StopGate`.
-- **Readers waiting on the state cache:** the cache's unexported `waiting` hook, through `readersWaiting` in the `openaihttp` tests.
+- **Readers waiting on the state cache:** the cache's unexported `waiting` hook, through `readersWaiting` in the `httpbackend` tests.
 - **A log line in a gateway test:** `gw.logs.waitFor(t, "...")`.
 
 Every wait gives up after `testkit.Timeout`, 5 seconds, so a test that waits for something that never happens fails instead of hanging.

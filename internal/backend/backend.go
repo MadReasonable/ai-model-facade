@@ -369,7 +369,7 @@ type ModelStateProvider interface {
 
 // PendingWatcher is a backend whose state counts the requests the gateway
 // has sent it and not yet seen answered as pending, starting their models
-// (openaihttp.StateCache.Pending). WatchPending has notify called each time
+// (httpbackend.StateCache.Pending). WatchPending has notify called each time
 // that count changes, so a watcher of the state learns at once of a load
 // the gateway started or finished, which it couldn't learn without asking
 // the backend. notify must not block; a later call replaces it.

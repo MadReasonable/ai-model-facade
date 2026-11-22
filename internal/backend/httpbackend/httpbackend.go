@@ -1,8 +1,12 @@
-// Package openaihttp is the HTTP plumbing shared by backend adapters whose
-// backend serves the OpenAI completion endpoints at their usual paths: the
-// client and its timeouts, auth, chat forwarding, and a cached, shared fetch
-// of loaded-model state.
-package openaihttp
+// Package httpbackend is what backend adapters build on to reach their
+// backend over HTTP: a client with its timeouts and auth (apiKey, keyMap,
+// passthroughAuth), and a cached, shared fetch of loaded-model state that
+// counts the requests the gateway has sent as pending (StateCache), joined
+// in Backend. Client.Chat forwards to the OpenAI completion endpoints at
+// their usual paths; an adapter for another protocol, such as Claude's
+// Messages, sends through Client.Send to its own path instead, and one that
+// runs a flow of its own, such as Open WebUI's, takes the Client alone.
+package httpbackend
 
 import (
 	"bytes"

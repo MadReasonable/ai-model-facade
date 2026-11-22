@@ -126,9 +126,10 @@ Further optional capabilities are found by type assertion: `TokenCounter`, a bac
 The markers the translators put on what the gateway made, such as unsigned thinking and its own search records, are defined here, so the `anthropic` adapter can remove them before the Claude API sees them.
 Context helpers control how state reads are shared within one request or one model listing, so a backend's state is read once even when a request loops back through Open WebUI.
 
-### `internal/backend/openaihttp`
+### `internal/backend/httpbackend`
 
-What adapters share: `Client` (HTTP with timeouts, auth, passthrough and `keyMap`, chat forwarding) and `StateCache`.
+What adapters share: `Client` (HTTP with timeouts, auth, passthrough and `keyMap`, chat forwarding) and `StateCache`, joined in `Backend`.
+`Client.Chat` forwards to the OpenAI completion endpoints; `anthropic` sends Messages through `Client.Send` instead, and `openwebui` takes the `Client` alone, for a chat flow of its own.
 `StateCache` is where state reads are cached, shared between concurrent requests, and adjusted for loads the gateway started itself (`Pending`).
 Rules about backend state are implemented here once, not in each adapter.
 
@@ -138,7 +139,7 @@ One adapter per kind of backend.
 `llamaswap`, `llamaserver`, `lmstudio`, `localai`, `ollama` and `openai` read their backend's state and forward requests unchanged; `llamaswap` and `llamaserver` also forward a token count, and `localai` tokenizes text for one.
 `anthropic` forwards Messages to the Claude API, fills a missing `max_tokens` from the model's output cap, removes what the gateway made that only Claude may write, and adds the MCP beta header where a request needs it.
 `openwebui` runs Open WebUI's own chat flow and builds the OpenAI response itself; it can also take the state of the models another backend of the gateway serves through Open WebUI from that backend (`Link`).
-A new kind of backend is a new package here, built on `openaihttp`, plus one entry in `gateway.backendTypes`.
+A new kind of backend is a new package here, built on `httpbackend`, plus one entry in `gateway.backendTypes`.
 
 ### `internal/testkit`
 
@@ -147,9 +148,9 @@ Fake llama-swap, llama-server, LM Studio, LocalAI, Ollama, Open WebUI, OpenAI an
 
 ## Where a change goes
 
-- A new config option for a backend: its adapter's `Config`, or `openaihttp.Config` if every adapter takes it.
+- A new config option for a backend: its adapter's `Config`, or `httpbackend.Config` if every adapter takes it.
 - A new rule about which model wins: the selector, or a new facade type if it isn't load-aware selection.
-- A new rule about how backend state is read or reused: `openaihttp.StateCache`.
+- A new rule about how backend state is read or reused: `httpbackend.StateCache`.
 - A new endpoint or response header: `internal/gateway/server.go`, or `family.go` for a family's own endpoints.
 - A new config key: its struct, with a `doc` tag and, where it has one, a `schema` tag, which `GET /amf/schema` and the admin UI read.
 - A change to the admin UI: `internal/webui/static`.

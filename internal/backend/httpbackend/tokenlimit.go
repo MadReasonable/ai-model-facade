@@ -1,4 +1,4 @@
-package openaihttp
+package httpbackend
 
 import (
 	"github.com/tidwall/gjson"
