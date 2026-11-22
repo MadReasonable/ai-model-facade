@@ -1,12 +1,12 @@
 # ai-model-facade
 
-**An LLM gateway that gives OpenAI and Claude clients a stable model name and decides, at request time, which real model answers.**
+**An LLM gateway supporting OpenAI and Anthropic compatible clients, most popular LLM backends, and translation between all supported protocols.**
 
-A client asks for a virtual model defined in the gateway's config, such as `assistant`.
-That model is a facade, and the gateway picks a real model from a list you wrote, based on what is currently loaded, applies the parameters you configured, and forwards the request.
-Models and even backends can be swapped without any change on the client side.
+A facade is a model name, such as `assistant`, that the gateway presents to clients.
+Behind it is a list of real models, and each request goes to the first one in the list that's loaded, with the parameters you set.
+Models, and even backends, can change without touching a client.
 
-It is one compiled binary with one configuration file, and runs as a service or as a container from the published image.
+ai-model-facade is one compiled binary with a configuration file and an optional secrets file, and runs as a service or as a container from the published image.
 It serves OpenAI's Chat Completions and Responses APIs and Anthropic's Messages API at the same time, and translates between them, so a client built for any of them works with any backend.
 OpenAI, Claude, llama-swap, llama.cpp's llama-server, LM Studio, LocalAI, Ollama and Open WebUI are all supported.
 
@@ -19,21 +19,19 @@ An Open WebUI backend gives a facade Open WebUI's tools, such as web search, mem
 > [!NOTE]
 > **Early releases (0.x).** Config keys may still change from one 0.x release to the next; [CHANGELOG.md](CHANGELOG.md) lists each change and what a config has to change.
 
-## What it's for
-
-Most clients let you set one model name, and changing it means editing the client.
-Everything that should decide which model answers changes more often than client configs do: which models are loaded, which quant you are testing, which machine a backend runs on, whether the request needs tools.
-A facade moves that decision out of every client and into one place, where it is made again for each request.
+## Use cases
 
 **Swap models without touching clients.** On a server that loads models on demand, such as llama-swap or Ollama, fixed model names can cause the server to waste time juggling models in and out of memory when an already loaded model could easily handle many of the simpler requests. A facade names a list instead, and the first model on it that is already loaded wins. [Open WebUI's background tasks](#open-webui-task-model) run on whatever LLM is up, with thinking off; [a voice assistant](#voice-assistant-on-whichever-preset-is-loaded) always has a fast, non-thinking model, whether the coding set or the general set is loaded. Nothing is evicted unless nothing on the list is loaded, and the config decides what happens then.
 
 **Evaluate models without re-pointing clients.** A facade wired into clients such as Cline, llama.vscode or Home Assistant can list every model under evaluation as its candidates: quants of one model, or entirely different generations and families. Requests are routed to whichever model is loaded, so trying the next model means loading it on the backend, with no change to any client or to the gateway's config. Each response carries an `X-Gateway-Target` header naming the model that answered, so each result can be attributed to the model that produced it.
 
-**Claude and Responses clients on local models.** A client built for Claude, such as Claude Code, speaks Anthropic's Messages API, which local servers don't serve. The gateway serves it, and translates a request for a local model to Chat Completions and the reply back, so the client works unchanged against llama-swap, Ollama or any other backend. A facade can also put the Claude API itself after the local candidates, so it answers only when no local model is loaded. A client built on OpenAI's Responses API is served the same way, and since such a client may send only its new input and leave the conversation to the service, the gateway keeps the conversation, so the next turn can go to whichever candidate is loaded.
+**Claude and Responses clients on local models.** The gateway translates between all three chat APIs, Anthropic's Messages, OpenAI's Responses and Chat Completions, so clients such as Claude Code and Codex can reach any backend, including local models. A facade can also list a hosted provider after the local candidates, so it answers only when no local model is loaded.
 
-**Keep keys and addresses out of clients.** Clients get one address and one key, the gateway's. The backends' addresses and keys live in the gateway's config, and a client's own key reaches a backend only where you turn passthrough on. In that respect it is a reverse proxy for LLM endpoints, limited to each API's chat, completion and model-list endpoints, and Claude's token count.
+**Consolidate endpoints.** Backends across servers, including hosted providers, are given a single endpoint, so a client is set up once to reach all of them.
 
-**Open WebUI's tools for any client.** An Open WebUI backend runs each request through Open WebUI's own chat flow (create a chat, run it with its tools, collect the answer, clean up) and returns one ordinary response or stream. The model then has what it would have in Open WebUI's chat: web search, memories kept between conversations, search over your knowledge bases and documents, notes and past chats, and any tool server or MCP integration you have connected. The client needs no tool support of its own. Combined with the first use, the gateway sits on both sides: a client asks the gateway for `assistant`, the gateway asks Open WebUI, and Open WebUI asks the same gateway for whichever model is loaded.
+**Keep keys and addresses out of clients.** Clients get one address and one gateway key. Backend keys live in the gateway's config and can be sent on behalf of the user. A `keyMap` setting allows backends to assign different keys to each client or group. A client's own key reaches a backend only where you turn passthrough on. In that respect it is a reverse proxy for LLM endpoints, limited to each API's chat, completion and model-list endpoints, and Claude's token count.
+
+**Open WebUI's tools for any client.** An Open WebUI backend runs each request through Open WebUI's own chat, so the model gets its tools: web search, memory, your knowledge bases, and any connected tool server or MCP integration. The client needs no tool support, and gets back an ordinary response or stream.
 
 The gateway doesn't retry, fail over or balance load: each request goes to exactly one model, and an error from it reaches the client.
 It relays chat and completions only, so embeddings, images and audio go straight to the backend.
@@ -393,7 +391,7 @@ level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loa
 ```
 
 The first candidate wasn't loaded, so the pattern won with the quant llama-swap had loaded, and nothing was loaded for the request.
-The second line's request was translated from Messages to Chat Completions, since llama-swap doesn't serve Messages; see [Client APIs](#client-apis).
+The second line's request was translated from Messages to Chat Completions, since the gateway reaches llama-swap through Chat Completions; see [Client APIs](#client-apis).
 
 `config.example.yaml` is a fuller starting point, with two facades for Open WebUI's background tasks and a voice assistant, and a commented-out entry for each other backend.
 
@@ -564,7 +562,7 @@ The list goes inside a block: a list in place of the blocks is a `params` withou
 
 The gateway serves two families of client APIs, each under a base path of its own, because both have a `/v1/models`, with different shapes:
 
-- **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions`, Responses at `/v1/responses`, and legacy completions at `/v1/completions`. Most clients and servers speak Chat Completions, and every backend except the Claude API serves it; of the backends only `openAi` serves Responses.
+- **OpenAI's**, under `/openai`: Chat Completions at `/v1/chat/completions`, Responses at `/v1/responses`, and legacy completions at `/v1/completions`. Most clients and servers speak Chat Completions, and every backend except the Claude API serves it; the gateway sends Responses requests as they are only to `openAi`, and translates them for the others.
 - **Anthropic's**, under `/anthropic`: Messages at `/v1/messages`, and its token count. Clients built for Claude speak it, and only the Claude API serves it.
 
 These four protocols, Chat Completions, legacy completions, Responses and Messages, with each API's model list and the Messages token count, are everything the gateway serves, and not every part of them is supported:
@@ -647,7 +645,7 @@ A request that needs OpenAI's servers is refused with `400`: a tool the backend 
 #### Conversations
 
 A Responses client can send only its new input and name the response it follows in `previous_response_id`, so the service supplies the rest of the conversation.
-No backend but OpenAI's keeps conversations, and the next turn may select another candidate than the last, so the gateway keeps them itself.
+No backend but OpenAI's is sent Responses requests: the gateway reaches the others through Chat Completions or Messages, which carry no conversation of their own, and the next turn may select another candidate than the last, so the gateway keeps them itself.
 
 Each response the gateway serves is kept, unless the request sets `store: false`: the input the client sent and the response's output.
 A request that names one is sent the conversation up to it in its `input`, without `previous_response_id`, to whichever candidate wins.
