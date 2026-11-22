@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
@@ -55,6 +58,7 @@ func (s *server) routeAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /amf/config-revert", write("revert the draft", s.revertConfig))
 	mux.HandleFunc("POST /amf/config-load", write("load the config", s.loadConfig))
 	mux.HandleFunc("POST /amf/config-save", write("save the config", s.saveConfig))
+	mux.HandleFunc("POST /amf/backend-test/{name}", write("check a backend's address and key", s.testBackend))
 	mux.HandleFunc("GET /amf/ui", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/amf/ui/", http.StatusMovedPermanently)
 	})
@@ -515,6 +519,49 @@ func (s *server) saveConfig(w http.ResponseWriter, r *http.Request, client backe
 		Backup string   `json:"backup,omitempty"`
 		Notes  []string `json:"notes"`
 	}{saved.Written, saved.Backup, notes})
+}
+
+// backendTestTimeout bounds a backend test, so a backend that never answers
+// still gets a reply.
+const backendTestTimeout = 10 * time.Second
+
+// backendTest is the body of a backend test that ran: whether the backend
+// listed its models, which, or the error it gave.
+type backendTest struct {
+	OK     bool     `json:"ok"`
+	Models []string `json:"models,omitempty"`
+	Error  string   `json:"error,omitempty"`
+}
+
+// testBackend serves POST /amf/backend-test/<name>, which builds the
+// draft's backend name, as a gateway would, and asks it for its models, so
+// an admin can tell whether its address and key work before applying them.
+// A backend that answers with an error is a 200 with the error; a backend
+// the draft doesn't define is a 404.
+func (s *server) testBackend(w http.ResponseWriter, r *http.Request, client backend.Client) {
+	name := r.PathValue("name")
+	e, err := s.live.Draft().BackendEntry(name, os.LookupEnv)
+	if err != nil {
+		s.editFailed(w, r, client, err)
+		return
+	}
+	b, err := newBackend(e, s.log)
+	if err != nil {
+		s.editFailed(w, r, client, fmt.Errorf("backends.%s: %w", name, err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), backendTestTimeout)
+	defer cancel()
+	models, err := b.ListModels(ctx)
+	result := backendTest{OK: err == nil}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	for _, m := range models {
+		result.Models = append(result.Models, m.ID)
+	}
+	s.log.Info("backend tested", "by", "key "+client.Name, "backend", name, "ok", result.OK)
+	writeJSON(w, http.StatusOK, result)
 }
 
 // configAnchors serves GET /amf/config-anchors: the anchors of the draft, or

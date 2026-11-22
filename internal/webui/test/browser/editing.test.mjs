@@ -1,5 +1,7 @@
 // Editing the draft: when a field's change is sent, what Apply takes, and
 // that the files keep their aliases and comments through it all.
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromePath, launch } from './chrome.mjs';
@@ -38,6 +40,39 @@ test('a field is sent after a pause, and Apply sends one still unsent first', { 
 	await page.click('.dialog .btn.primary', 'Apply');
 	await page.until(() => document.querySelector('.topbar').textContent.includes('config live'));
 	assert.equal(await gw.api('/amf/config/models/swap/description?live'), 'Applied at once');
+	assert.deepEqual(page.problems, []);
+});
+
+test('Test sends an unsent field first, and its result stays, marked at the same height while the address differs', { skip }, async t => {
+	const { gw, page } = await session(t);
+	const seen = [];
+	const backend = createServer((req, res) => {
+		seen.push(req.method + ' ' + req.url);
+		res.setHeader('Content-Type', 'application/json');
+		res.end(JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] }));
+	}).listen(0, '127.0.0.1');
+	await once(backend, 'listening');
+	t.after(() => backend.close());
+	await signIn(page, gw, '#/backend/local');
+
+	await page.click('.head-row button', 'Test');
+	await page.until(() => document.querySelector('.card .banner.bad')?.textContent.includes('127.0.0.1:1'));
+
+	await page.mark(eval(field('baseUrl')), 'url');
+	await page.type('#url', 'http://127.0.0.1:' + backend.address().port);
+	await page.click('.head-row button', 'Test');
+	await page.until(() => document.querySelector('.card .banner.good')?.textContent.includes('lists 2 models'));
+	assert.deepEqual(seen, ['GET /v1/models']);
+	assert.equal((await gw.api('/amf/config/backends/local')).baseUrl, 'http://127.0.0.1:' + backend.address().port, 'the field reached the draft first');
+	const height = await page.run(() => document.querySelector('.card .banner').offsetHeight);
+
+	await page.type('#url', 'http://127.0.0.1:2', { enter: true });
+	await page.until(() => document.querySelector('.card .banner.warn'));
+	assert.equal(await page.run(() => document.querySelector('.card .banner').textContent.trim()), 'baseUrl has changed since this test; test again.');
+	assert.equal(await page.run(() => document.querySelector('.card .banner').offsetHeight), height, 'the box keeps its height');
+
+	await page.type('#url', 'http://127.0.0.1:' + backend.address().port, { enter: true });
+	await page.until(() => document.querySelector('.card .banner.good')?.textContent.includes('lists 2 models'));
 	assert.deepEqual(page.problems, []);
 });
 

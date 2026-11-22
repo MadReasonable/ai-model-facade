@@ -14,6 +14,7 @@ Before 1.0, a minor release can change config keys.
 - `server.adminApi.listen` serves the admin endpoints and the admin UI on an address of their own, so the client APIs can face a network the admin side doesn't.
 - `GET /amf/schema` describes every key the config takes, with its type, default, allowed values and description, for the config and an entry of each backend and facade type. `GET /amf/config-anchors` lists each anchor with the paths that read it. `GET /amf/config-status` names the caller and says whether it may change the config.
 
+- `POST /amf/backend-test/<name>` asks the draft's backend for its models, with the address and key the draft gives it, so they can be checked before they are applied; the admin UI's backend sheet has a **Test** button for it. It needs a key in `server.adminApi.write`.
 - `ai-model-facade init <config> [--secrets <file>]` writes a starting config with a new admin key, which it prints once and the files hold as its hash, so a gateway can be set up from nothing in the admin UI. It never replaces a file.
 
 ### Changed

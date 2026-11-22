@@ -315,3 +315,32 @@ func TestAdmin_ReadEndpointsFollowTheLists(t *testing.T) {
 		t.Errorf("no admins: got %d %s", r.StatusCode, r.body)
 	}
 }
+
+// A backend test builds the draft's entry, not the running one, so an
+// address or key can be checked before it is applied, and sends the key the
+// secrets file holds for it. A backend that fails still gets a 200, with its
+// error; one the draft doesn't define is a 404, and a reader may not test.
+func TestAdmin_BackendTestUsesTheDraft(t *testing.T) {
+	swap, other := newSwap(t), newSwap(t)
+	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
+
+	r := a.send(t, "POST", "/amf/backend-test/llamaSwap", "alices-key", "")
+	a.expect(t, r, http.StatusOK, "test")
+	if !gjson.Get(r.body, "ok").Bool() || gjson.Get(r.body, "models").Raw != `["qwen2.5-coder-3b:q8_0","qwen3.6-35b-a3b:q8_0","qwen3.8-27b:q6_k"]` {
+		t.Errorf("test: %s", r.body)
+	}
+	if last, _ := swap.Last("GET /v1/models"); last.Header.Get("Authorization") != "Bearer swap-key" {
+		t.Errorf("sent %q", last.Header.Get("Authorization"))
+	}
+
+	a.expect(t, a.send(t, "PUT", "/amf/config/backends/llamaSwap/baseUrl", "alices-key", `"`+other.URL+`"`), http.StatusOK, "edit")
+	other.SetDown(true)
+	r = a.send(t, "POST", "/amf/backend-test/llamaSwap", "alices-key", "")
+	a.expect(t, r, http.StatusOK, "test of a backend that is down")
+	if gjson.Get(r.body, "ok").Bool() || !strings.Contains(gjson.Get(r.body, "error").String(), "502") || other.Count("GET /v1/models") != 1 {
+		t.Errorf("test of the draft's address: %s, %d requests there", r.body, other.Count("GET /v1/models"))
+	}
+
+	a.expect(t, a.send(t, "POST", "/amf/backend-test/nothing", "alices-key", ""), http.StatusNotFound, "a backend the draft doesn't define")
+	a.expect(t, a.send(t, "POST", "/amf/backend-test/llamaSwap", "bobs-key", ""), http.StatusForbidden, "a test by a reader")
+}

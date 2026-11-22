@@ -88,7 +88,7 @@ type AdminAPI struct {
 	// Write guards the endpoints that change the draft, what is running or
 	// the files: PUT and DELETE on /amf/config and its paths, and POST
 	// /amf/config-apply, -load, -revert and -save, and POST /amf/reload.
-	Write Access `yaml:"write" doc:"Who may edit the draft, apply, load, revert and save it, and reload the files. Left out, no one may, and those endpoints answer 404."`
+	Write Access `yaml:"write" doc:"Who may edit the draft, apply, load, revert and save it, reload the files, and check a backend's address and key. Left out, no one may, and those endpoints answer 404."`
 	// ConfigBackups is how many backups of the config files a save keeps;
 	// nil means the default, KeepBackups.
 	ConfigBackups *int `yaml:"configBackups" doc:"How many backups of the config files a save keeps, a folder each in backups/ beside the config. With 0, a save removes its own backup once it succeeds." schema:"default=10,min=0"`

@@ -636,3 +636,52 @@ func TestDecodeStrict_OneNameWhereAListGoes(t *testing.T) {
 		t.Errorf("a list: %v", err)
 	}
 }
+
+// A backend's entry from BackendEntry is the one a gateway builds an
+// adapter from, so testing that adapter tests what serve would run: an
+// alias and a merge read through, ${NAME} expanded, and the secrets file's
+// apiKey and keyMap in place. A name the config doesn't define is
+// EditNotFound, which the admin API answers with 404.
+func TestBackendEntry_IsTheEntryAGatewayBuilds(t *testing.T) {
+	main := `
+server:
+  listen: x
+  apiKeys: [{name: alice, key: alices-key}]
+vars:
+  host: &host "http://${SWAP_HOST}:8080"
+backends:
+  swap:
+    type: llamaSwap
+    baseUrl: *host
+    keyMap: {alice: alices-swap-key}
+models:
+  task: {backend: swap}
+`
+	secrets := `
+backends:
+  swap: {apiKey: swaps-key, keyMap: {bob: bobs-swap-key}}
+`
+	d, err := ReadDocument([]byte(main), []byte(secrets))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := d.BackendEntry("swap", env(map[string]string{"SWAP_HOST": "swap"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		BaseURL string            `yaml:"baseUrl"`
+		APIKey  string            `yaml:"apiKey"`
+		KeyMap  map[string]string `yaml:"keyMap"`
+	}
+	if err := e.Node.Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	if e.Name != "swap" || e.Type != "llamaSwap" || v.BaseURL != "http://swap:8080" || v.APIKey != "swaps-key" || v.KeyMap["alice"] != "alices-swap-key" || v.KeyMap["bob"] != "bobs-swap-key" {
+		t.Errorf("entry %s of type %s: %+v", e.Name, e.Type, v)
+	}
+	var edit *EditError
+	if _, err := d.BackendEntry("other", env(map[string]string{"SWAP_HOST": "swap"})); !errors.As(err, &edit) || edit.Kind != EditNotFound {
+		t.Errorf("an undefined backend: %v", err)
+	}
+}

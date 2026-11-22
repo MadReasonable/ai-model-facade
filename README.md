@@ -884,6 +884,7 @@ server:
 ```
 
 `write` covers every endpoint that changes the draft, what is running or the files: `PUT` and `DELETE` on [`/amf/config`](#editing-the-config), `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and [`POST /amf/reload`](#reloading-the-config).
+It covers `POST /amf/backend-test` too, which changes nothing but makes the gateway call the address a draft names.
 `read` covers the endpoints that only show: `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and [`/amf/logs`](#reading-the-log).
 The log shows each client's requests, the facade and model each got, and backend errors, so a key in `read` sees what every client does, though never a secret.
 A key in `write` may use those too, since a client that edits the config reads it to see what it changes, and could list itself in `read` anyway.
@@ -1225,7 +1226,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
 | `adminApi.read` | The keys and groups that may read the config, its status, its backups and the log, with `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and `/amf/logs`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
-| `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, through `PUT` and `DELETE` on `/amf/config` and `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, and `POST /amf/reload`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
+| `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, and check a backend's address and key, through `PUT` and `DELETE` on `/amf/config`, `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, `POST /amf/reload`, and `POST /amf/backend-test`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.listen` | The address and port the admin endpoints and the [admin UI](#the-admin-ui) listen on, instead of `listen`, which then serves only the client APIs, `/health` and `/amf/models`. A client API can then face a wider network than the admin side, such as `listen` on `0.0.0.0` and this on `127.0.0.1`. It must differ from `listen`, and a change takes effect on restart; see [Reloading the config](#reloading-the-config). Default: the admin endpoints are served on `listen`. |
 | `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
@@ -1445,6 +1446,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /amf/config-load` | Replaces the draft with the files as they are on disk now, or with `?backup=<id>` with a backup, `-1` being the newest. For `server.adminApi.write`. |
 | `POST /amf/config-revert` | Replaces the draft with the running config. For `server.adminApi.write`. |
 | `POST /amf/config-save` | Writes the running config to its files, after a backup. For `server.adminApi.write`. |
+| `POST /amf/backend-test/<name>` | Asks the draft's backend `<name>` for its models, with the address and key the draft gives it, so they can be checked before they are applied: `ok`, with the IDs in `models` or the backend's error in `error`. For `server.adminApi.write`. |
 | `POST /amf/reload` | Reloads the config from its files, as `SIGHUP` does, into the running config and the draft; see [Reloading the config](#reloading-the-config). For `server.adminApi.write`. |
 | `GET /amf/config-status` | Where the draft and the running config came from, whether each was edited, how the three copies compare, whether each file can be saved, which addresses wait for a restart, and, in `caller`, the caller's key name and whether it may change the config. For `server.adminApi.read`. |
 | `GET /amf/config-anchors` | Each anchor in the draft, or with `?live` in the running config, with where it is defined and the paths that read it, by alias or by merge. For `server.adminApi.read`; see [Editing the config](#editing-the-config). |
@@ -1737,6 +1739,7 @@ Every field that holds a key shows it as dots, with a button at its end that sho
 A group's name is edited in place too, and a rename of either leaves the places that name the old name as they are, which the gateway refuses to apply: a note at the bottom of the card lists every name used that no key or group has, and, for one renamed on the page, offers to give every place the new name.
 - **Backends** and **Models** list their entries, to add, delete, rename and reorder; the order of the facades is the order of the model lists clients read.
 - **A backend, facade or candidate** has a sheet of its keys, built from [`GET /amf/schema`](#api-reference), each with its default and what it does. A facade's sheet lists its candidates in order, with where a request would go now, and a candidate's state on its backend; the tree marks the same with a dot.
+A backend's **Test** checks its address and key before they are applied: it sends any field not sent yet, asks the backend for its models as the draft has it, and shows the backend's answer while the sheet is open, marked out of date while its `type`, `baseUrl` or `apiKey` differs from what was tested.
 
 Each change goes into the draft as a `PUT` does, half a second after typing in a field stops, on Enter, or when the field is left, and the actions below first send anything not sent yet, and the bar at the top says how the draft, the running config and the files compare, as `/amf/config-status` does.
 A **restart needed** pill means the running config names an address the gateway doesn't listen on yet; it, and **can't save**, show their details on hover or on a click.

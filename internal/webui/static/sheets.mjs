@@ -6,7 +6,7 @@
 import { useRef, useState } from './vendor/hooks.mjs';
 import { clone, configURL, entriesOf, isObject, keysOf, request, setKey, withOrder } from './api.mjs';
 import { Chips, EntryBanners, SharedNote, Sheet, TextInput, useEntry, waiting, withKey } from './fields.mjs';
-import { edit, errorText, freshKey, get, recordRename, refresh, rememberKey, remove, renamedTo, renameNode, select, sharing, state, useStore } from './store.mjs';
+import { edit, errorText, freshKey, get, recordRename, refresh, rememberKey, remove, renamedTo, renameNode, select, settle, sharing, state, useStore } from './store.mjs';
 import { Banner, confirm, Copy, Dialog, focusOnMount, html, Icon, openDialog, pathText, plural, Reveal, toast } from './ui.mjs';
 import { keyHash } from './sha256.mjs';
 
@@ -704,6 +704,7 @@ export function BackendSheet({ name }) {
 	const path = ['backends', name];
 	const entry = useEntry(path);
 	const ro = readOnly();
+	const [test, setTest] = useState(null);
 	const wait = waiting(entry);
 	if (wait) {
 		return wait;
@@ -730,14 +731,27 @@ export function BackendSheet({ name }) {
 				crumbs=${[{ label: 'Backends', selection: { kind: 'backends' } }]}
 				title=${html`<span class="mono">${name}</span><span class="badge">${value.type ?? 'no type'}</span>`}
 				tools=${!ro && html`
+					<button class="btn" disabled=${test?.name === name && test.running} title="Ask the backend for its models, with the address and key in the draft" onClick=${() => testBackend(name, setTest)}>Test</button>
 					<button class="btn" onClick=${() => renameEntry('backends', name, 'backend')}>Rename</button>
 					<button class="btn danger" onClick=${async () => (await deleteEntry('backends', name, users.length ? 'Its ' + plural(users.length, 'candidate') + ' would then name a backend that isn\'t defined, so the draft can\'t be applied until they change.' : '')) && select({ kind: 'backends' }, 'properties', { replace: true })}><${Icon} name="trash" /></button>
 				`}
 			/>
 			<${EntryBanners} entry=${entry} />
 			${!typeSchema && html`<${Banner} kind="warn">${value.type ? 'The gateway has no backend type ' + value.type + '; pick one of ' + types.join(', ') + '.' : 'Pick the backend\'s type.'}<//>`}
+			${test?.name === name && html`
+				<${Card} title="Test">
+					${test.running ? html`<p class="muted">Asking ${name} for its models…</p>`
+						: changedKeys(test).length > 0 ? html`<${Banner} kind="warn">${changedSince(changedKeys(test))}<//>`
+						: test.ok ? html`<${Banner} kind="good">Connected: ${name} lists ${plural(test.models?.length ?? 0, 'model')}.<//>`
+						: html`<${Banner}>${test.error}<//>`}
+				<//>
+			`}
 			<${Card} title="Properties">
-				<${Sheet} schema=${schema} value=${value} path=${path} readOnly=${ro} onChange=${entry.commit} />
+				<${Sheet} schema=${schema} value=${value} path=${path} readOnly=${ro} onChange=${v => {
+					const done = entry.commit(v);
+					recheckTest(name, value, v, done, setTest);
+					return done;
+				}} />
 			<//>
 			<${Card} title=${'Candidates on ' + name} intro=${users.length === 0 ? 'No facade uses this backend.' : null}>
 				${users.length > 0 && html`
@@ -758,6 +772,78 @@ export function BackendSheet({ name }) {
 			<//>
 		</div>
 	`;
+}
+
+// testBackend asks the draft's backend name for its models, once every
+// field's change has reached the draft, and passes the result to setTest.
+// It stays on the sheet, with what it was run on (testedState), so that a
+// field changed since, and not yet changed back, marks it out of date
+// (changedKeys), whether the test is still running or done.
+async function testBackend(name, setTest) {
+	setTest({ name, running: true });
+	await settle();
+	const tested = await testedState(name);
+	setTest(t => (t?.name === name ? { ...t, tested, now: tested } : t));
+	let result;
+	try {
+		result = (await request('POST', '/amf/backend-test/' + encodeURIComponent(name))).data;
+	} catch (e) {
+		result = { ok: false, error: errorText(e) };
+	}
+	setTest(t => ({ name, ...result, tested, now: t?.name === name ? t.now : tested }));
+}
+
+// testedKeys are the keys of a backend entry a test depends on: the adapter,
+// and the address and key its model listing uses.
+const testedKeys = ['type', 'baseUrl', 'apiKey'];
+
+// testedState is what a test of the draft's backend name depends on, as it
+// stands: type and baseUrl, and for apiKey, which the page only ever sees as
+// <redacted>, its ETag, a hash of the key itself, null when there is none.
+async function testedState(name) {
+	const entry = get(['backends', name]) ?? {};
+	return { type: entry.type, baseUrl: entry.baseUrl, apiKey: await keyTag(name) };
+}
+
+async function keyTag(name) {
+	try {
+		return (await request('GET', configURL(['backends', name, 'apiKey']))).etag;
+	} catch (e) {
+		if (e.status === 404) {
+			return null;
+		}
+		throw e;
+	}
+}
+
+// changedKeys are the testedKeys that differ now from what the shown test
+// ran on.
+function changedKeys(test) {
+	return test.tested ? testedKeys.filter(k => test.now[k] !== test.tested[k]) : [];
+}
+
+// changedSince says which of testedKeys changed since a test.
+function changedSince(keys) {
+	const list = keys.length > 1 ? keys.slice(0, -1).join(', ') + ' and ' + keys.at(-1) : keys[0] ?? '';
+	return list + (keys.length === 1 ? ' has' : ' have') + ' changed since this test; test again.';
+}
+
+// recheckTest updates what the shown test of backend name is compared with
+// after an edit from before to after, which done settles: type and baseUrl
+// at once, and apiKey, if the edit changed it, by reading its ETag once the
+// edit is in the draft, so a key typed back in matches again.
+function recheckTest(name, before, after, done, setTest) {
+	setTest(t => (t?.name === name && t.now ? { ...t, now: { ...t.now, type: after?.type, baseUrl: after?.baseUrl } } : t));
+	if (JSON.stringify(before?.apiKey) === JSON.stringify(after?.apiKey)) {
+		return;
+	}
+	done.then(async ok => {
+		if (!ok) {
+			return;
+		}
+		const tag = await keyTag(name).catch(() => undefined);
+		setTest(t => (t?.name === name && t.now ? { ...t, now: { ...t.now, apiKey: tag } } : t));
+	});
 }
 
 export function stateClass(state) {

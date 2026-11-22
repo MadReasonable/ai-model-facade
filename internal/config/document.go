@@ -136,6 +136,28 @@ func (d *Document) CheckSchema(lookupEnv func(string) (string, bool), checkEntry
 	return nil
 }
 
+// BackendEntry returns the entry of the backend name as a gateway is built
+// from it: ${NAME} expanded with lookupEnv, the secrets file's values merged
+// in, and aliases read through, so an adapter can be built from it alone.
+// An error is an *EditError of kind EditNotFound when d defines no backend
+// name.
+func (d *Document) BackendEntry(name string, lookupEnv func(string) (string, bool)) (Entry, error) {
+	cfg, err := d.parseSchema(lookupEnv)
+	if err != nil {
+		return Entry{}, err
+	}
+	entries, err := Entries(&cfg.Backends, "backends")
+	if err != nil {
+		return Entry{}, err
+	}
+	for _, e := range entries {
+		if e.Name == name {
+			return e, nil
+		}
+	}
+	return Entry{}, editError(EditNotFound, "backends has no key '%s'", name)
+}
+
 // parseSchema is Parse without the checks that span parts of the config.
 func (d *Document) parseSchema(lookupEnv func(string) (string, bool)) (*Config, error) {
 	c := d.Copy() // expanding ${NAME} and merging the secrets change the tree
