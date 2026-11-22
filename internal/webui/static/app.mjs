@@ -30,7 +30,7 @@ function SignIn() {
 	return html`
 		<div class="signin">
 			<form onSubmit=${submit}>
-				<h1><span class="brand"><span class="logo">AM</span></span>ai-model-facade</h1>
+				<h1><span class="brand"><span class="logo">MF</span></span>ai-model-facade</h1>
 				<p>Sign in with a key that <code>server.adminApi</code> lists, to read and change this gateway's config.</p>
 				<div class="host">${location.host}</div>
 				${s.signInError && html`<div class="banner bad" role="alert">${s.signInError}</div>`}
@@ -84,7 +84,7 @@ function TopBar({ logMode, setLogMode, onMenu, barRef }) {
 		<header class="topbar" ref=${barRef}>
 			<div class="bar-row">
 			<button class="btn ghost icon nav-toggle" title="The config's tree" aria-label="Open the config's tree" onClick=${onMenu}><${Icon} name="menu" /></button>
-			<div class="brand"><span class="logo">AM</span>ai-model-facade</div>
+			<div class="brand"><span class="logo">MF</span>ai-model-facade</div>
 			<div class="states">
 				${s.unreachable ? html`<${PillNote} kind="bad" label="can't reach the gateway" title="The gateway can't be reached" lines=${[s.unreachable.error, 'The page shows the config and the facades as they last were, and tries again in ' + s.unreachable.retry + ' s.']} />` : html`
 				${st.draft.live ? html`<span class="pill good" title="The draft holds what is running">config live</span>` : html`<span class="pill accent" title=${'Draft from ' + st.draft.source + (st.draft.edited ? ', edited since' : '') + '; not applied yet'}>changes staged</span>`}

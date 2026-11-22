@@ -13,6 +13,7 @@ Before 1.0, a minor release can change config keys.
 
 - `health` checks over HTTPS, without checking the certificate, where `server.tls` serves HTTPS only.
 - The `listening` log line names each HTTPS address, as `https` and `adminHttps`, and no longer carries the version, which `starting` does.
+- The admin UI's logo and its favicon both read MF; they read AM and FN.
 
 ## [0.4.1] - 2026-11-22
 
