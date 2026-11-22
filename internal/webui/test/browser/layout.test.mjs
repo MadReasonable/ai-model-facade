@@ -101,3 +101,16 @@ for (const [device, width] of [['a desktop', 1280], ['a phone', 400]]) {
 		assert.deepEqual(page.problems, []);
 	});
 }
+
+test('while the gateway can\'t be reached, the bar shows only that, and the pills come back with it', { skip }, async t => {
+	const { gw, page } = await session(t);
+	await signIn(page, gw);
+	const bar = () => document.querySelector('.topbar .states').textContent;
+	await page.until(() => document.querySelector('.topbar .states').textContent.includes('config live'));
+	await gw.down();
+	await page.until(() => document.querySelector('.topbar .states').textContent.trim() === 'can\'t reach the gateway', 5000);
+	await gw.up();
+	await page.until(() => document.querySelector('.topbar .states').textContent.includes('config live'), 10000);
+	assert.ok(!(await page.run(bar)).includes('can\'t reach'), 'the connection pill is gone');
+	assert.deepEqual(page.problems, []);
+});

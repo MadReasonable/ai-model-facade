@@ -5,6 +5,7 @@
 // fake one (fakeLlamaSwap) for what each facade routes to.
 
 import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHTTPServer } from 'node:http';
 import { createServer } from 'node:net';
@@ -73,8 +74,10 @@ export const secrets = `server:
     - {name: viewer, key: ${readerKey}}
 `;
 
-// start starts a gateway, and returns its URL, its files and a stop. With
-// swap, the URL of a fakeLlamaSwap, the llama-swap backend is that fake.
+// start starts a gateway, and returns its URL, its files, a stop, and down
+// and up, which stop it and start it again on the same port and files, for
+// a page that loses the gateway. With swap, the URL of a fakeLlamaSwap, the
+// llama-swap backend is that fake.
 export async function start({ swap } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'amf-gw-'));
 	const port = await freePort();
@@ -82,24 +85,34 @@ export async function start({ swap } = {}) {
 	const text = config(port);
 	writeFileSync(files.config, swap ? text.replace('baseUrl: http://127.0.0.1:1 # nothing listens here', 'baseUrl: ' + swap) : text);
 	writeFileSync(files.secrets, secrets, { mode: 0o600 });
-	const proc = spawn(build(), ['serve', files.config, '--secrets', files.secrets], { stdio: 'ignore' });
 	const url = 'http://127.0.0.1:' + port;
-	for (let i = 0; i < 200; i++) {
-		try {
-			if ((await fetch(url + '/health')).ok) {
-				break;
+	let proc = null;
+	const up = async () => {
+		proc = spawn(build(), ['serve', files.config, '--secrets', files.secrets], { stdio: 'ignore' });
+		for (let i = 0; i < 200; i++) {
+			try {
+				if ((await fetch(url + '/health')).ok) {
+					break;
+				}
+			} catch {
+				// not up yet
 			}
-		} catch {
-			// not up yet
+			await new Promise(r => setTimeout(r, 50));
 		}
-		await new Promise(r => setTimeout(r, 50));
-	}
+	};
+	await up();
 	return {
 		url,
 		files,
 		read: name => readFileSync(files[name], 'utf8'),
 		// api reads an admin endpoint as the admin.
 		api: async (path, key = adminKey) => (await fetch(url + path, { headers: { Authorization: 'Bearer ' + key } })).json(),
+		async down() {
+			const exited = once(proc, 'exit');
+			proc.kill();
+			await exited;
+		},
+		up,
 		stop() {
 			proc.kill();
 			rmSync(dir, { recursive: true, force: true });

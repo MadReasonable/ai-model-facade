@@ -1769,6 +1769,8 @@ A backend's **Test** checks its address and key before they are applied: it send
 
 Each change goes into the draft as a `PUT` does, half a second after typing in a field stops, on Enter, or when the field is left, and the actions below first send anything not sent yet, and the bar at the top says how the draft, the running config and the files compare, as `/amf/config-status` does.
 A **restart needed** pill means the running config names an address the gateway doesn't listen on yet; it, and **can't save**, show their details on hover or on a click.
+The page follows `/amf/config-status?follow` and `/amf/models?follow`, and reads each on a timer instead only while it can't follow the stream.
+While it can't read the status either way, the bar shows only **can't reach the gateway**, since the other pills would be out of date, and the page tries again after 1 second, then twice as long each time, up to 30 seconds; the pills come back once it reads the status again.
 **Diff** shows what applying the draft would change, **Apply** puts it into service, **Revert** throws its edits away, and **Save** writes the running config to the files; the **...** menu loads the files on disk or a backup into the draft, or reloads the files as `SIGHUP` does.
 See [Editing the config](#editing-the-config) for what each step does.
 

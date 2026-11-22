@@ -86,12 +86,14 @@ function TopBar({ logMode, setLogMode, onMenu, barRef }) {
 			<button class="btn ghost icon nav-toggle" title="The config's tree" aria-label="Open the config's tree" onClick=${onMenu}><${Icon} name="menu" /></button>
 			<div class="brand"><span class="logo">AM</span>ai-model-facade</div>
 			<div class="states">
+				${s.unreachable ? html`<${PillNote} kind="bad" label="can't reach the gateway" title="The gateway can't be reached" lines=${[s.unreachable.error, 'The page shows the config and the facades as they last were, and tries again in ' + s.unreachable.retry + ' s.']} />` : html`
 				${st.draft.live ? html`<span class="pill good" title="The draft holds what is running">config live</span>` : html`<span class="pill accent" title=${'Draft from ' + st.draft.source + (st.draft.edited ? ', edited since' : '') + '; not applied yet'}>changes staged</span>`}
 				${st.live.saved ? html`<span class="pill good" title="The running config is what the files hold">saved</span>` : html`<span class="pill warn" title=${'Running config from ' + st.live.source + (st.live.edited ? ', edited since' : '')}>running config not saved</span>`}
 				${changedOnDisk.map(f => html`<span class="pill warn" title=${f.path + ' changed on disk since the gateway read it; Load the current save to see it, or Reload to run it.'}>${f.role} changed on disk</span>`)}
 				${(st.restart ?? []).length > 0 && html`<${PillNote} kind="warn" label="restart needed" title="A restart is needed" lines=${restartLines(st.restart)} />`}
 				${unsaveable.length > 0 && html`<${PillNote} kind="bad" label="can't save" title="Why the files can't be saved" lines=${unsaveable.map(f => f.role + ' (' + f.path + '): ' + f.reason)} />`}
 				${!write && html`<span class="pill plain">read only</span>`}
+				`}
 			</div>
 			</div>
 			<div class="actions-wrap">

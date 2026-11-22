@@ -15,6 +15,7 @@ Before 1.0, a minor release can change config keys.
 - The admin UI's **Diff** button looks disabled while the draft holds what is running, as **Revert** is, but can still be clicked to confirm there is nothing to show.
 - The admin UI calls the config files on disk the current save: **Load the current save** loads them into the draft, and **Reload: load and run the current save** runs them.
 - The admin UI's **Load a backup...** scrolls the Server sheet to **Files and backups**, where the backups are listed.
+- While the admin UI can't reach the gateway, by its streams or by reading, its bar shows only **can't reach the gateway**, in place of pills that would be out of date, and it tries again after 1 second, then twice as long each time, up to 30 seconds, as its log panel does.
 
 ### Fixed
 

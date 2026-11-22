@@ -23,6 +23,7 @@ export const state = {
 	selection: { kind: 'server' },
 	view: 'properties', // properties | yaml | vars
 	scrollTo: null, // the id of a Card to scroll to once the sheet shows it
+	unreachable: null, // {error, retry}: why the status can't be read, and the seconds to the next try; null while it can
 };
 
 function changed() {
@@ -95,52 +96,80 @@ function showFacades(list) {
 // change another admin, a reload or another client made shows here. It
 // follows GET /amf/config-status?follow, and reads the draft and the rest
 // again with refresh only when the status says the draft or the running
-// config changed (took), and GET /amf/models?follow. It returns a function
-// that stops both.
+// config changed (took), and GET /amf/models?follow, each with the same
+// backoff. While the status can't be read at all, unreachable says why and
+// when the next try is; the models stream fails with it, since the same
+// gateway serves both. It returns a function that stops both.
 export function watch() {
 	const stops = [
-		keepFollowing(followStatus, data => took(JSON.parse(data)).catch(signedOutBy), async () => took((await request('GET', '/amf/config-status')).data), 5000),
-		keepFollowing(followModels, data => showFacades(JSON.parse(data)), refreshFacades, 15000),
+		keepFollowing({
+			follow: followStatus,
+			onData: data => took(JSON.parse(data)).catch(signedOutBy),
+			poll: async () => took((await request('GET', '/amf/config-status')).data),
+			every: 5000,
+			onReach: unreachable => state.unreachable !== unreachable && set({ unreachable }),
+		}),
+		keepFollowing({ follow: followModels, onData: data => showFacades(JSON.parse(data)), poll: async () => showFacades((await request('GET', '/amf/models')).data), every: 15000 }),
 	];
-	return () => stops.forEach(stop => stop());
+	return () => {
+		stops.forEach(stop => stop());
+		set({ unreachable: null });
+	};
 }
 
-// keepFollowing follows a stream, giving onData each event's data. While the
-// stream can't be had, or after it ends, it calls poll every ms instead,
-// while the page is on screen, and tries the stream again after each poll.
-// It returns a function that stops it.
-function keepFollowing(follow, onData, poll, ms) {
+// keepFollowing follows a stream, giving onData each event's data. Once the
+// stream ends, or can't be had, it reads with poll instead: if that works,
+// it reads again every ms while the page is on screen, trying the stream
+// again before each read; if it doesn't either, it tells onReach why, and
+// tries the stream again after 1 s, doubling the wait each time up to
+// 30 s, as the log panel does (useLogStream), until the stream or a read
+// works again, which it tells onReach with null. It returns a function that
+// stops it.
+function keepFollowing({ follow, onData, poll, every, onReach = () => {} }) {
 	let stopped = false;
 	let stream = null;
 	let timer = null;
+	let retry = 1000;
+	const reached = () => {
+		retry = 1000;
+		onReach(null);
+	};
 	const start = () => {
-		stream = follow(({ event, data }) => event === 'message' && onData(data));
+		stream = follow(({ event, data }) => {
+			if (event === 'message') {
+				reached();
+				onData(data);
+			}
+		});
 		stream.done.then(later, e => {
 			signedOutBy(e);
 			later();
 		});
 	};
-	const later = () => {
+	const later = async () => {
 		stream = null;
 		if (stopped) {
 			return;
 		}
-		timer = setTimeout(async () => {
-			if (stopped) {
-				return;
-			}
-			if (state.phase !== 'ready' || document.visibilityState !== 'visible') {
-				return later();
-			}
-			try {
-				await poll();
-			} catch (e) {
-				signedOutBy(e);
-			}
+		if (state.phase !== 'ready' || document.visibilityState !== 'visible') {
+			timer = setTimeout(later, every);
+			return;
+		}
+		try {
+			await poll();
+		} catch (e) {
+			signedOutBy(e);
 			if (!stopped) {
-				start();
+				onReach({ error: errorText(e), retry: retry / 1000 });
+				timer = setTimeout(start, retry);
+				retry = Math.min(retry * 2, 30000);
 			}
-		}, ms);
+			return;
+		}
+		reached();
+		if (!stopped) {
+			timer = setTimeout(start, every);
+		}
 	};
 	start();
 	return () => {
