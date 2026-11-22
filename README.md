@@ -1263,7 +1263,7 @@ All take these keys:
 | Key | Description |
 |-----|-------------|
 | `baseUrl` | The backend's address. Required. |
-| `apiKey` | Sent to the backend as `Authorization: Bearer`, on every call unless `passthroughAuth` is on, and then only on the gateway's own calls. Optional. |
+| `apiKey` | Sent to the backend as `Authorization: Bearer` on the gateway's own calls, and on a caller's requests unless a `keyMap` entry exists for the caller, or `passthroughAuth` is on. Optional. |
 | `passthroughAuth` | `true`: completion requests carry the client's own key (or none). Default `false`. See [Keys](#keys). |
 | `allowedKeys`, `allowedGroups` | Which callers this backend may serve; a candidate on it is skipped for anyone else. Default: every caller. See [Access](#access). |
 | `keyMap` | The key to send instead, on a caller's behalf, by the caller's key name or group; it takes precedence over `passthroughAuth` and `apiKey`. Optional. See [Keys](#keys). |
