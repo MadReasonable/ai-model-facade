@@ -40,15 +40,38 @@ It relays chat and completions only, so embeddings, images and audio go straight
 
 ## Installation
 
-The gateway is one executable that reads one YAML config file.
-Each release publishes it as a Docker image for amd64 and arm64, and on the [releases page](https://github.com/MadReasonable/ai-model-facade/releases) as an archive for Linux (amd64, arm64), macOS (amd64, arm64) and Windows (amd64).
-Each archive holds the binary, `LICENSE`, this README, `CHANGELOG.md` and `config.example.yaml`, a complete config to start from.
-Every install below ends with the gateway running `serve` on a config; [Getting started](#getting-started) says what to put in it.
+The gateway is one executable that reads a YAML config file and an optional secrets file.
+Each [release](https://github.com/MadReasonable/ai-model-facade/releases) publishes it as a Docker image for amd64 and arm64, and as an archive for Linux (amd64, arm64), macOS (amd64, arm64) and Windows (amd64).
+Each archive holds the binary, `LICENSE`, this README, `CHANGELOG.md` and `config.example.yaml`.
+Every install below ends with the gateway running `serve` on a config.
+
+The `init` command is recommended for new installs.
+It generates an admin key, prints the key, and writes the config.
+The key signs you in to the [admin UI](#the-admin-ui) at `/amf/ui/`, which allows configuration of server settings, backends, and facades.
+Manual editing is still possible, and documented in [Manual configuration](#manual-configuration).
+
+```bash
+ai-model-facade init config/config.yaml --secrets config/secrets.yaml
+```
+
+The admin UI saves its changes to the config's folder, so each install below gives the gateway write access to it.
 
 ### Docker
 
 The image is a static binary on distroless, about 10 MB, published as `ghcr.io/madreasonable/ai-model-facade`.
 It is tagged with each release's version, such as `0.3.0`, with its minor version, such as `0.3`, and with `latest`; `latest` and the minor tag move to each new release, and a version tag stays on its release.
+
+#### Initial config
+
+The image runs as uid 65532, so the config's folder belongs to that user:
+
+```bash
+mkdir ai-model-facade && sudo chown 65532 ai-model-facade
+docker run --rm -v "$PWD/ai-model-facade:/config" ghcr.io/madreasonable/ai-model-facade:latest \
+  init /config/config.yaml --secrets /config/secrets.yaml
+```
+
+#### Running it
 
 Run it as a service in the same compose project as your backends, so `baseUrl` can use their service names:
 
@@ -58,43 +81,18 @@ services:
     image: ghcr.io/madreasonable/ai-model-facade:0.3
     restart: unless-stopped
     volumes:
-      - ./ai-model-facade/config.yaml:/config/config.yaml:ro
-    environment:
-      GATEWAY_KEY_OPEN_WEBUI: ${GATEWAY_KEY_OPEN_WEBUI}
+      - ./ai-model-facade:/config
+    command: ["serve", "/config/config.yaml", "--secrets", "/config/secrets.yaml"]
     # ports:
     #   - "8088:8088"
 ```
 
-The image runs `serve /config/config.yaml`, as a non-root user, so the mounted config must be readable by every user.
-Keep keys out of it: the config can read them from environment variables (`${NAME}`), which compose passes in.
-Inside a container, set `server.listen` to `0.0.0.0:8088`, since `127.0.0.1` there accepts connections only from the container itself.
+The folder is mounted, rather than each file, and writable, since a save writes each file anew beside the old one, renames it into place, and keeps its backups in `backups/` there.
+Inside a container, `server.listen` is `0.0.0.0:8088`, as `init` writes it, since `127.0.0.1` there accepts connections only from the container itself.
 Other containers on the compose network reach the gateway by its service name, so publish the port only for clients outside that network.
-
-Keys can also live in a [secrets file](#secrets-file), which a reload reads again, unlike the environment.
-The image's command names no secrets file, so a service that uses one mounts it and gives the command in full.
-The two files can be mounted one by one, or together as the folder that holds them, which one line covers:
-
-```yaml
-    volumes:
-      - ./ai-model-facade:/config:ro
-    command: ["serve", "/config/config.yaml", "--secrets", "/config/secrets.yaml"]
-```
-
-The image's user is uid 65532, so give the secrets file to that user alone: `chown 65532 secrets.yaml` and `chmod 600 secrets.yaml`.
-To [save the config](#editing-the-config) over HTTP, the folder must be mounted without `:ro` and be writable by that user, since a save renames new files into it and keeps its backups there; a file mounted by itself can't be saved.
 
 The image has a health check: every 30 seconds it runs `ai-model-facade health /config/config.yaml`, which calls `/health` on the address in `server.listen`, so `docker ps` shows the container as `healthy` and compose's `depends_on: condition: service_healthy` works.
 If you mount the config somewhere other than `/config/config.yaml`, override the command and the health check to the same path.
-
-To start from nothing and set the gateway up in the admin UI, let [`init`](#commands) write the config into the folder the service mounts, after giving the folder to the image's user, which saving needs too:
-
-```bash
-mkdir ai-model-facade && sudo chown 65532 ai-model-facade
-docker run --rm -v "$PWD/ai-model-facade:/config" ghcr.io/madreasonable/ai-model-facade:latest \
-  init /config/config.yaml --secrets /config/secrets.yaml
-```
-
-It prints the admin key; then start the service with the secrets file's command above, mounting the folder writable, and sign in at `/amf/ui/`.
 
 To reload the config without a restart, see [Reloading the config](#reloading-the-config):
 
@@ -106,11 +104,9 @@ To run `check` against the backends, run it on their network:
 
 ```bash
 docker run --rm --network <backend network> \
-  -v "$PWD/config.yaml:/config/config.yaml:ro" \
-  ghcr.io/madreasonable/ai-model-facade:0.3 check /config/config.yaml
+  -v "$PWD/ai-model-facade:/config" \
+  ghcr.io/madreasonable/ai-model-facade:0.3 check /config/config.yaml --secrets /config/secrets.yaml
 ```
-
-For a config with a secrets file, mount it too and add `--secrets /config/secrets.yaml` after the config, since `check` builds the same config `serve` does.
 
 ### Linux
 
@@ -124,9 +120,19 @@ curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VER
 sha256sum --ignore-missing -c checksums.txt
 tar -xzf ai-model-facade_${VERSION}_linux_${ARCH}.tar.gz
 sudo install ai-model-facade_${VERSION}_linux_${ARCH}/ai-model-facade /usr/local/bin/
-sudo install -d /etc/ai-model-facade
-sudo cp ai-model-facade_${VERSION}_linux_${ARCH}/config.example.yaml /etc/ai-model-facade/config.yaml
 ```
+
+#### Initial config
+
+The gateway runs as a system user of its own, which owns the config's folder:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ai-model-facade
+sudo install -d -m 700 -o ai-model-facade /etc/ai-model-facade
+sudo -u ai-model-facade /usr/local/bin/ai-model-facade init /etc/ai-model-facade/config.yaml --secrets /etc/ai-model-facade/secrets.yaml
+```
+
+#### Running it
 
 To run it as a systemd service, save this unit as `/etc/systemd/system/ai-model-facade.service`:
 
@@ -137,18 +143,16 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/ai-model-facade serve /etc/ai-model-facade/config.yaml
+ExecStart=/usr/local/bin/ai-model-facade serve /etc/ai-model-facade/config.yaml --secrets /etc/ai-model-facade/secrets.yaml
 ExecReload=/bin/kill -HUP $MAINPID
-EnvironmentFile=-/etc/ai-model-facade/env
-DynamicUser=yes
+User=ai-model-facade
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`DynamicUser=yes` runs the gateway as a user that systemd creates for it, with no write access to the system, since the gateway writes nothing; it logs to the journal.
-That user can read the config only if every user can, so keep keys in `/etc/ai-model-facade/env` instead, as `NAME=value` lines, readable by root alone (`chmod 600`): systemd reads that file as root and passes the variables in, and the config refers to them as `${NAME}`.
+The gateway logs to the journal.
 `ExecReload` makes `systemctl reload ai-model-facade` reload the config without a restart; see [Reloading the config](#reloading-the-config).
 
 ```bash
@@ -168,14 +172,25 @@ curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VER
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/checksums.txt
 grep _darwin_${ARCH}.tar.gz checksums.txt | shasum -a 256 -c
 tar -xzf ai-model-facade_${VERSION}_darwin_${ARCH}.tar.gz
-sudo mkdir -p /usr/local/bin /usr/local/etc/ai-model-facade
+sudo mkdir -p /usr/local/bin
 sudo cp ai-model-facade_${VERSION}_darwin_${ARCH}/ai-model-facade /usr/local/bin/
-sudo cp ai-model-facade_${VERSION}_darwin_${ARCH}/config.example.yaml /usr/local/etc/ai-model-facade/config.yaml
 ```
 
 The binary isn't signed by an Apple developer ID.
 macOS refuses to run an unsigned file that a browser downloaded, because the browser marks it as quarantined; `curl` doesn't, so the commands above need nothing more.
 For an archive downloaded with a browser, remove the mark: `xattr -d com.apple.quarantine ai-model-facade`.
+
+#### Initial config
+
+The gateway runs as `nobody`, which owns the config's folder:
+
+```bash
+sudo mkdir -p /usr/local/etc/ai-model-facade
+sudo chown nobody /usr/local/etc/ai-model-facade && sudo chmod 700 /usr/local/etc/ai-model-facade
+sudo -u nobody /usr/local/bin/ai-model-facade init /usr/local/etc/ai-model-facade/config.yaml --secrets /usr/local/etc/ai-model-facade/secrets.yaml
+```
+
+#### Running it
 
 To run it as a launchd service, save this as `/Library/LaunchDaemons/com.github.madreasonable.ai-model-facade.plist`:
 
@@ -191,6 +206,8 @@ To run it as a launchd service, save this as `/Library/LaunchDaemons/com.github.
     <string>/usr/local/bin/ai-model-facade</string>
     <string>serve</string>
     <string>/usr/local/etc/ai-model-facade/config.yaml</string>
+    <string>--secrets</string>
+    <string>/usr/local/etc/ai-model-facade/secrets.yaml</string>
   </array>
   <key>UserName</key>
   <string>nobody</string>
@@ -204,14 +221,10 @@ To run it as a launchd service, save this as `/Library/LaunchDaemons/com.github.
 </plist>
 ```
 
-The gateway runs as `nobody`, and logs to `/Library/Logs/ai-model-facade.log`.
-A plist in `/Library/LaunchDaemons` is readable by every user, so keep keys out of it: write them into the config, and make the config and the log belong to `nobody` alone.
-`KeepAlive` restarts the gateway if it exits.
+The gateway logs to `/Library/Logs/ai-model-facade.log`, and `KeepAlive` restarts it if it exits.
 
 ```bash
-sudo touch /Library/Logs/ai-model-facade.log
-sudo chown nobody /Library/Logs/ai-model-facade.log /usr/local/etc/ai-model-facade/config.yaml
-sudo chmod 600 /usr/local/etc/ai-model-facade/config.yaml
+sudo touch /Library/Logs/ai-model-facade.log && sudo chown nobody /Library/Logs/ai-model-facade.log
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.github.madreasonable.ai-model-facade.plist
 ```
 
@@ -223,11 +236,21 @@ sudo launchctl kill HUP system/com.github.madreasonable.ai-model-facade
 
 ### Windows
 
-Unzip `ai-model-facade_v0.3.2_windows_amd64.zip`, copy `config.example.yaml` to `config.yaml`, and run the gateway from a console:
+Unzip `ai-model-facade_v0.3.2_windows_amd64.zip`.
+
+#### Initial config
+
+From a console in the unzipped folder:
 
 ```
-ai-model-facade.exe check config.yaml
-ai-model-facade.exe serve config.yaml
+mkdir config
+ai-model-facade.exe init config\config.yaml --secrets config\secrets.yaml
+```
+
+#### Running it
+
+```
+ai-model-facade.exe serve config\config.yaml --secrets config\secrets.yaml
 ```
 
 Windows runs a program as a service only if it is written for Windows' service manager, which the gateway isn't, so a service needs a wrapper that runs it and stops it.
@@ -238,12 +261,11 @@ Two open-source wrappers, each with its own documentation:
 
 Whichever you use, it needs these settings for the gateway:
 
-- The command, with the full path to the config: `ai-model-facade.exe serve C:\path\to\config.yaml`. A service starts in `C:\Windows\System32`, so a relative path would be looked up there.
+- The command, with full paths: `ai-model-facade.exe serve C:\path\to\config\config.yaml --secrets C:\path\to\config\secrets.yaml`. A service starts in `C:\Windows\System32`, so a relative path would be looked up there.
 - A stop that sends Ctrl+C, which both send. The gateway then stops accepting requests and gives those in flight up to 10 seconds to finish, so the wrapper's stop timeout should be longer than that; Shawl's default is 3 seconds (`--stop-timeout`, in milliseconds).
-- A restricted account, such as Network Service, instead of the default Local System, with read access to the config.
-- Keys as environment variables in the wrapper's settings, which the config refers to as `${NAME}`.
+- A restricted account, such as Network Service, instead of the default Local System, with write access to the config's folder, so the admin UI can save.
 
-Windows has no `SIGHUP`, so there the config is reloaded in place only through [`POST /amf/reload`](#reloading-the-config), which needs `server.adminApi.write`; without it, restart the service to load a changed config, after running `check` on it.
+Windows has no `SIGHUP`, so there the config is reloaded in place through [`POST /amf/reload`](#reloading-the-config), or the admin UI's **Reload**.
 
 ### From source
 
@@ -265,11 +287,9 @@ docker build -t ai-model-facade .
 `ai-model-facade version` and the startup log report the version Go reads from the module or the git checkout: the tag on a tagged commit, otherwise a pseudo-version such as `v0.1.3-0.20261025182945-7cbab4d5a404`, with `+dirty` if there are uncommitted changes.
 `docker build --build-arg VERSION=...` sets it instead, and a build outside a git checkout without it reports `dev`.
 
-## Getting started
+## Manual configuration
 
-To set the gateway up in a browser instead, start from [`init`](#commands), which writes a config with an admin key and nothing else, then add the rest in [the admin UI](#the-admin-ui).
-
-This walkthrough connects the gateway to one llama-swap instance, so you need one running.
+This walkthrough writes a config by hand, instead of with [`init`](#installation), and connects the gateway to one llama-swap instance, so you need one running.
 Every other backend differs only in its `backends` entry; see [Backends](#backends).
 
 Save this as `config.yaml`, with your llama-swap address and your own model IDs:
@@ -451,7 +471,7 @@ Wherever a candidate's backend isn't the facade's own, the log, `check` and `cur
 #### Seeing the choice before a request
 
 `GET /amf/models` runs the three steps for each facade without sending a request, so it never triggers a load.
-Its entry for `quick` from [Getting started](#getting-started):
+Its entry for `quick` from [Manual configuration](#manual-configuration):
 
 ```json
 {"id":"quick",
@@ -1032,7 +1052,7 @@ claude
 ```
 
 `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer`; leave it out if the gateway has no `apiKeys`.
-Claude Code runs its background work, such as summaries, on the model `ANTHROPIC_DEFAULT_HAIKU_MODEL` names, so that can be a facade on a smaller model, such as `quick` from [Getting started](#getting-started).
+Claude Code runs its background work, such as summaries, on the model `ANTHROPIC_DEFAULT_HAIKU_MODEL` names, so that can be a facade on a smaller model, such as `quick` from [Manual configuration](#manual-configuration).
 Its context limit is set for Claude's models, so set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the context your local models are loaded with.
 Claude Code's own instructions and tool definitions take about 18,000 tokens (Claude Code 2.1.319, 2026-11-12), so a model loaded with a smaller context can't take any of its requests; llama-server refuses them with `400`.
 
@@ -1740,3 +1760,10 @@ To keep the admin side off a network the client APIs face, give it an address of
 ## Upgrading
 
 [CHANGELOG.md](CHANGELOG.md) lists every release's changes, and, under **Changed** and **Removed**, what a config written for the release before it has to change.
+
+The admin Web UI, new in 0.4.0, saves drafts and backups to the config folder.
+To enable configuration changes via the Web UI, older Docker installations should switch from mounting the file to mounting the folder and enable write access.
+The [Installation](#installation) sections have the updated setup for [Docker](#docker), [Linux](#linux), [macOS](#macos) and [Windows](#windows).
+
+Without a secrets file, keys added in the Web UI are saved to the config in plaintext.
+Older installations should create a [secrets file](#secrets-file), move their keys into it by hand, and start the gateway with `--secrets`, as the Installation sections show.
