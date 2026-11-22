@@ -61,7 +61,7 @@ backends:
     requestTimeoutSeconds: 60
     # Open WebUI's connection to llama-swap reports every model as loaded,
     # so the gateway reads their state from llama-swap itself.
-    llamaSwap: { backend: llamaSwap }
+    links: [{ backend: llamaSwap }]
 
 models:
   # Whichever of the router's first two models is loaded, loading one only

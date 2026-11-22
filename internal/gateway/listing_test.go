@@ -98,7 +98,7 @@ const loopConfig = `
 server: {listen: ":0"}
 backends:
   llamaSwap: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
-  webui: {type: openWebUi, baseUrl: "${WEBUI_URL}", loopsBack: true, llamaSwap: {backend: llamaSwap}}
+  webui: {type: openWebUi, baseUrl: "${WEBUI_URL}", loopsBack: true, links: [{backend: llamaSwap}]}
 models:
   ask:
     backend: webui

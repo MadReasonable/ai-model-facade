@@ -23,6 +23,10 @@ Before 1.0, a minor release can change config keys.
 - A reload that changes `server.listen` is no longer refused: it takes the rest of the config, the gateway goes on listening where it started until a restart, and the log line `restart needed`, and `restart` in `/amf/config-status`, say so. The same holds for an apply, and for `server.adminApi.listen`.
 - Building from source needs Go 1.26 or newer, for `slog.MultiHandler`; Go 1.25 no longer gets security fixes.
 
+### Removed
+
+- An `openWebUi` backend's `llamaSwap` block, which `links` replaced in 0.2.1. A config that still has one is refused at startup; move it into `links`: `llamaSwap: {backend: swap, prefixId: p}` becomes `links: [{backend: swap, prefixId: p}]`.
+
 ## [0.3.2] - 2026-11-20
 
 A response that stops arriving from a backend is now ended after a timeout, the Docker image's health check passes with a secrets file, and a wrong list in the config, or a backend error with no message, now gets a message that names it.

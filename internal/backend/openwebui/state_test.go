@@ -138,13 +138,21 @@ func TestOpenWebUI_RejectsAWrongConfig(t *testing.T) {
 		"{type: openWebUi}",
 		"{type: openWebUi, baseUrl: x, chats: forget}",
 		"{type: openWebUi, baseUrl: x, pollIntervalSeconds: -1}",
-		"{type: openWebUi, baseUrl: x, llamaSwap: {prefixId: p}}",
-		"{type: openWebUi, baseUrl: x, llamaSwap: {backend: ls, prefix: p}}",
+		"{type: openWebUi, baseUrl: x, links: [{backend: ls, prefix: p}]}",
 		"{type: openWebUi, baseUrl: x, links: [{prefixId: p}]}",
 		"{type: openWebUi, baseUrl: x, links: {backend: ls}}",
 	} {
 		if _, err := New(testkit.Entry(t, "openWebUi", src), discard); err == nil {
 			t.Errorf("%s: expected an error", src)
 		}
+	}
+}
+
+// The llamaSwap block, which 0.4.0 removed, is refused with the links entry
+// that replaces it, rather than as an unknown key.
+func TestOpenWebUI_RefusesTheRemovedLlamaSwapBlock(t *testing.T) {
+	_, err := New(testkit.Entry(t, "openWebUi", "{type: openWebUi, baseUrl: x, llamaSwap: {backend: ls}}"), discard)
+	if err == nil || !strings.Contains(err.Error(), "llamaSwap was removed in 0.4.0; list the same backend in links instead") {
+		t.Errorf("got %v", err)
 	}
 }

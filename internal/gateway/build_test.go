@@ -174,7 +174,7 @@ func TestBuild_ListsBackendsAtTheSameTime(t *testing.T) {
 server: {listen: ":0"}
 backends:
   llamaSwap: {type: llamaSwap, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.25}
-  openWebUi: {type: openWebUi, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.25, llamaSwap: {backend: llamaSwap}}
+  openWebUi: {type: openWebUi, baseUrl: "${HANG_URL}", stateTimeoutSeconds: 0.25, links: [{backend: llamaSwap}]}
   healthy: {type: llamaSwap, baseUrl: "${SWAP_URL}"}
 models:
   task:

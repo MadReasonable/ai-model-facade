@@ -109,7 +109,6 @@ func TestLinks_CheckTheirReferences(t *testing.T) {
 	cases := []struct{ name, extra, want string }{
 		{"undefined backend", ", links: [{backend: nope}]", "links.backend 'nope' is not defined"},
 		{"an Open WebUI backend", ", links: [{backend: other}]", "links.backend 'other' can't be linked"},
-		{"llamaSwap block naming another type", ", links: [{backend: studio}], llamaSwap: {backend: studio}", "llamaSwap.backend 'studio' is not a llamaSwap backend"},
 		{"linked twice", ", links: [{backend: studio}, {backend: studio, prefixId: p}]", "links.backend 'studio' is linked more than once"},
 	}
 	for _, c := range cases {
@@ -144,10 +143,10 @@ func newRouter(t *testing.T, models ...testkit.ServerModel) (*testkit.LlamaServe
 	return f, b
 }
 
-// With the llamaSwap block, llama-swap models take the named backend's exact
+// With a link to a llamaSwap backend, llama-swap models take its exact
 // state, prefix removed, instead of their `status`, which says loaded while
 // starting and stopping; a preset takes its base's.
-func TestLlamaSwapBlock_UsesLlamaSwapsExactState(t *testing.T) {
+func TestLlamaSwapLink_UsesLlamaSwapsExactState(t *testing.T) {
 	swap, ls := newSwap(t, "", testkit.SwapModel{ID: "a", Aliases: []string{"a:Fast"}}, testkit.SwapModel{ID: "b"})
 	swap.SetState("a", "starting")
 	swap.SetState("b", "stopping")
@@ -156,7 +155,7 @@ func TestLlamaSwapBlock_UsesLlamaSwapsExactState(t *testing.T) {
 		testkit.SwapPresetEntry("swap.a:Fast", "a", "loaded"),
 		testkit.SwapEntry("swap.b", "loaded"),
 	)
-	b := newBackend(t, f, ", llamaSwap: {backend: ls, prefixId: swap}")
+	b := newBackend(t, f, ", links: [{backend: ls, prefixId: swap}]")
 	if warned, err := linkAndCheck(t, b, map[string]backend.Backend{"ls": ls}); err != nil || warned != nil {
 		t.Fatal(err, warned)
 	}
@@ -170,20 +169,19 @@ func TestLlamaSwapBlock_UsesLlamaSwapsExactState(t *testing.T) {
 	}
 }
 
-// A reference to a backend that doesn't exist, or isn't llama-swap's, fails;
-// llama-swap models the named backend doesn't list only warn, since that
-// depends on both being up and current.
-func TestLlamaSwapBlock_ChecksItsReference(t *testing.T) {
+// A reference to a backend that doesn't exist fails; llama-swap models the
+// named backend doesn't list only warn, since that depends on both being up
+// and current.
+func TestLlamaSwapLink_ChecksItsReference(t *testing.T) {
 	_, ls := newSwap(t, "", testkit.SwapModel{ID: "a"})
 	f := testkit.NewOpenWebUI(t, testkit.SwapEntry("swap.a", "loaded"))
 	cases := []struct {
 		name, extra, want string
 		fatal             bool
 	}{
-		{"wrong prefix", ", llamaSwap: {backend: ls, prefixId: other}", `'swap.a' is a llama-swap model`, false},
-		{"no prefix", ", llamaSwap: {backend: ls}", `'ls' lists none of Open WebUI's models`, false},
-		{"undefined backend", ", llamaSwap: {backend: nope}", `'nope' is not defined`, true},
-		{"not a llama-swap backend", ", llamaSwap: {backend: other}", "is not a llamaSwap backend", true},
+		{"wrong prefix", ", links: [{backend: ls, prefixId: other}]", `'swap.a' is a llama-swap model`, false},
+		{"no prefix", ", links: [{backend: ls}]", `'ls' lists none of Open WebUI's models`, false},
+		{"undefined backend", ", links: [{backend: nope}]", `'nope' is not defined`, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -201,15 +199,15 @@ func TestLlamaSwapBlock_ChecksItsReference(t *testing.T) {
 }
 
 // If the named backend can't be read, llama-swap models fall back to their
-// `status`, as without the block; going down and coming back are each
+// `status`, as without the link; going down and coming back are each
 // logged once.
-func TestLlamaSwapBlock_FallsBackToStatusWhileLlamaSwapIsDown(t *testing.T) {
+func TestLlamaSwapLink_FallsBackToStatusWhileLlamaSwapIsDown(t *testing.T) {
 	swap, ls := newSwap(t, "", testkit.SwapModel{ID: "a"}, testkit.SwapModel{ID: "b"})
 	swap.SetState("a", "starting")
 	swap.FailState(true)
 	f := testkit.NewOpenWebUI(t, testkit.SwapEntry("a", "loaded"), testkit.SwapEntry("b", "loaded"))
 	var logs bytes.Buffer
-	b := newBackendLogging(t, f, ", llamaSwap: {backend: ls}", slog.New(slog.NewTextHandler(&logs, nil)))
+	b := newBackendLogging(t, f, ", links: [{backend: ls}]", slog.New(slog.NewTextHandler(&logs, nil)))
 	if err := b.Link(map[string]backend.Backend{"ls": ls}, func(backend.ListingCheck) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -233,11 +231,11 @@ func TestLlamaSwapBlock_FallsBackToStatusWhileLlamaSwapIsDown(t *testing.T) {
 // answering the adapter's /api/models read, as a request of its own that
 // arrives after the outer one. The outer request reuses that state instead
 // of asking llama-swap again, even with stateCacheSeconds 0.
-func TestLlamaSwapBlock_ReusesAReadMadeWhileOpenWebUIAnswered(t *testing.T) {
+func TestLlamaSwapLink_ReusesAReadMadeWhileOpenWebUIAnswered(t *testing.T) {
 	swap, ls := newSwap(t, "", testkit.SwapModel{ID: "a"})
 	swap.SetState("a", "ready")
 	f := testkit.NewOpenWebUI(t, testkit.SwapEntry("a", "loaded"))
-	b := newBackend(t, f, ", llamaSwap: {backend: ls}")
+	b := newBackend(t, f, ", links: [{backend: ls}]")
 	if _, err := linkAndCheck(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
 		t.Fatal(err)
 	}
@@ -255,10 +253,10 @@ func TestLlamaSwapBlock_ReusesAReadMadeWhileOpenWebUIAnswered(t *testing.T) {
 // Each read applies the llamaSwap backend's state of that moment: a load
 // started through that backend shows as starting, and its end as ready,
 // while Open WebUI's own list stays cached.
-func TestLlamaSwapBlock_AppliesLlamaSwapsStateOnEveryRead(t *testing.T) {
+func TestLlamaSwapLink_AppliesLlamaSwapsStateOnEveryRead(t *testing.T) {
 	swap, ls := newSwap(t, ", stateCacheSeconds: 60", testkit.SwapModel{ID: "a"})
 	f := testkit.NewOpenWebUI(t, testkit.SwapEntry("a", "unloaded"))
-	b := newBackend(t, f, ", stateCacheSeconds: 60, llamaSwap: {backend: ls}")
+	b := newBackend(t, f, ", stateCacheSeconds: 60, links: [{backend: ls}]")
 	if _, err := linkAndCheck(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
 		t.Fatal(err)
 	}
@@ -293,12 +291,12 @@ func TestLlamaSwapBlock_AppliesLlamaSwapsStateOnEveryRead(t *testing.T) {
 // its base model in the llamaSwap backend's cache, so both backends show it
 // starting, even if Open WebUI doesn't list the base; its release drops that
 // cache, not Open WebUI's.
-func TestLlamaSwapBlock_CountsRequestsThroughOpenWebUIInLlamaSwap(t *testing.T) {
+func TestLlamaSwapLink_CountsRequestsThroughOpenWebUIInLlamaSwap(t *testing.T) {
 	swap, ls := newSwap(t, ", stateCacheSeconds: 60", testkit.SwapModel{ID: "a", Aliases: []string{"a:Fast"}})
 	f := testkit.NewOpenWebUI(t, testkit.SwapPresetEntry("a:Fast", "a", "unloaded"))
 	steps := make(chan struct{})
 	f.SetChat(testkit.Chat{Contents: []string{"", "hi"}, PollGate: steps})
-	b := newBackend(t, f, ", stateCacheSeconds: 60, llamaSwap: {backend: ls}")
+	b := newBackend(t, f, ", stateCacheSeconds: 60, links: [{backend: ls}]")
 	if _, err := linkAndCheck(t, b, map[string]backend.Backend{"ls": ls}); err != nil {
 		t.Fatal(err)
 	}

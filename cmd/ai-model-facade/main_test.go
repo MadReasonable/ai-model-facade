@@ -164,7 +164,7 @@ func TestCheck_ShowsAliasesAndPresets(t *testing.T) {
 server: {listen: ":0"}
 backends:
   llamaSwap: {type: llamaSwap, baseUrl: "`+swap.URL+`"}
-  openWebUi: {type: openWebUi, baseUrl: "`+webui.URL+`", llamaSwap: {backend: llamaSwap}}
+  openWebUi: {type: openWebUi, baseUrl: "`+webui.URL+`", links: [{backend: llamaSwap}]}
 models:
   direct:
     backend: llamaSwap

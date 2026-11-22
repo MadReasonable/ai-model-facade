@@ -484,7 +484,7 @@ Each entry's state depends on where Open WebUI got it:
 - **Anything else:** unknown, LM Studio and llama-server included. LM Studio's `/v1/models` carries no load state (believed; not checked against a running LM Studio). llama-server's router puts a `status` in its `/v1/models`, which Open WebUI likely passes on (not checked), but nothing in the entry says it came from llama-server, so it isn't read; a link gives both exact state.
 
 Links remove the misreads and the unknowns for a server the gateway also has a backend for: `links: [{backend, prefixId}]` takes the state of that server's models from the gateway's backend for it.
-The older `llamaSwap: {backend, prefixId}` block is one more link, kept so existing configs work, and still requires a `llamaSwap` backend.
+The older `llamaSwap: {backend, prefixId}` block, which did the same for llama-swap alone, was removed in 0.4.0; a config that still has it is refused with the `links` entry to write instead.
 A link may name any backend built on `openaihttp.NewBackend`, since each reads its state from its server and has a state cache to count pending requests in (`Pending`); an `openWebUi` backend can't be linked.
 
 An entry belongs to a link when its ID, prefix removed, is a model or alias the linked backend lists, and Open WebUI's list doesn't say it came from another kind of server: an entry with `meta.llamaswap` matches only a link to a `llamaSwap` backend, an Ollama connection's (`owned_by: ollama`) only a link to an `ollama` backend, and a facade's (`current`) never, since its state is exact already.

@@ -45,7 +45,6 @@ type Config struct {
 	Chats               string       `yaml:"chats" doc:"What happens to the chat each request creates in Open WebUI, once it is answered." schema:"enum=delete|archive|keep,default=delete"` // delete (default) | archive | keep
 	PollIntervalSeconds float64      `yaml:"pollIntervalSeconds" doc:"How often to read the chat while the answer is generated." schema:"default=0.25,min=0,unit=seconds"`                   // default 0.25
 	Links               []LinkConfig `yaml:"links" doc:"Backends of this gateway that reach the same servers as Open WebUI's connections, whose state is read instead of the state Open WebUI passes on, which most servers don't report exactly."`
-	LlamaSwap           *LinkConfig  `yaml:"llamaSwap" doc:"One more link, to a llamaSwap backend only."` // one more link, to a llamaSwap backend only
 }
 
 // LinkConfig takes the state of the Open WebUI models that one of its
@@ -58,19 +57,13 @@ type LinkConfig struct {
 	PrefixID string `yaml:"prefixId" doc:"The prefix Open WebUI's connection puts in front of the server's model IDs, if any."` // the Open WebUI connection's prefix_id, if any
 }
 
-// linkConfig is a LinkConfig with the key it came from, links or llamaSwap.
-type linkConfig struct {
-	LinkConfig
-	key string
-}
-
 type Backend struct {
 	*openaihttp.Client        // its Chat is shadowed by the chat flow below
 	name               string // its entry under backends
 	state              *openaihttp.StateCache
 	chats              string
 	poll               time.Duration
-	linkConfigs        []linkConfig
+	linkConfigs        []LinkConfig
 	links              []*link                       // set by Link
 	listed             atomic.Pointer[[]listedModel] // what ListModels last fetched, for checkLinks
 	linkList           atomic.Pointer[linkList]      // from the latest-started state fetch, with links
@@ -80,6 +73,11 @@ type Backend struct {
 // New builds the adapter from its config entry. log receives what the
 // adapter does in the background, such as a chat it failed to clean up.
 func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
+	for i := 0; i+1 < len(entry.Node.Content); i += 2 {
+		if k := entry.Node.Content[i]; k.Value == "llamaSwap" {
+			return nil, fmt.Errorf("line %d: llamaSwap was removed in 0.4.0; list the same backend in links instead, such as links: [{backend: <name>, prefixId: <prefix>}]", k.Line)
+		}
+	}
 	var c Config
 	if err := config.DecodeStrict(entry.Node, &c); err != nil {
 		return nil, err
@@ -98,23 +96,16 @@ func New(entry config.Entry, log *slog.Logger) (*Backend, error) {
 	if poll == 0 {
 		poll = 250 * time.Millisecond
 	}
-	var links []linkConfig
 	for _, l := range c.Links {
-		links = append(links, linkConfig{l, "links"})
-	}
-	if c.LlamaSwap != nil {
-		links = append(links, linkConfig{*c.LlamaSwap, "llamaSwap"})
-	}
-	for _, l := range links {
 		if l.Backend == "" {
-			return nil, fmt.Errorf("%s.backend is required", l.key)
+			return nil, fmt.Errorf("links.backend is required")
 		}
 	}
 	client, err := openaihttp.NewClient(c.Config)
 	if err != nil {
 		return nil, err
 	}
-	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, linkConfigs: links, log: log}
+	b := &Backend{Client: client, name: entry.Name, chats: c.Chats, poll: poll, linkConfigs: c.Links, log: log}
 	b.state = openaihttp.NewStateCache(c.Config, b.fetchState)
 	return b, nil
 }
@@ -139,10 +130,9 @@ type linkTarget interface {
 }
 
 // Link resolves the links once every backend exists. A link fails if it
-// names a backend that doesn't exist, can't be linked or is already linked,
-// and the llamaSwap block also if it names a backend of another type. It then
-// asks for checkLinks, which runs once this backend and the linked ones have
-// all been listed.
+// names a backend that doesn't exist, can't be linked or is already linked.
+// It then asks for checkLinks, which runs once this backend and the linked
+// ones have all been listed.
 func (b *Backend) Link(backends map[string]backend.Backend, check func(backend.ListingCheck)) error {
 	if len(b.linkConfigs) == 0 {
 		return nil
@@ -151,17 +141,14 @@ func (b *Backend) Link(backends map[string]backend.Backend, check func(backend.L
 	for _, c := range b.linkConfigs {
 		other := backends[c.Backend]
 		if other == nil {
-			return fmt.Errorf("%s.backend '%s' is not defined", c.key, c.Backend)
-		}
-		if _, isSwap := other.(*llamaswap.Backend); c.key == "llamaSwap" && !isSwap {
-			return fmt.Errorf("llamaSwap.backend '%s' is not a llamaSwap backend", c.Backend)
+			return fmt.Errorf("links.backend '%s' is not defined", c.Backend)
 		}
 		target, ok := other.(linkTarget)
 		if !ok {
-			return fmt.Errorf("%s.backend '%s' can't be linked; a link names the backend of a server Open WebUI connects to, such as a llamaSwap or lmStudio backend", c.key, c.Backend)
+			return fmt.Errorf("links.backend '%s' can't be linked; a link names the backend of a server Open WebUI connects to, such as a llamaSwap or lmStudio backend", c.Backend)
 		}
 		if slices.Contains(names[1:], c.Backend) {
-			return fmt.Errorf("%s.backend '%s' is linked more than once", c.key, c.Backend)
+			return fmt.Errorf("links.backend '%s' is linked more than once", c.Backend)
 		}
 		names = append(names, c.Backend)
 		b.links = append(b.links, &link{name: c.Backend, prefixID: c.PrefixID, target: target, origin: originOfBackend(other)})

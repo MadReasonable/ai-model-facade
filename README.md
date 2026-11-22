@@ -1394,7 +1394,6 @@ Beyond the shared keys, it takes:
 | `chats` | What happens to the chat after each request: `delete` (default), `archive` or `keep`. |
 | `pollIntervalSeconds` | How often to poll the chat while the answer is generated. Default `0.25`. |
 | `links` | Optional: a list of `{backend: <name>, prefixId: <prefix>}`. Read the state of the Open WebUI models that one of the gateway's other backends serves directly from that backend; see [Loaded state through Open WebUI](#loaded-state-through-open-webui). |
-| `llamaSwap` | Optional: `{backend: <name>, prefixId: <prefix>}`. One more link, to a `llamaSwap` backend only. |
 
 ### `models`
 
