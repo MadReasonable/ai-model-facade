@@ -117,6 +117,12 @@ a {
 	cursor: default;
 }
 
+/* Looks disabled but still works, for a button whose action is known to
+   find nothing but can still be asked to confirm it. */
+.btn.dim {
+	opacity: 0.45;
+}
+
 .btn.primary {
 	background: var(--accent);
 	border-color: var(--accent);

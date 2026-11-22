@@ -96,7 +96,7 @@ function TopBar({ logMode, setLogMode, onMenu, barRef }) {
 			</div>
 			<div class="actions-wrap">
 			<div class="actions">
-				<button class="btn" title="What applying the draft would change" onClick=${async () => {
+				<button class=${'btn' + (st.draft.live ? ' dim' : '')} title="What applying the draft would change" onClick=${async () => {
 					await settle();
 					openDialog(close => html`<${DiffDialog} close=${close} />`);
 				}}><${Icon} name="diff" />Diff</button>

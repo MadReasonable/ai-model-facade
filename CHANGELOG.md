@@ -4,6 +4,10 @@ Before 1.0, a minor release can change config keys.
 
 ## [Unreleased]
 
+### Changed
+
+- The admin UI's **Diff** button looks disabled while the draft holds what is running, as **Revert** is, but can still be clicked to confirm there is nothing to show.
+
 ### Fixed
 
 - A Docker image built from a clean checkout without `--build-arg VERSION` reports the checkout's version, without `+dirty`. Every such image reported `+dirty`, because the build context leaves out `dev-env`, whose tracked files git then saw as deleted.
