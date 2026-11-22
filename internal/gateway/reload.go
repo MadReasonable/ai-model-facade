@@ -58,6 +58,8 @@ type Live struct {
 	next *fileReload
 	// watch publishes the status to GET /amf/config-status?follow.
 	watch statusWatch
+	// models tells the streams of GET /amf/models?follow when to list again.
+	models modelsWatch
 }
 
 type live struct {
@@ -118,7 +120,7 @@ func NewLive(g *Gateway, log *slog.Logger, level *slog.LevelVar, files ConfigFil
 	fromFiles := provenance{source: sourceFiles}
 	l := &Live{log: log, level: level, files: files, saved: g.Config.Source, draft: draftCopy{doc: g.Config.Source.Copy(), provenance: fromFiles}, running: fromFiles, listening: addressesOf(g.Config)}
 	l.current.Store(l.serving(g))
-	g.start(log)
+	g.start(log, l.modelsChanged)
 	return l
 }
 
@@ -298,10 +300,11 @@ func (l *Live) swap(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 	g.history.SetLimits(historyLimits(cfg))
 	now := l.serving(g)
 	l.current.Store(now)
-	g.start(l.log)
+	g.start(l.log, l.modelsChanged)
 	old.stop()
 	old.closeIdleConnections()
 	l.changed()
+	l.modelsChanged()
 	for _, p := range pendingRestarts(l.listening, now.uiPath, cfg) {
 		l.log.Warn("restart needed", "key", p.Key, "listening", p.Listening, "running", p.Running)
 	}

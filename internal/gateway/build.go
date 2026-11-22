@@ -242,8 +242,15 @@ func listed(c backend.ListingCheck, catalogs map[string]*backend.Catalog) bool {
 	return true
 }
 
-// start runs the pending checks in the background until stop is called.
-func (g *Gateway) start(log *slog.Logger) {
+// start has every backend that counts the requests it has pending call
+// onPending when that count changes, and runs the pending checks in the
+// background until stop is called.
+func (g *Gateway) start(log *slog.Logger, onPending func()) {
+	for _, b := range g.backends {
+		if w, ok := b.(backend.PendingWatcher); ok {
+			w.WatchPending(onPending)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g.stop = cancel
 	go g.runPending(ctx, log)

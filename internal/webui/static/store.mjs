@@ -5,7 +5,7 @@
 // when it is done, so every view shows the draft as it now is.
 
 import { useEffect, useState } from './vendor/hooks.mjs';
-import { ApiError, configURL, entriesOf, followStatus, request } from './api.mjs';
+import { ApiError, configURL, entriesOf, followModels, followStatus, request } from './api.mjs';
 
 const listeners = new Set();
 
@@ -81,61 +81,71 @@ export async function refresh(given) {
 // backend's state, so it runs only while the page is on screen.
 export async function refreshFacades() {
 	try {
-		const r = await request('GET', '/amf/models');
-		set({ facades: new Map(r.data.models.map(f => [f.id, f])) });
+		showFacades((await request('GET', '/amf/models')).data);
 	} catch {
 		// a key that isn't a client of the gateway sees no facades
 	}
 }
 
-// watch keeps the status current, so a change another admin or a reload
-// made shows here, and reads the draft and the rest again with refresh only
-// when the status says the draft or the running config changed (took). It
-// follows GET /amf/config-status?follow; while the stream can't be had, it
-// reads the status every 5 s instead, while the page is on screen, and tries
-// the stream again each time.
-// It reads what each facade routes to every 15 s while the page is on
-// screen. It returns a function that stops it all.
+function showFacades(list) {
+	set({ facades: new Map(list.models.map(f => [f.id, f])) });
+}
+
+// watch keeps the status and what each facade routes to current, so a
+// change another admin, a reload or another client made shows here. It
+// follows GET /amf/config-status?follow, and reads the draft and the rest
+// again with refresh only when the status says the draft or the running
+// config changed (took), and GET /amf/models?follow. It returns a function
+// that stops both.
 export function watch() {
+	const stops = [
+		keepFollowing(followStatus, data => took(JSON.parse(data)).catch(signedOutBy), async () => took((await request('GET', '/amf/config-status')).data), 5000),
+		keepFollowing(followModels, data => showFacades(JSON.parse(data)), refreshFacades, 15000),
+	];
+	return () => stops.forEach(stop => stop());
+}
+
+// keepFollowing follows a stream, giving onData each event's data. While the
+// stream can't be had, or after it ends, it calls poll every ms instead,
+// while the page is on screen, and tries the stream again after each poll.
+// It returns a function that stops it.
+function keepFollowing(follow, onData, poll, ms) {
 	let stopped = false;
 	let stream = null;
 	let timer = null;
-	const fallBack = () => {
+	const start = () => {
+		stream = follow(({ event, data }) => event === 'message' && onData(data));
+		stream.done.then(later, e => {
+			signedOutBy(e);
+			later();
+		});
+	};
+	const later = () => {
 		stream = null;
-		if (!stopped) {
-			timer = setTimeout(tick, 5000);
+		if (stopped) {
+			return;
 		}
-	};
-	const tick = async () => {
-		if (stopped || state.phase !== 'ready' || document.visibilityState !== 'visible') {
-			return fallBack();
-		}
-		try {
-			await took((await request('GET', '/amf/config-status')).data);
-		} catch (e) {
-			signedOutBy(e);
-			return fallBack();
-		}
-		stream = followStatus(({ event, data }) => {
-			if (event === 'message') {
-				took(JSON.parse(data)).catch(signedOutBy);
+		timer = setTimeout(async () => {
+			if (stopped) {
+				return;
 			}
-		});
-		stream.done.then(fallBack, e => {
-			signedOutBy(e);
-			fallBack();
-		});
+			if (state.phase !== 'ready' || document.visibilityState !== 'visible') {
+				return later();
+			}
+			try {
+				await poll();
+			} catch (e) {
+				signedOutBy(e);
+			}
+			if (!stopped) {
+				start();
+			}
+		}, ms);
 	};
-	timer = setTimeout(tick, 0);
-	const facades = setInterval(() => {
-		if (document.visibilityState === 'visible' && state.phase === 'ready') {
-			refreshFacades();
-		}
-	}, 15000);
+	start();
 	return () => {
 		stopped = true;
 		clearTimeout(timer);
-		clearInterval(facades);
 		stream?.stop();
 	};
 }

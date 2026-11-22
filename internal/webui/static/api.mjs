@@ -127,6 +127,11 @@ export function followStatus(onEvent) {
 	return follow('/amf/config-status', {}, onEvent);
 }
 
+// followModels reads GET /amf/models?follow; see follow.
+export function followModels(onEvent) {
+	return follow('/amf/models', {}, onEvent);
+}
+
 // follow reads the server-sent events of path with ?follow, which
 // EventSource can't, since it sends no Authorization header. onEvent gets
 // each event as {event, data}; the returned function stops the stream. The

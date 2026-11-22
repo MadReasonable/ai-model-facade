@@ -217,6 +217,12 @@ Selection depends on state that changes from second to second, so without these 
 `GET /amf/models/{id}` is one entry of that list, so a client needs one shape for both.
 Decided against: a param to choose whether candidates are returned, since they come from the state read `current` already needs, and the list is for seeing why a facade picks what it does.
 `/amf` belongs to the gateway rather than to a client API, so it needs no client's format and can always read state.
+`GET /amf/models?follow` streams that list (`modelsWatch`), so the admin UI shows a load without polling.
+A backend tells the gateway nothing of a load another client starts, so the stream can't avoid reading state: while a stream is open, one goroutine on `Live` starts a check every 15 s, a state snapshot (`backend.WithStateSnapshot`) that every stream lists its caller's facades under, so each backend is read once per check however many streams are open.
+What the gateway changes itself starts a check at once, at most one a second: a reload or apply, and each change of a backend's pending count (`backend.PendingWatcher`, which `openaihttp.StateCache` implements), which is when a load the gateway sent starts and ends.
+The pending count is wired in `Gateway.start`, not `Build`, so a failed build leaves nothing pointing at `Live`.
+Each stream lists its own caller's facades, since what a caller may use differs, and finds the caller again by its credential under the running config before each event, ending once that config refuses it.
+Decided against: each tab reading `/amf/models` on its own timer, as the UI did at first, which read every backend once per tab.
 
 `GET /v1/models` adds `current` as a non-standard field only with `api.openAi.addCurrent` on, because a gateway behind Open WebUI reports its facades' state to another gateway that way (Open WebUI).
 Decided: off by default, so a listing for an ordinary client answers from the config and contacts no backend.

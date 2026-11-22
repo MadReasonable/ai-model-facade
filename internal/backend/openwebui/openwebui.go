@@ -410,6 +410,13 @@ func (b *Backend) LoadedModels(ctx context.Context) ([]backend.ModelInfo, error)
 	return b.state.LoadedModelsAdjusted(ctx, b.applyLinkStates)
 }
 
+// WatchPending implements backend.PendingWatcher for the requests counted
+// as pending in Open WebUI's own state; a request for a linked model counts
+// in its linked backend's, which watches its own.
+func (b *Backend) WatchPending(notify func()) {
+	b.state.WatchPending(notify)
+}
+
 type modelState int
 
 const (

@@ -499,6 +499,18 @@ Both `current` and the candidates are for the caller that asks: a candidate on a
 It is a snapshot, so the next request can be routed differently if what is loaded changes.
 The client APIs' own model lists can carry `current` too, with [`addCurrent`](#api).
 
+`?follow` streams the list as server-sent events instead, for a client that watches what each facade routes to, such as the [admin UI](#the-admin-ui):
+
+```bash
+curl -N -H "Authorization: Bearer $KEY" "http://127.0.0.1:8088/amf/models?follow"
+```
+
+The first event is the list as `GET` gives it, and each later one the list again after it changed.
+A change the gateway makes itself is sent at once: a request it sends starting a load, that load ending, a reload or an apply.
+A backend tells the gateway nothing of a load another client starts there, so the gateway reads every backend's state every 15 seconds to find one, once for all the streams open, and only while one is.
+A busy gateway checks at most once a second for its own changes, however many requests it sends.
+Keep-alives come every 30 seconds with nothing to send, and a stream ends with an `event: end` that gives the reason, once a reload leaves the gateway no longer accepting the caller's key, or when the gateway shuts down.
+
 ### Params
 
 Every `params` value is applied to the request body as a JSON Merge Patch ([RFC 7386](https://www.rfc-editor.org/rfc/rfc7386)):
@@ -1436,7 +1448,7 @@ Every endpoint but `/health` needs a key if `server.apiKeys` is set; see [Keys](
 | `POST /anthropic/v1/messages/count_tokens` | A request's input tokens on the model a chat would use now; see [Counting tokens](#counting-tokens). |
 | `GET /anthropic/v1/models` | The facades in Anthropic's list format, on one page. A facade's `max_tokens` is the smallest output limit among the models it can select, as their backends list them, so a request that asks for it is refused by none; a facade on no backend that lists limits has none. |
 | `GET /anthropic/v1/models/{id}` | One facade in Anthropic's format, or `404`. |
-| `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state; see [Seeing the choice before a request](#seeing-the-choice-before-a-request). |
+| `GET /amf/models` | The gateway's own listing: each facade with `current` and every candidate's state, and with `?follow`, the list again each time it changes; see [Seeing the choice before a request](#seeing-the-choice-before-a-request). |
 | `GET /amf/models/{id}` | One entry of that list, or `404`. |
 | `GET /amf/config` | The draft of the config, or with `?live` the running config, as JSON or, with `Accept: application/yaml`, YAML; `GET /amf/config/<key>/<key>...` reads one node. For `server.adminApi.read`; see [Editing the config](#editing-the-config). |
 | `PUT /amf/config` | Replaces the draft, or with a path, the node at it, or adds a key to a map. For `server.adminApi.write`. |

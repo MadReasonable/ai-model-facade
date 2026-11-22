@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -110,29 +111,36 @@ type clientHandler func(w http.ResponseWriter, r *http.Request, client backend.C
 // nothing about a key that hashes to it.
 func (s *server) authenticated(family *apiFamily, next clientHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cfg := s.gateway.Config.Server
-		header := family.credential(r)
-		client := backend.Client{Authorization: header}
-		token, hasToken := strings.CutPrefix(header, "Bearer ")
-		if hasToken {
-			digest := sha256.Sum256([]byte(token))
-			if name, ok := cfg.KeyName(digest); ok {
-				client.Name, client.Groups = name, cfg.GroupsOf(name)
-				next(w, r, client)
-				return
-			}
-			client.Fingerprint = hex.EncodeToString(digest[:4])
-		}
-		if len(cfg.APIKeys) > 0 && cfg.UnknownKeys != "allow" {
+		client, ok := identify(s.gateway.Config.Server, family.credential(r))
+		if !ok {
 			s.reject(family, w, r, client, http.StatusUnauthorized, "invalid_api_key", "invalid or missing API key")
 			return
 		}
-		if hasToken {
-			client.Name = config.UnknownClient
-		}
-		client.Groups = []string{config.GroupUnknown}
 		next(w, r, client)
 	}
+}
+
+// identify finds who header, an Authorization header as sent, belongs to
+// under cfg; ok is false if cfg refuses it.
+func identify(cfg config.Server, header string) (client backend.Client, ok bool) {
+	client = backend.Client{Authorization: header}
+	token, hasToken := strings.CutPrefix(header, "Bearer ")
+	if hasToken {
+		digest := sha256.Sum256([]byte(token))
+		if name, ok := cfg.KeyName(digest); ok {
+			client.Name, client.Groups = name, cfg.GroupsOf(name)
+			return client, true
+		}
+		client.Fingerprint = hex.EncodeToString(digest[:4])
+	}
+	if len(cfg.APIKeys) > 0 && cfg.UnknownKeys != "allow" {
+		return client, false
+	}
+	if hasToken {
+		client.Name = config.UnknownClient
+	}
+	client.Groups = []string{config.GroupUnknown}
+	return client, true
 }
 
 // modelObject is a virtual model in OpenAI's model-object shape, plus
@@ -254,19 +262,101 @@ type candidateObject struct {
 
 // listFacades serves /amf/models. Unlike /v1/models it may wait on a state
 // refresh in flight: Open WebUI calls /v1/models during its refresh, never
-// this, so the refresh can't be waiting on this request.
+// this, so the refresh can't be waiting on this request. With ?follow, it
+// streams the list instead (followFacades).
 func (s *server) listFacades(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	list := struct {
-		Models []facadeObject `json:"models"`
-	}{Models: []facadeObject{}}
-	ctx := backend.WithStateSnapshot(r.Context())
-	for _, m := range s.gateway.Models {
+	if r.URL.Query().Has("follow") {
+		if s.live == nil {
+			// Only a Live keeps the check the streams list under.
+			s.reject(amfFamily, w, r, client, http.StatusBadRequest, "invalid_request_error", "?follow needs a gateway run by serve")
+			return
+		}
+		s.followFacades(w, r, client.Authorization)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.facadeList(backend.WithStateSnapshot(r.Context()), s.gateway.Models, client))
+}
+
+// facadeList is the body of /amf/models: the facades of models client may
+// use, read under ctx.
+func (s *server) facadeList(ctx context.Context, models []Model, client backend.Client) facadeList {
+	list := facadeList{Models: []facadeObject{}}
+	for _, m := range models {
 		if allows(m, client) {
 			list.Models = append(list.Models, s.facadeObject(ctx, m, client))
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	return list
+}
+
+type facadeList struct {
+	Models []facadeObject `json:"models"`
+}
+
+// followFacades streams /amf/models as server-sent events: the list now,
+// then the list again after each check of modelsWatch that changes it. A
+// stream outlives a reload, so before each list and each keep-alive it finds
+// the caller again by the credential it sent, under the running config,
+// and lists the running gateway's facades; it ends once that config no
+// longer accepts the key.
+func (s *server) followFacades(w http.ResponseWriter, r *http.Request, header string) {
+	snapshot, next := s.live.followModels()
+	defer s.live.unfollowModels()
+	ended := s.live.modelsStreamsEnded()
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // so nginx passes each event on as it comes
+	w.WriteHeader(http.StatusOK)
+	var last []byte
+	send := func() bool {
+		g := s.live.Gateway()
+		client, ok := identify(g.Config.Server, header)
+		if !ok {
+			endKeyRefused(w, rc)
+			return false
+		}
+		body, err := json.Marshal(s.facadeList(snapshot, g.Models, client))
+		if err == nil && !bytes.Equal(body, last) {
+			writeSSE(w, "", body)
+			last = body
+		}
+		rc.Flush()
+		return true
+	}
+	if !send() {
+		return
+	}
+	keepAlive := time.NewTicker(keepAliveInterval)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ended:
+			writeSSE(w, "end", []byte(`{"reason":"the gateway ended the stream: it is shutting down"}`))
+			rc.Flush()
+			return
+		case <-next:
+			snapshot, next = s.live.modelsNow()
+			if !send() {
+				return
+			}
+		case <-keepAlive.C:
+			if _, ok := identify(s.live.Gateway().Config.Server, header); !ok {
+				endKeyRefused(w, rc)
+				return
+			}
+			fmt.Fprint(w, ": keep-alive\n\n")
+			rc.Flush()
+		}
+	}
+}
+
+func endKeyRefused(w http.ResponseWriter, rc *http.ResponseController) {
+	writeSSE(w, "end", []byte(`{"reason":"the gateway no longer accepts this client's key"}`))
+	rc.Flush()
 }
 
 // getFacade serves /amf/models/{id}: one entry of the list.

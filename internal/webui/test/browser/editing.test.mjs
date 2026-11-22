@@ -140,7 +140,7 @@ test('back and forward step through what was shown', { skip }, async t => {
 	assert.deepEqual(page.problems, []);
 });
 
-test('another admin\'s edit shows from the status stream, which leaves the draft unread until it changes', { skip }, async t => {
+test('another admin\'s edit shows from the status stream, and nothing but the streams is read until something changes', { skip }, async t => {
 	const { gw, page } = await session(t);
 	await signIn(page, gw, '#/model/swap');
 	await page.until(() => document.querySelector('.topbar').textContent.includes('config live'));
@@ -154,7 +154,7 @@ test('another admin\'s edit shows from the status stream, which leaves the draft
 		return true;
 	});
 	await sleep(6000); // longer than the 5 s the page used to read the draft at
-	assert.deepEqual(await page.run(() => window.reads.filter(u => u.startsWith('/amf/config') && !u.startsWith('/amf/config-status?follow'))), [], 'nothing read while nothing changes');
+	assert.deepEqual(await page.run(() => window.reads.filter(u => !u.includes('?follow'))), [], 'nothing read but the streams while nothing changes');
 
 	const edit = await fetch(gw.url + '/amf/config/models/swap/description', { method: 'PUT', headers: { Authorization: 'Bearer ' + adminKey, 'Content-Type': 'application/json' }, body: '"Another admin"' });
 	assert.equal(edit.status, 201); // swap has no description yet

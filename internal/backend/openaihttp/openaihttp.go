@@ -243,6 +243,12 @@ func (b *Backend) Pending(model string) (release func()) {
 	return b.State.Pending(model)
 }
 
+// WatchPending implements backend.PendingWatcher for the backend's state
+// cache.
+func (b *Backend) WatchPending(notify func()) {
+	b.State.WatchPending(notify)
+}
+
 // Protocols returns what Chat forwards. An adapter that shadows Chat shadows
 // this too, since what it accepts is no longer what the backend serves.
 func (c *Client) Protocols() []backend.Protocol {
@@ -576,6 +582,9 @@ type StateCache struct {
 	// waiting, if set, is called by each read that is about to wait for a
 	// fetch, so a test can tell when concurrent readers have all joined one.
 	waiting func()
+
+	// notify, if set, is called each time pending changes (WatchPending).
+	notify atomic.Pointer[func()]
 }
 
 // stateFetch is one in-flight state refresh. Concurrent requests share it
@@ -605,6 +614,7 @@ func (s *StateCache) Pending(model string) (release func()) {
 	s.mu.Lock()
 	s.pending[model]++
 	s.mu.Unlock()
+	s.notifyPending()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -619,7 +629,24 @@ func (s *StateCache) Pending(model string) (release func()) {
 			if !ready {
 				s.Invalidate()
 			}
+			s.notifyPending()
 		})
+	}
+}
+
+// WatchPending implements backend.PendingWatcher. On a nil StateCache it
+// does nothing.
+func (s *StateCache) WatchPending(notify func()) {
+	if s != nil {
+		s.notify.Store(&notify)
+	}
+}
+
+// notifyPending calls the WatchPending function, after any Invalidate, so
+// the state it has read next is fetched anew.
+func (s *StateCache) notifyPending() {
+	if f := s.notify.Load(); f != nil {
+		(*f)()
 	}
 }
 

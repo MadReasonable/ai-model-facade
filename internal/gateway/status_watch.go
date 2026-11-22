@@ -92,11 +92,13 @@ func (w *statusWatch) endedChan() chan struct{} {
 	return w.ended
 }
 
-// EndStreams ends every status stream, which never ends by itself, for a
-// server shutting down; a stream started after it ends at once.
+// EndStreams ends every status and models stream, which never ends by
+// itself, for a server shutting down; a stream started after it ends at
+// once.
 func (l *Live) EndStreams() {
 	ended := l.watch.endedChan()
 	l.watch.endOnce.Do(func() { close(ended) })
+	l.models.end()
 }
 
 // changed tells the status streams that something the status reports may

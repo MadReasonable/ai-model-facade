@@ -7,6 +7,7 @@ Before 1.0, a minor release can change config keys.
 ### Added
 
 - `GET /amf/config-status?follow` streams the status as server-sent events: the status at once, then again each time it changes, after an edit, apply, revert, load, save or reload, or, by a check every 2 seconds while a stream is open, after an edit to the files on the host. The admin UI follows it instead of reading the draft and the status every 5 seconds, and reads the status every 5 seconds only while it can't follow the stream.
+- `GET /amf/models?follow` streams the facades' list as server-sent events: the list at once, then again each time it changes, at once for a load the gateway starts or finishes, a reload or an apply, and by a check of every backend's state every 15 seconds while a stream is open, for a load another client starts. The admin UI follows it instead of reading `/amf/models` every 15 seconds, and reads it every 15 seconds only while it can't follow the stream.
 - `GET /amf/config-status` gives each copy's `ETag`, in `draft.etag` and `live.etag`, so a client can tell from the status whether a copy changed.
 
 ### Changed

@@ -109,3 +109,26 @@ func TestPending_NilCacheDoesNothing(t *testing.T) {
 	var s *StateCache
 	s.Pending("m")()
 }
+
+// WatchPending's function is called once a request is counted and once it is
+// released, after a release has dropped the cache, so the read it starts
+// fetches anew; a second release calls nothing.
+func TestPending_WatchPendingSeesEachChange(t *testing.T) {
+	f := newFetcher()
+	s := NewStateCache(Config{StateCacheSeconds: 60}, f.fetch)
+	s.LoadedModels(context.Background())
+	var fetches []int32 // the fetch count after each call's own read
+	s.WatchPending(func() {
+		s.LoadedModels(context.Background())
+		fetches = append(fetches, f.calls.Load())
+	})
+	release := s.Pending("m")
+	release()
+	release()
+	if len(fetches) != 2 {
+		t.Fatalf("called %d times, want 2", len(fetches))
+	}
+	if fetches[1] <= fetches[0] {
+		t.Errorf("the read after the release used the cache: fetches %v", fetches)
+	}
+}
