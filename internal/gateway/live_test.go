@@ -55,6 +55,24 @@ func startDevGateway(t *testing.T, facades string, names ...string) *liveGateway
 // pairs as edit takes them, made to gateway.yaml first.
 func startEditedDevGateway(t *testing.T, edits []string, facades string, names ...string) *liveGateway {
 	t.Helper()
+	config, vars, backends := devConfig(t, edits, facades, names...)
+	return &liveGateway{gateway: startGateway(t, config, vars), backends: backends}
+}
+
+// startServedDevGateway is startDevGateway served through a Live, as serve
+// serves it, for the checks that need one, such as the streams'.
+func startServedDevGateway(t *testing.T, facades string, names ...string) (*liveGateway, *Live) {
+	t.Helper()
+	config, vars, backends := devConfig(t, nil, facades, names...)
+	gw, live := startServedGateway(t, config, vars)
+	return &liveGateway{gateway: gw, backends: backends}, live
+}
+
+// devConfig is gateway.yaml with edits and facades, and its baseUrls
+// pointing at the named backends, which it starts, with the variables the
+// config reads.
+func devConfig(t *testing.T, edits []string, facades string, names ...string) (string, map[string]string, map[string]*testkit.LiveBackend) {
+	t.Helper()
 	src, err := os.ReadFile("../../dev-env/gateway.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +89,7 @@ func startEditedDevGateway(t *testing.T, edits []string, facades string, names .
 			vars["OPEN_WEBUI_API_KEY"] = b.Key
 		}
 	}
-	return &liveGateway{gateway: startGateway(t, config, vars), backends: backends}
+	return config, vars, backends
 }
 
 const liveChat = `{"model":"%s","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`
@@ -201,6 +219,84 @@ func TestLive_UsesTheLoadedCandidateElseLoadsTheFallback(t *testing.T) {
 			if !b.Loaded(t, c.fallback) {
 				t.Errorf("%s not loaded after the fallback was used", c.fallback)
 			}
+		})
+	}
+}
+
+// A models stream shows what a real backend does. A load the gateway sends
+// shows without the periodic check, which is off for that half: as
+// starting, unless the backend has already finished loading by the time
+// the gateway reads it, and then as loaded. An unload made around the
+// gateway, through control, shows on the periodic check.
+func TestLive_ModelsStreamFollowsLoads(t *testing.T) {
+	cases := []struct {
+		facade, backend string
+		through         []string // backends the facade reaches its models through
+		fallback        string
+	}{
+		{"swap", "llamaSwap", nil, "llamaSwap-llm-2"},
+		{"router", "llamaRouter", nil, "llamaRouter-llm-2"},
+		{"lmstudio", "lmStudio", nil, "lmstudio-llm-2"},
+		{"localai", "localAi", nil, "localai-llm-2"},
+		{"ollama", "ollama", nil, "ollama-llm-2:latest"},
+		{"webui", "ollama", []string{"openWebUi"}, "ollama-llm-2:latest"},
+	}
+	for _, c := range cases {
+		t.Run(c.facade, func(t *testing.T) {
+			gw, live := startServedDevGateway(t, "", append([]string{c.backend}, c.through...)...)
+			b := gw.backends[c.backend]
+			b.Reset(t)
+			checkEvery := func(interval time.Duration) {
+				live.models.mu.Lock()
+				defer live.models.mu.Unlock()
+				live.models.interval = interval
+			}
+			state := func(event string) string {
+				facade := gjson.Get(strings.TrimPrefix(event, "data: "), `models.#(id=="`+c.facade+`")`)
+				return facade.Get(`candidates.#(model=="` + c.fallback + `").state`).String()
+			}
+			until := func(next func(string) string, states ...string) string {
+				t.Helper()
+				for {
+					if s := state(next(`"id":"` + c.facade + `"`)); slices.Contains(states, s) {
+						return s
+					}
+				}
+			}
+
+			checkEvery(time.Hour)
+			next, closeStream := followModelsStream(t, gw.URL, "", testkit.LiveTimeout)
+			until(next, "not loaded")
+			ask := gw.askInBackground(t, c.facade)
+			seen := until(next, "starting", "loaded")
+			<-ask.done
+			if ask.resp.Response == nil || ask.resp.StatusCode != http.StatusOK || ask.resp.target() != c.fallback {
+				t.Fatalf("the request that loads %s: %+v", c.fallback, ask.resp)
+			}
+			if seen == "starting" {
+				until(next, "loaded") // a stream sends nothing more once it has sent loaded
+			}
+			closeStream()
+			// The check started with the first stream ends with it, so the
+			// next stream starts one at the new interval.
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				live.models.mu.Lock()
+				streams := live.models.streams
+				live.models.mu.Unlock()
+				if streams == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the first stream is still open")
+				}
+			}
+
+			checkEvery(time.Second)
+			next, closeStream = followModelsStream(t, gw.URL, "", testkit.LiveTimeout)
+			defer closeStream()
+			until(next, "loaded")
+			b.Reset(t)
+			until(next, "not loaded")
 		})
 	}
 }

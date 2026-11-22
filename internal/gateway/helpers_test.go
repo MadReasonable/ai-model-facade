@@ -106,6 +106,23 @@ func startGateway(t *testing.T, src string, vars map[string]string) *gateway {
 	return &gateway{Server: srv, g: g, handler: handler, logs: logs}
 }
 
+// startServedGateway is startGateway served through a Live, as serve
+// serves it, with no config files, for what needs a Live, such as the
+// streams.
+func startServedGateway(t *testing.T, src string, vars map[string]string) (*gateway, *Live) {
+	t.Helper()
+	logs := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	g, err := Build(context.Background(), parseConfig(t, src, vars), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := NewLive(g, log, new(slog.LevelVar), nil)
+	srv := httptest.NewServer(live)
+	t.Cleanup(srv.Close)
+	return &gateway{Server: srv, g: g, handler: live, logs: logs}, live
+}
+
 // startTask starts the task config on swap, and forgets the requests the
 // gateway made while starting.
 func startTask(t *testing.T, swap *testkit.LlamaSwap, edits ...string) *gateway {

@@ -10,13 +10,16 @@ import (
 	"github.com/MadReasonable/ai-model-facade/internal/testkit"
 )
 
-// followModelsStream opens GET /amf/models?follow with key and returns a
-// function that waits for the next event holding want, skipping the others,
-// and the function that closes the stream.
-func followModelsStream(t *testing.T, a *adminLive, key string) (next func(want string) string, closeStream func()) {
+// followModelsStream opens GET /amf/models?follow on the gateway at url
+// with key, or with none if key is "", and returns a function that waits
+// up to wait for the next event holding want, skipping the others, and the
+// function that closes the stream.
+func followModelsStream(t *testing.T, url, key string, wait time.Duration) (next func(want string) string, closeStream func()) {
 	t.Helper()
-	req, _ := http.NewRequest("GET", a.URL+"/amf/models?follow", nil)
-	req.Header.Set("Authorization", "Bearer "+key)
+	req, _ := http.NewRequest("GET", url+"/amf/models?follow", nil)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +43,7 @@ func followModelsStream(t *testing.T, a *adminLive, key string) (next func(want 
 	}()
 	next = func(want string) string {
 		t.Helper()
-		deadline := time.After(5 * time.Second)
+		deadline := time.After(wait)
 		for {
 			select {
 			case e, ok := <-events:
@@ -75,7 +78,7 @@ func TestModels_FollowFindsALoadElsewhere(t *testing.T) {
 	swap := newSwap(t)
 	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
 	a.live.models.interval = 50 * time.Millisecond
-	next, closeStream := followModelsStream(t, a, "secret")
+	next, closeStream := followModelsStream(t, a.URL, "secret", 5*time.Second)
 	defer closeStream()
 	next(`"current":{"model":"qwen2.5-coder-3b:q8_0"`)
 	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
@@ -89,7 +92,7 @@ func TestModels_FollowShowsALoadTheGatewayStarts(t *testing.T) {
 	swap := newSwap(t)
 	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
 	a.live.models.interval, a.live.models.gap = time.Hour, 10*time.Millisecond
-	next, closeStream := followModelsStream(t, a, "secret")
+	next, closeStream := followModelsStream(t, a.URL, "secret", 5*time.Second)
 	defer closeStream()
 	next(`"state":"not loaded"`)
 
@@ -111,9 +114,9 @@ func TestModels_StreamsShareOneRead(t *testing.T) {
 	swap := newSwap(t)
 	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
 	a.live.models.interval = time.Hour
-	first, closeFirst := followModelsStream(t, a, "secret")
+	first, closeFirst := followModelsStream(t, a.URL, "secret", 5*time.Second)
 	defer closeFirst()
-	second, closeSecond := followModelsStream(t, a, "alices-key")
+	second, closeSecond := followModelsStream(t, a.URL, "alices-key", 5*time.Second)
 	defer closeSecond()
 	first(`"models"`)
 	second(`"models"`)
@@ -138,7 +141,7 @@ func TestModels_FollowEndsWhenTheKeyGoes(t *testing.T) {
 		defer a.live.models.mu.Unlock()
 		return a.live.models.streams, a.live.models.poke != nil
 	}
-	next, closeStream := followModelsStream(t, a, "bobs-key")
+	next, closeStream := followModelsStream(t, a.URL, "bobs-key", 5*time.Second)
 	defer closeStream()
 	next(`"models"`)
 	if n, checking := streams(); n != 1 || !checking {
@@ -173,7 +176,7 @@ func TestModels_FollowNeedsALive(t *testing.T) {
 func TestModels_EndStreams(t *testing.T) {
 	swap := newSwap(t)
 	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
-	next, closeStream := followModelsStream(t, a, "secret")
+	next, closeStream := followModelsStream(t, a.URL, "secret", 5*time.Second)
 	defer closeStream()
 	next(`"models"`)
 	a.live.EndStreams()
