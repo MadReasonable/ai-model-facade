@@ -57,7 +57,7 @@ The admin UI saves its changes to the config's folder, so each install below giv
 ### Docker
 
 The image is a static binary on distroless, about 10 MB, published as `ghcr.io/madreasonable/ai-model-facade`.
-It is tagged with each release's version, such as `0.3.0`, with its minor version, such as `0.3`, and with `latest`; `latest` and the minor tag move to each new release, and a version tag stays on its release.
+It is tagged with each release's version, such as `0.4.0`, with its minor version, such as `0.4`, and with `latest`; `latest` and the minor tag move to each new release, and a version tag stays on its release.
 
 #### Initial config
 
@@ -76,7 +76,7 @@ Run it as a service in the same compose project as your backends, so `baseUrl` c
 ```yaml
 services:
   ai-model-facade:
-    image: ghcr.io/madreasonable/ai-model-facade:0.3
+    image: ghcr.io/madreasonable/ai-model-facade:0.4
     restart: unless-stopped
     volumes:
       - ./ai-model-facade:/config
@@ -103,7 +103,7 @@ To run `check` against the backends, run it on their network:
 ```bash
 docker run --rm --network <backend network> \
   -v "$PWD/ai-model-facade:/config" \
-  ghcr.io/madreasonable/ai-model-facade:0.3 check /config/config.yaml --secrets /config/secrets.yaml
+  ghcr.io/madreasonable/ai-model-facade:0.4 check /config/config.yaml --secrets /config/secrets.yaml
 ```
 
 ### Linux
@@ -111,7 +111,7 @@ docker run --rm --network <backend network> \
 Download the archive for your architecture and `checksums.txt`, check the archive against it, and install the binary:
 
 ```bash
-VERSION=v0.3.2
+VERSION=v0.4.0
 ARCH=amd64   # or arm64
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/ai-model-facade_${VERSION}_linux_${ARCH}.tar.gz
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/checksums.txt
@@ -164,7 +164,7 @@ journalctl -u ai-model-facade -f
 Download the archive for your Mac, `arm64` for Apple silicon or `amd64` for Intel, check it, and install the binary:
 
 ```bash
-VERSION=v0.3.2
+VERSION=v0.4.0
 ARCH=arm64   # or amd64
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/ai-model-facade_${VERSION}_darwin_${ARCH}.tar.gz
 curl -LO https://github.com/MadReasonable/ai-model-facade/releases/download/$VERSION/checksums.txt
@@ -234,7 +234,7 @@ sudo launchctl kill HUP system/com.github.madreasonable.ai-model-facade
 
 ### Windows
 
-Unzip `ai-model-facade_v0.3.2_windows_amd64.zip`.
+Unzip `ai-model-facade_v0.4.0_windows_amd64.zip`.
 
 #### Initial config
 

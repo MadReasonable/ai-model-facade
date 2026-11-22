@@ -2,7 +2,9 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-22
+
+The config can be edited, applied and saved over HTTP, through the admin API or the Web UI built into the binary, and `ai-model-facade init` writes a starting config to set a gateway up that way. An `openWebUi` backend's `llamaSwap` block is removed; see Removed.
 
 ### Added
 
@@ -197,6 +199,7 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
+[0.4.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.2.1...v0.3.0
