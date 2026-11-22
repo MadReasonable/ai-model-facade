@@ -43,6 +43,10 @@ With `-race`, each package takes about a second longer, because the race detecto
 Test names start with their unit, so `-run` selects an area, for example `go test ./... -run 'TestStateCache_'`.
 `-short` skips the one test that starts the program as a process of its own, to send it real signals.
 
+The admin UI's JavaScript has tests of its own, run by Node's built-in runner, with nothing to install from npm.
+`mise.toml` names the Go and Node versions the repo builds with; with [mise](https://mise.jdx.dev), `mise install` sets them up and `mise run test-ui` runs the UI's unit tests, which CI runs too.
+`mise run test-browser` runs the UI in headless Chrome against a gateway it builds from the checkout and starts, with no display needed; it needs Chrome or Chromium on the PATH, or `CHROME` naming one, and skips without it, so CI doesn't run it.
+
 ### Where a test goes
 
 Each behaviour is tested once, in the package that implements it.
@@ -59,6 +63,9 @@ A test placed higher up, such as a gateway test of a selection rule, repeats cov
 | `internal/translate` | Each pair's translators, request and reply, streamed and not, and each protocol's module. |
 | `internal/gateway` | The HTTP surface and the wiring between the parts, in one file per topic: `auth`, `access`, `requests`, `responses`, `streams`, `selection`, `listing`, `build`, `health`, `reload`. |
 | `cmd/ai-model-facade` | The commands, their exit codes and their output. |
+| `internal/webui` | Serving the UI's files: what the page loads is built in, and its Content-Security-Policy. |
+| `internal/webui/test/unit` | The UI's modules that need no browser: the order-keeping JSON, SHA-256, the highlighter, the diff and the record of renames. A module that needs one is split so its logic doesn't. |
+| `internal/webui/test/browser` | The UI as a person uses it: signing in, editing and applying, keys and renames, and the layout on a phone. |
 
 Helpers used across one package's test files live in its `helpers_test.go`.
 

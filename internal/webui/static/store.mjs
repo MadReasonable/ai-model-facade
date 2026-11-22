@@ -284,33 +284,7 @@ export function selectionFromHash() {
 	return { selection, view: ['properties', 'yaml', 'vars'].includes(view) ? view : 'properties' };
 }
 
-// The names of keys and groups this page renamed, old to new, by kind, so
-// the places still naming an old name can be offered the new one. A name
-// renamed again moves to its newest name, so typing a name a letter at a
-// time records one rename, not one per letter.
-const renames = new Map(); // kind + ':' + old -> new
-
-export function recordRename(kind, old, to) {
-	let chained = false;
-	for (const [k, v] of renames) {
-		if (k.startsWith(kind + ':') && v === old) {
-			renames.set(k, to);
-			chained = true;
-		}
-	}
-	if (!chained) {
-		renames.set(kind + ':' + old, to);
-	}
-	for (const [k, v] of renames) {
-		if (k === kind + ':' + v) {
-			renames.delete(k); // renamed back to what it was
-		}
-	}
-}
-
-export function renamedTo(kind, old) {
-	return renames.get(kind + ':' + old);
-}
+export { recordRename, renamedTo } from './renames.mjs';
 
 // renameNode gives the key at path the name to in the draft, in its place,
 // with POST /amf/config-rename, which keeps its value as the files hold it,

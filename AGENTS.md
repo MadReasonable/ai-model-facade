@@ -17,6 +17,7 @@ A facade on Open WebUI also gives a plain OpenAI client Open WebUI's server-side
 - Ask a direct question when a requirement is unclear instead of guessing and burying the assumption.
 - Keep scope tight: don't add config keys, abstractions or features for hypothetical needs. Extensibility lives in the code's interfaces, not in speculative config.
 - Before a change is done, `gofmt -l .` lists nothing and `go vet ./...` and `go test -race ./...` pass; CI runs all three on every push to master and every pull request. If `check`'s output changes, regenerate its golden files with `go test ./cmd/ai-model-facade -update` and review the diff.
+- When changing the admin UI, `mise run test-ui` passes, and `mise run test-browser` too where Chrome is installed; CI runs only the first.
 - `dev-env/control` is a Go module of its own, so `go vet ./...` and `go test -race ./...` from the root skip it; when changing it, run both in `dev-env/control` too. CI runs them there as well.
 
 ## Invariants

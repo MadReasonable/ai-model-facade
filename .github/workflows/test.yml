@@ -1,6 +1,7 @@
-# Runs gofmt, go vet and the race-enabled tests on every push to master, on
-# every pull request, when another workflow calls it, and when started by
-# hand. Version tags are tested by release.yml before it builds.
+# Runs gofmt, go vet and the race-enabled tests, and the admin UI's unit
+# tests, on every push to master, on every pull request, when another
+# workflow calls it, and when started by hand. Version tags are tested by
+# release.yml before it builds.
 name: test
 
 on:
@@ -46,3 +47,14 @@ jobs:
         working-directory: dev-env/control
       - run: go test -race ./...
         working-directory: dev-env/control
+
+  # The admin UI's own modules, tested by Node's built-in runner, with no
+  # packages to install; the browser tests run on demand (mise.toml).
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22 # as mise.toml
+      - run: node --test 'internal/webui/test/unit/*.test.mjs'

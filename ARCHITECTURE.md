@@ -59,6 +59,7 @@ It also reports whether each file can be saved, and lists and reads the backups.
 The admin UI: a page and its JavaScript modules in `static/`, built into the binary with `embed` and served under `/amf/ui/` with a Content-Security-Policy.
 There is no build step: the modules are served as written, and Preact and htm, the only third-party code, are vendored unchanged in `static/vendor`.
 The page does everything through the admin endpoints.
+Its tests are in `test/`: unit tests of the modules that need no browser, and browser tests that drive the page in headless Chrome.
 
 ### `internal/protocols`
 

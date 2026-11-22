@@ -1,0 +1,15 @@
+# The toolchains this repo builds and tests with, for mise
+# (https://mise.jdx.dev): Go at the version go.mod requires, so a build
+# catches a use of anything newer, and Node for the admin UI's tests, which
+# need nothing from npm. CI sets up the same versions (test.yml).
+[tools]
+go = "1.26"
+node = "22"
+
+[tasks.test-ui]
+description = "The admin UI's unit tests"
+run = "node --test 'internal/webui/test/unit/*.test.mjs'"
+
+[tasks.test-browser]
+description = "The admin UI in headless Chrome, against a gateway the tests start"
+run = "node --test --test-concurrency=1 --test-timeout=60000 'internal/webui/test/browser/*.test.mjs'"
