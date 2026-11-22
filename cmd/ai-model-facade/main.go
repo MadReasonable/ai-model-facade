@@ -1,5 +1,8 @@
 // Command ai-model-facade is an LLM gateway serving virtual models to OpenAI and Claude clients.
 //
+//	ai-model-facade init <config> [--secrets <file>]
+//	                                  write a starting config with a new admin
+//	                                  key, to finish in the admin UI
 //	ai-model-facade serve <config> [--secrets <file>]
 //	                                  run the gateway
 //	ai-model-facade check <config> [--secrets <file>]
@@ -17,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,9 +46,10 @@ https://github.com/MadReasonable/ai-model-facade
 
 // usage matches the README's Commands section.
 const usage = `usage:
+  ai-model-facade init <config>     write a starting config with a new admin key, to finish in the admin UI
   ai-model-facade serve <config>    run the gateway
   ai-model-facade check <config>    validate the config and print each candidate's resolved params
-                                    serve and check take --secrets <file> after the config,
+                                    init, serve and check take --secrets <file> after the config,
                                     a secrets file merged into it
   ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
   ai-model-facade hash-key          print a new key and its hash for server.apiKeys
@@ -92,7 +97,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	commands := map[string]func(files configFiles, stdout, stderr io.Writer) error{"serve": serve, "check": check, "health": health}
+	commands := map[string]func(files configFiles, stdout, stderr io.Writer) error{"init": initFiles, "serve": serve, "check": check, "health": health}
 	command := commands[""]
 	var files configFiles
 	switch {
@@ -176,6 +181,98 @@ func hashKey(fromStdin bool, stdin io.Reader, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "hash: %s\n", config.HashKey(key))
 	return nil
 }
+
+// initFiles writes a starting config at files.config, and a secrets file
+// at files.secrets if one is named, with a new key for an admin, which it
+// prints once: enough to start the gateway and set the rest up in the admin
+// UI. The files hold the key's hash, the secrets file if there is one, so
+// the config holds no credential. It replaces no file, so it can't destroy
+// a config, and builds a gateway from what it wrote as serve would, so what
+// it leaves starts.
+func initFiles(files configFiles, stdout, _ io.Writer) error {
+	paths := []string{files.config}
+	if files.secrets != "" {
+		paths = append(paths, files.secrets)
+	}
+	for _, p := range paths {
+		if _, err := os.Lstat(p); err == nil {
+			return fmt.Errorf("%s already exists; init writes a new config and never replaces one", p)
+		}
+	}
+	key := config.NewKey()
+	entry := "    - {name: admin, hash: " + config.HashKey(key) + "}\n"
+	main := initConfig
+	if files.secrets == "" {
+		main = strings.Replace(main, initKeys, "  apiKeys:\n"+entry, 1)
+	} else {
+		main = strings.Replace(main, initKeys, "  # The admin key, by its hash, is in the secrets file.\n", 1)
+	}
+	var written []string
+	write := func(path, content string, mode os.FileMode) error {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%s already exists; init writes a new config and never replaces one", path)
+		}
+		if err != nil {
+			return err
+		}
+		written = append(written, path)
+		if _, err := f.WriteString(content); err != nil {
+			f.Close()
+			return err
+		}
+		return f.Close()
+	}
+	err := write(files.config, main, 0o644)
+	if err == nil && files.secrets != "" {
+		err = write(files.secrets, initSecrets+"server:\n  apiKeys:\n"+entry, 0o600)
+	}
+	if err == nil {
+		// Built as serve builds it, which checks more than loading does.
+		var cfg *config.Config
+		if cfg, err = files.load(); err == nil {
+			_, err = gateway.Build(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		}
+	}
+	if err != nil {
+		for _, p := range written {
+			os.Remove(p) // init leaves both files or neither
+		}
+		return err
+	}
+	serveArgs := files.config
+	if files.secrets != "" {
+		serveArgs += " --secrets " + files.secrets
+	}
+	fmt.Fprintf(stdout, "Wrote %s.\n\nadmin key: %s\n\nThis is the only time the key is shown: the files hold its hash.\nStart the gateway with\n\n  ai-model-facade serve %s\n\nthen open http://<this host>:8088/amf/ui/ and sign in with the key, to add\nbackends and facades, apply them, and save them to the files.\n", strings.Join(paths, " and "), key, serveArgs)
+	return nil
+}
+
+// initKeys marks where initConfig takes the admin key's entry, or a note
+// that the secrets file holds it.
+const initKeys = "  #KEYS\n"
+
+// initConfig is the config init writes.
+const initConfig = `# A starting config for ai-model-facade, written by ai-model-facade init.
+# Sign in to the admin UI at /amf/ui/ with the key init printed, to add
+# backends and facades, apply them, and save them to this file.
+# config.example.yaml in the project describes every key.
+server:
+  # 0.0.0.0 accepts connections from other machines and containers, which
+  # every request needs a key from apiKeys for. To keep the admin UI off a
+  # network the clients use, give it an address of its own with
+  # adminApi.listen, such as 127.0.0.1:8089.
+  listen: 0.0.0.0:8088
+  #KEYS
+  adminApi:
+    # admin may change the config over HTTP, and read it and the log.
+    write: {allowedKeys: [admin]}
+`
+
+// initSecrets heads the secrets file init writes.
+const initSecrets = `# The secrets of the config written with it by ai-model-facade init, kept
+# apart so the config can be shared: serve reads them with --secrets.
+`
 
 // health checks a running gateway. It only parses the config to find
 // server.listen; it contacts no backend.

@@ -78,8 +78,9 @@ In pipeline order; `ARCHITECTURE.md` has the longer version.
 ## Program commands
 
 - `serve <config>` runs the gateway. `SIGHUP`, or `POST /amf/reload` from a key in `server.adminApi.write`, reloads the config, all or nothing: a failed load keeps the running gateway, in-flight requests finish on the gateway that accepted them, and a changed `server.listen` or `server.adminApi.listen` is taken but waits for a restart, which `/amf/config-status` reports in `restart`. The admin endpoints under `/amf/config` edit a draft, load the files or a backup into it, apply it, revert it, and save the running config to the files, after a backup into `backups/`. `/amf/ui/` serves the admin UI, which does all of that through those endpoints; `server.adminApi.listen` moves the admin endpoints and the UI to an address of their own.
+- `init <config>` writes a starting config, with a new admin key it prints once and the files hold as a hash, for the admin UI to fill in; it never replaces a file. A config with no facades starts only if `server.adminApi.write` lists someone.
 - `check <config>` loads and validates the config, then prints each facade's resolved params per candidate.
-- `serve` and `check` take `--secrets <file>` after the config: a secrets file, holding only `server.apiKeys` entries and backends' `apiKey` and `keyMap`, merged into the config at load and on every reload.
+- `init`, `serve` and `check` take `--secrets <file>` after the config: a secrets file, holding only `server.apiKeys` entries and backends' `apiKey` and `keyMap`, merged into the config at load and on every reload.
 - `health <config>` exits 0 if the gateway at `server.listen` answers `/health`; the image's `HEALTHCHECK` uses it. It contacts no backend.
 - `hash-key` prints a new key and its `hash:` line for `server.apiKeys`; `hash-key --stdin` hashes a key read from stdin.
 

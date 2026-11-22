@@ -86,6 +86,16 @@ To [save the config](#editing-the-config) over HTTP, the folder must be mounted 
 The image has a health check: every 30 seconds it runs `ai-model-facade health /config/config.yaml`, which calls `/health` on the address in `server.listen`, so `docker ps` shows the container as `healthy` and compose's `depends_on: condition: service_healthy` works.
 If you mount the config somewhere other than `/config/config.yaml`, override the command and the health check to the same path.
 
+To start from nothing and set the gateway up in the admin UI, let [`init`](#commands) write the config into the folder the service mounts, after giving the folder to the image's user, which saving needs too:
+
+```bash
+mkdir ai-model-facade && sudo chown 65532 ai-model-facade
+docker run --rm -v "$PWD/ai-model-facade:/config" ghcr.io/madreasonable/ai-model-facade:latest \
+  init /config/config.yaml --secrets /config/secrets.yaml
+```
+
+It prints the admin key; then start the service with the secrets file's command above, mounting the folder writable, and sign in at `/amf/ui/`.
+
 To reload the config without a restart, see [Reloading the config](#reloading-the-config):
 
 ```bash
@@ -256,6 +266,8 @@ docker build -t ai-model-facade .
 `docker build --build-arg VERSION=...` sets it instead, and a build outside a git checkout without it reports `dev`.
 
 ## Getting started
+
+To set the gateway up in a browser instead, start from [`init`](#commands), which writes a config with an admin key and nothing else, then add the rest in [the admin UI](#the-admin-ui).
 
 This walkthrough connects the gateway to one llama-swap instance, so you need one running.
 Every other backend differs only in its `backends` entry; see [Backends](#backends).
@@ -1477,9 +1489,10 @@ If the backend sent an error event of its own in the client's protocol, that eve
 ## Commands
 
 ```
+ai-model-facade init <config>     write a starting config with a new admin key, to finish in the admin UI
 ai-model-facade serve <config>    run the gateway
 ai-model-facade check <config>    validate the config and print each candidate's resolved params
-                                  serve and check take --secrets <file> after the config,
+                                  init, serve and check take --secrets <file> after the config,
                                   a secrets file merged into it
 ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
 ai-model-facade hash-key          print a new key and its hash for server.apiKeys
@@ -1490,6 +1503,11 @@ ai-model-facade version           print the version, which the startup log line 
 `serve` and `check` make the same checks; `check` fails on what `serve` only warns about.
 See [Errors and warnings](#errors-and-warnings).
 `serve` logs to standard error.
+
+`init` writes a config that serves only the [admin UI](#the-admin-ui), for setting up a gateway from nothing: `server.listen` on `0.0.0.0:8088`, and a key named `admin` that `server.adminApi.write` lists.
+It makes the key and prints it, and it is the only time the key is shown, since the files hold its hash: the secrets file, if `--secrets` names one, which it creates readable by its owner alone, else the config.
+It never replaces a file; if either already exists, it writes nothing.
+A config with no facades is an error, since such a gateway serves nothing, except when `server.adminApi.write` lists an admin who can add them, as this one does.
 
 `hash-key` prints a key that starts with `amf-`, so a secret scanner can recognize one that leaks, and the `hash:` line to put in its `server.apiKeys` entry; see [Keys](#keys).
 
@@ -1689,6 +1707,7 @@ http://127.0.0.1:8088/amf/ui/
 ```
 
 It is built into the binary, with nothing to install or build, and does everything through the admin endpoints above, so it can do what a key can do over HTTP and no more.
+A gateway can be set up from nothing this way: [`init`](#commands) writes a config with an admin key and no backend or facade, which the UI then fills in.
 Sign in with a key that [`server.adminApi`](#server) lists: a key in `write` edits, applies and saves; a key only in `read` sees everything with every control off.
 The page itself holds no secret, so it loads without a key, and only while `server.adminApi` lists a reader or a writer; otherwise it is `404`, as the endpoints are.
 The key stays in the browser tab, or with **Stay signed in** in the browser until **Sign out**, and is sent as a bearer key, never as a cookie, so no other site can make the browser use it.

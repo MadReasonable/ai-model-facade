@@ -14,8 +14,11 @@ Before 1.0, a minor release can change config keys.
 - `server.adminApi.listen` serves the admin endpoints and the admin UI on an address of their own, so the client APIs can face a network the admin side doesn't.
 - `GET /amf/schema` describes every key the config takes, with its type, default, allowed values and description, for the config and an entry of each backend and facade type. `GET /amf/config-anchors` lists each anchor with the paths that read it. `GET /amf/config-status` names the caller and says whether it may change the config.
 
+- `ai-model-facade init <config> [--secrets <file>]` writes a starting config with a new admin key, which it prints once and the files hold as its hash, so a gateway can be set up from nothing in the admin UI. It never replaces a file.
+
 ### Changed
 
+- A config with no facades starts if `server.adminApi.write` lists someone, who can add them over HTTP; without that it is still an error.
 - A reload that changes `server.listen` is no longer refused: it takes the rest of the config, the gateway goes on listening where it started until a restart, and the log line `restart needed`, and `restart` in `/amf/config-status`, say so. The same holds for an apply, and for `server.adminApi.listen`.
 - Building from source needs Go 1.26 or newer, for `slog.MultiHandler`; Go 1.25 no longer gets security fixes.
 

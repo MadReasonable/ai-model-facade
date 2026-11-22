@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"io"
 	"log/slog"
@@ -209,6 +210,73 @@ func TestHashKey_PrintsAKeyAndItsHash(t *testing.T) {
 	}
 	if r := runArgs("hash-key", "secret"); r.code != 2 {
 		t.Errorf("a key as an argument: got %+v", r)
+	}
+}
+
+// init writes a config that check, and so serve, accepts, with a new admin
+// key it prints once and the files hold only as a hash: in the secrets file
+// when one is named, which only its owner may read, else in the config.
+func TestInit_WritesAConfigThatStarts(t *testing.T) {
+	for _, withSecrets := range []bool{true, false} {
+		dir := t.TempDir()
+		files := configFiles{config: filepath.Join(dir, "config.yaml")}
+		args := []string{"init", files.config}
+		if withSecrets {
+			files.secrets = filepath.Join(dir, "secrets.yaml")
+			args = append(args, "--secrets", files.secrets)
+		}
+		r := runArgs(args...)
+		_, after, ok := strings.Cut(r.stdout, "admin key: ")
+		key, _, _ := strings.Cut(after, "\n")
+		if r.code != 0 || !ok || !strings.HasPrefix(key, "amf-") {
+			t.Fatalf("secrets file %t: got %+v", withSecrets, r)
+		}
+		main, err := os.ReadFile(files.config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secrets, _ := os.ReadFile(files.secrets) // none without --secrets
+		if strings.Contains(string(main)+string(secrets), key) {
+			t.Errorf("a file holds the key itself, not its hash:\n%s\n%s", main, secrets)
+		}
+		cfg, err := files.load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name, ok := cfg.Server.KeyName(sha256.Sum256([]byte(key))); !ok || name != "admin" {
+			t.Errorf("secrets file %t: the printed key isn't the admin's: %q", withSecrets, name)
+		}
+		if withSecrets {
+			if strings.Contains(string(main), "sha256:") {
+				t.Errorf("the config holds the hash, which goes in the secrets file:\n%s", main)
+			}
+			if info, err := os.Stat(files.secrets); err != nil || info.Mode().Perm() != 0o600 {
+				t.Errorf("secrets file: %v, mode %v", err, info.Mode())
+			}
+		}
+		checkArgs := append([]string{"check"}, args[1:]...)
+		if r := runArgs(checkArgs...); r.code != 0 {
+			t.Errorf("check of what init wrote: %+v", r)
+		}
+	}
+}
+
+// init never replaces a file: with either already there, it writes nothing.
+func TestInit_ReplacesNoFile(t *testing.T) {
+	dir := t.TempDir()
+	config, secrets := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "secrets.yaml")
+	if err := os.WriteFile(secrets, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runArgs("init", config, "--secrets", secrets)
+	if r.code != 1 || !strings.Contains(r.stderr, secrets+" already exists") {
+		t.Errorf("got %+v", r)
+	}
+	if _, err := os.Stat(config); !os.IsNotExist(err) {
+		t.Errorf("init wrote the config beside a secrets file it refused: %v", err)
+	}
+	if data, _ := os.ReadFile(secrets); string(data) != "mine\n" {
+		t.Errorf("the secrets file changed: %q", data)
 	}
 }
 

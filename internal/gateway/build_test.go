@@ -50,6 +50,31 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 	}
 }
 
+// A gateway with no facades serves nothing, so it is an error, unless an
+// admin can add them over HTTP, as in a config ai-model-facade init writes.
+func TestBuild_NoFacadesOnlyWithAnAdmin(t *testing.T) {
+	for _, c := range []struct {
+		name, src string
+		ok        bool
+	}{
+		{"no admin", "server: {listen: ':0'}\n", false},
+		{"a reader only", "server: {listen: ':0', apiKeys: [{name: a, key: k}], adminApi: {read: {allowedKeys: [a]}}}\n", false},
+		{"a writer", "server: {listen: ':0', apiKeys: [{name: a, key: k}], adminApi: {write: {allowedKeys: [a]}}}\n", true},
+	} {
+		cfg, err := config.Parse([]byte(c.src), func(string) (string, bool) { return "", false })
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := Build(context.Background(), cfg, discard)
+		if c.ok && (err != nil || len(g.Models) != 0) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "unless server.adminApi.write lists an admin")) {
+			t.Errorf("%s: err = %v", c.name, err)
+		}
+	}
+}
+
 // A key in two groups that both have keyMap entries gets the first one's key,
 // in keyMap order, which loading notes, once for each pair of groups, unless
 // the key has an entry of its own, which takes precedence over both.

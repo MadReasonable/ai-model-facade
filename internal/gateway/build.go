@@ -136,8 +136,10 @@ func build(ctx context.Context, cfg *config.Config, log *slog.Logger, store *his
 	if err != nil {
 		return nil, err
 	}
-	if len(modelEntries) == 0 {
-		return nil, fmt.Errorf("models: at least one virtual model is required")
+	// A gateway with no facades serves nothing, unless an admin can add
+	// them over HTTP, as a config ai-model-facade init writes expects.
+	if len(modelEntries) == 0 && !cfg.Server.AdminAPI.Write.On() {
+		return nil, fmt.Errorf("models: at least one facade is required, unless server.adminApi.write lists an admin who can add them over HTTP")
 	}
 	for _, e := range modelEntries {
 		h, err := virtualmodel.Build(e, env)
