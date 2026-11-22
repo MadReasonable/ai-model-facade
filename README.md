@@ -1533,7 +1533,7 @@ ai-model-facade check <config>    validate the config and print each candidate's
 ai-model-facade health <config>   exit 0 if the gateway answers /health, 1 if not
 ai-model-facade hash-key          print a new key and its hash for server.apiKeys
 ai-model-facade hash-key --stdin  print the hash of a key read from standard input
-ai-model-facade version           print the version, which the startup log line also reports
+ai-model-facade version           print the version, which the starting log line also reports
 ```
 
 `serve` and `check` make the same checks; `check` fails on what `serve` only warns about.

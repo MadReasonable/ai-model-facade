@@ -475,8 +475,8 @@ func runProgram(t *testing.T, args ...string) *program {
 	return p
 }
 
-// waitForLog waits for a stderr line containing s.
-func (p *program) waitForLog(t *testing.T, s string) {
+// waitForLog waits for a stderr line containing s, and returns it.
+func (p *program) waitForLog(t *testing.T, s string) string {
 	t.Helper()
 	deadline := time.After(testkit.Timeout)
 	for {
@@ -486,7 +486,7 @@ func (p *program) waitForLog(t *testing.T, s string) {
 				t.Fatalf("the program exited before logging %q", s)
 			}
 			if strings.Contains(line, s) {
-				return
+				return line
 			}
 		case <-deadline:
 			t.Fatalf("the program didn't log %q", s)
@@ -505,7 +505,12 @@ func TestServe_ReloadsOnSIGHUPAndStopsOnSIGTERM(t *testing.T) {
 	src := "server: {listen: \"" + addr + "\"}\nbackends:\n  llamaSwap: {type: llamaSwap, baseUrl: \"" + swap.URL + "\"}\nmodels:\n  task: {backend: llamaSwap, candidates: [{model: m}]}\n"
 	path := writeConfig(t, src)
 	p := runProgram(t, "serve", path)
-	p.waitForLog(t, "msg=listening")
+	if started := p.waitForLog(t, "msg=starting"); !strings.Contains(started, "version=") || !strings.Contains(started, "config="+path) {
+		t.Errorf("the starting line: %s", started)
+	}
+	if listening := p.waitForLog(t, "msg=listening"); strings.Contains(listening, "version=") {
+		t.Errorf("the version is on the listening line too: %s", listening)
+	}
 	facades := func() string {
 		resp, err := http.Get("http://" + addr + "/v1/models")
 		if err != nil {

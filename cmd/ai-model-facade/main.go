@@ -312,6 +312,14 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	logs := loghub.New()
 	logs.Configure(cfg)
 	log := newLogger(stderr, &levelVar, logs)
+	// One line before anything else serve logs, so a log says which build
+	// wrote it even when building the gateway, which lists every backend,
+	// takes a while or fails.
+	started := []any{"version", currentVersion(), "config", files.config}
+	if files.secrets != "" {
+		started = append(started, "secrets", files.secrets)
+	}
+	log.Info("starting", started...)
 	g, err := gateway.Build(ctx, cfg, log)
 	if err != nil {
 		return err
@@ -339,7 +347,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	if a.AdminTLS != "" {
 		attrs = append(attrs, "adminHttps", a.AdminTLS)
 	}
-	log.Info("listening", append(attrs, "models", len(g.Models), "version", currentVersion())...)
+	log.Info("listening", append(attrs, "models", len(g.Models))...)
 	for running := true; running; {
 		select {
 		case err := <-servers.Errs():
