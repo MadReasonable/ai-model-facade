@@ -430,13 +430,13 @@ function Backups({ server, setAdmin }) {
 		try {
 			const r = await request('POST', '/amf/config-load', { query: backup ? { backup } : {} });
 			await refresh();
-			toast((backup ? 'Loaded backup ' + r.data.backup : 'Loaded the files on disk') + ' into the draft.' + (r.data.notes.length ? '\n' + r.data.notes.join('\n') : ''));
+			toast((backup ? 'Loaded backup ' + r.data.backup : 'Loaded the current save') + ' into the draft.' + (r.data.notes.length ? '\n' + r.data.notes.join('\n') : ''));
 		} catch (e) {
 			toast(errorText(e));
 		}
 	};
 	return html`
-		<${Card} title="Files and backups" intro="A save writes the running config to these files, after copying both into a backup folder. A backup loaded into the draft runs once the draft is applied." tools=${!ro && html`<button class="btn small" onClick=${() => load()}>Load the files on disk</button>`}>
+		<${Card} title="Files and backups" intro="A save writes the running config to these files, after copying both into a backup folder. A backup loaded into the draft runs once the draft is applied." tools=${!ro && html`<button class="btn small" onClick=${() => load()}>Load the current save</button>`}>
 			<table class="list">
 				<thead><tr><th>File</th><th>Path</th><th>State</th></tr></thead>
 				<tbody>
@@ -471,7 +471,7 @@ function Backups({ server, setAdmin }) {
 							<td class="mono">${b.id}${i === 0 && html` <span class="badge">-1</span>`}</td>
 							<td>${new Date(b.time).toLocaleString()}</td>
 							<td>${b.files.join(', ')}</td>
-							<td class="order">${!ro && html`<button class="btn small" onClick=${() => load(b.id)}>Load into the draft</button>`}</td>
+							<td class="order">${!ro && html`<button class="btn small" onClick=${() => load(b.id)}>Load into draft</button>`}</td>
 						</tr>
 					`)}
 				</tbody>

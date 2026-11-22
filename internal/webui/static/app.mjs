@@ -88,7 +88,7 @@ function TopBar({ logMode, setLogMode, onMenu, barRef }) {
 			<div class="states">
 				${st.draft.live ? html`<span class="pill good" title="The draft holds what is running">config live</span>` : html`<span class="pill accent" title=${'Draft from ' + st.draft.source + (st.draft.edited ? ', edited since' : '') + '; not applied yet'}>changes staged</span>`}
 				${st.live.saved ? html`<span class="pill good" title="The running config is what the files hold">saved</span>` : html`<span class="pill warn" title=${'Running config from ' + st.live.source + (st.live.edited ? ', edited since' : '')}>running config not saved</span>`}
-				${changedOnDisk.map(f => html`<span class="pill warn" title=${f.path + ' changed on disk since the gateway read it; Load the files on disk to see it, or Reload to run it.'}>${f.role} changed on disk</span>`)}
+				${changedOnDisk.map(f => html`<span class="pill warn" title=${f.path + ' changed on disk since the gateway read it; Load the current save to see it, or Reload to run it.'}>${f.role} changed on disk</span>`)}
 				${(st.restart ?? []).length > 0 && html`<${PillNote} kind="warn" label="restart needed" title="A restart is needed" lines=${restartLines(st.restart)} />`}
 				${unsaveable.length > 0 && html`<${PillNote} kind="bad" label="can't save" title="Why the files can't be saved" lines=${unsaveable.map(f => f.role + ' (' + f.path + '): ' + f.reason)} />`}
 				${!write && html`<span class="pill plain">read only</span>`}
@@ -162,9 +162,9 @@ function More() {
 			<button class="btn" title="More" onClick=${() => setOpen(!open)}>⋯</button>
 			${open && html`
 				<div class="card" style="position:absolute;right:0;top:34px;z-index:10;min-width:260px;padding:6px;display:flex;flex-direction:column;gap:2px">
-					<button class="btn ghost" style="justify-content:flex-start" onClick=${loadFiles}>Load the files on disk into the draft</button>
+					<button class="btn ghost" style="justify-content:flex-start" onClick=${loadFiles}>Load the current save</button>
 					<button class="btn ghost" style="justify-content:flex-start" onClick=${() => select({ kind: 'server' }, 'properties')}>Load a backup...</button>
-					<button class="btn ghost danger" style="justify-content:flex-start" onClick=${reload}>Reload: run the files on disk</button>
+					<button class="btn ghost danger" style="justify-content:flex-start" onClick=${reload}>Reload: load and run the current save</button>
 				</div>
 			`}
 		</span>
@@ -269,7 +269,7 @@ async function loadFiles() {
 	try {
 		const r = await request('POST', '/amf/config-load');
 		await refresh();
-		toast('Loaded the files on disk into the draft.' + (r.data.notes.length ? '\n' + r.data.notes.join('\n') : ''));
+		toast('Loaded the current save into the draft.' + (r.data.notes.length ? '\n' + r.data.notes.join('\n') : ''));
 	} catch (e) {
 		toast(errorText(e));
 	}
@@ -279,7 +279,7 @@ async function reload() {
 	await settle();
 	const st = state.status;
 	const lost = [!st.draft.live && 'the draft\'s edits', !st.live.saved && 'the running config\'s unsaved changes'].filter(Boolean);
-	if (!(await confirm({ title: 'Reload the files', body: 'The gateway runs the files on disk now, as SIGHUP does, and the draft becomes a copy of them.' + (lost.length ? ' This discards ' + lost.join(' and ') + '.' : ''), yes: 'Reload', danger: lost.length > 0 }))) {
+	if (!(await confirm({ title: 'Reload the config', body: 'The gateway loads and runs the current save now, as SIGHUP does, and the draft becomes a copy of it.' + (lost.length ? ' This discards ' + lost.join(' and ') + '.' : ''), yes: 'Reload', danger: lost.length > 0 }))) {
 		return;
 	}
 	try {

@@ -7,6 +7,7 @@ Before 1.0, a minor release can change config keys.
 ### Changed
 
 - The admin UI's **Diff** button looks disabled while the draft holds what is running, as **Revert** is, but can still be clicked to confirm there is nothing to show.
+- The admin UI calls the config files on disk the current save: **Load the current save** loads them into the draft, and **Reload: load and run the current save** runs them.
 
 ### Fixed
 
