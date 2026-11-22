@@ -22,8 +22,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -280,11 +278,11 @@ const initSecrets = `# The secrets of the config written with it by ai-model-fac
 // no secrets file, and a gateway that is up is healthy whatever else its
 // config holds.
 func health(files configFiles, stdout, stderr io.Writer) error {
-	listen, err := config.Listen(files.config)
+	listen, https, err := config.HealthAddress(files.config)
 	if err != nil {
 		return err
 	}
-	url, err := gateway.HealthURL(listen)
+	url, err := gateway.HealthURL(listen, https)
 	if err != nil {
 		return err
 	}
@@ -320,46 +318,31 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	}
 	live := gateway.NewLive(g, log, &levelVar, configfile.Files{Config: files.config, Secrets: files.secrets})
 	live.KeepLogs(logs)
-	srv := &http.Server{
-		Addr:              g.Config.Server.Listen,
-		Handler:           live,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-	}
-	servers := []*http.Server{srv}
-	if addr := g.Config.Server.AdminAPI.Listen; addr != "" {
-		servers = append(servers, &http.Server{
-			Addr:              addr,
-			Handler:           live.Admin(),
-			ReadHeaderTimeout: 10 * time.Second,
-			IdleTimeout:       2 * time.Minute,
-		})
-	}
-	servers[len(servers)-1].RegisterOnShutdown(logs.EndStreams) // a log stream never ends by itself
-	servers[len(servers)-1].RegisterOnShutdown(live.EndStreams) // nor does a status stream
 	// Listen before logging "listening", so the log line, and anything that
-	// waits for it, never comes before the port is open.
-	errs := make(chan error, len(servers))
-	for _, s := range servers {
-		ln, err := net.Listen("tcp", s.Addr)
-		if err != nil {
-			return err
-		}
-		go func() {
-			errs <- s.Serve(ln)
-		}()
+	// waits for it, never comes before the ports are open. A log stream never
+	// ends by itself, nor does a status or models stream.
+	servers, err := live.Listen(logs.EndStreams, live.EndStreams)
+	if err != nil {
+		return err
 	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	if len(servers) > 1 {
-		log.Info("listening", "addr", srv.Addr, "admin", servers[1].Addr, "models", len(g.Models), "version", currentVersion())
-	} else {
-		log.Info("listening", "addr", srv.Addr, "models", len(g.Models), "version", currentVersion())
+	a := g.Config.Server.Addresses()
+	attrs := []any{"addr", a.Main}
+	if a.MainTLS != "" {
+		attrs = append(attrs, "https", a.MainTLS)
 	}
+	if a.Admin != "" {
+		attrs = append(attrs, "admin", a.Admin)
+	}
+	if a.AdminTLS != "" {
+		attrs = append(attrs, "adminHttps", a.AdminTLS)
+	}
+	log.Info("listening", append(attrs, "models", len(g.Models), "version", currentVersion())...)
 	for running := true; running; {
 		select {
-		case err := <-errs:
+		case err := <-servers.Errs():
 			return err
 		case <-hup:
 			live.ReloadFiles("SIGHUP") // logs its outcome
@@ -370,10 +353,8 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, s := range servers {
-		if err := s.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
+	if err := servers.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	return nil
 }

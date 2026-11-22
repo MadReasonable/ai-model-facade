@@ -42,6 +42,12 @@ func (f Files) Load() (*config.Config, error) {
 	return config.Load(f.Config, f.Secrets)
 }
 
+// Dir is the config file's folder, which a relative path in it, such as a
+// TLS certificate's, is from.
+func (f Files) Dir() string {
+	return filepath.Dir(f.Config)
+}
+
 // Read reads the files as they are on disk now, as a Document with their
 // Origin, for POST /amf/config-load.
 func (f Files) Read() (*config.Document, error) {

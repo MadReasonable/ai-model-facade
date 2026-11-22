@@ -74,6 +74,7 @@ Builds a running gateway from a config (`Build`) and serves it.
 `Live` holds the current gateway and swaps in a new one on reload, only if it builds; a reload from the files, for `SIGHUP` or `POST /amf/reload`, runs in `Live` too, one at a time.
 It also holds the three copies of the config the admin endpoints report, the draft, the provenance of what is running, and the files' last-known content, under a lock held only to read them or commit a change, so reads never wait on a build; applies and saves take the build lock as a reload does (`admin.go`). `admin_http.go` serves `/amf/config` and its actions.
 `family.go` holds the API families, OpenAI's, Anthropic's and the gateway's own `/amf`: each family's routes come from its protocols' descriptors, less those `api.<family>.protocols` turns off, with its credential header, error shape and model list.
+`listeners.go` serves every address `Live` listens on, each split into plain HTTP and HTTPS by its connections' first byte, and `Live.serving` says which endpoints each address serves over plain HTTP and over HTTPS, and with which certificate, from the running config.
 `server.go` is the front end: auth, which facades a caller may ask for, the routing-loop check, the selection log line, and SSE relay.
 It does framing only; anything about choosing or rewriting belongs to the facade and the pipeline.
 

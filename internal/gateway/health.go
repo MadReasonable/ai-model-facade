@@ -2,16 +2,17 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
 )
 
-// HealthURL returns the URL a local health check should call for a
-// server.listen address. A wildcard host (empty, 0.0.0.0 or ::) is reached
-// through the loopback address of the same family.
-func HealthURL(listen string) (string, error) {
+// HealthURL returns the URL a local health check should call for listen,
+// over HTTPS with https set. A wildcard host (empty, 0.0.0.0 or ::) is
+// reached through the loopback address of the same family.
+func HealthURL(listen string, https bool) (string, error) {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return "", fmt.Errorf("server.listen '%s': %w", listen, err)
@@ -22,8 +23,18 @@ func HealthURL(listen string) (string, error) {
 	case "::":
 		host = "::1"
 	}
-	return "http://" + net.JoinHostPort(host, port) + "/health", nil
+	scheme := "http://"
+	if https {
+		scheme = "https://"
+	}
+	return scheme + net.JoinHostPort(host, port) + "/health", nil
 }
+
+// healthClient is CheckHealth's client. It doesn't check an HTTPS
+// certificate: a local check reaches the gateway by a loopback address,
+// which a certificate for the gateway's name doesn't cover, and it sends no
+// key or other secret.
+var healthClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 
 // CheckHealth calls url and reports an error unless it answers 200.
 func CheckHealth(ctx context.Context, url string) error {
@@ -33,7 +44,7 @@ func CheckHealth(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := healthClient.Do(req)
 	if err != nil {
 		return err
 	}

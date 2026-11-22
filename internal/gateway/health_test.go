@@ -18,11 +18,14 @@ func TestHealth_URLForAListenAddress(t *testing.T) {
 		"gateway:8088":   "http://gateway:8088/health",
 	}
 	for listen, want := range cases {
-		if got, err := HealthURL(listen); err != nil || got != want {
+		if got, err := HealthURL(listen, false); err != nil || got != want {
 			t.Errorf("%s: got %q, %v; want %q", listen, got, err, want)
 		}
 	}
-	if _, err := HealthURL("8088"); err == nil {
+	if got, err := HealthURL("0.0.0.0:8443", true); err != nil || got != "https://127.0.0.1:8443/health" {
+		t.Errorf("over HTTPS: got %q, %v", got, err)
+	}
+	if _, err := HealthURL("8088", false); err == nil {
 		t.Error("expected an error for an address without a port")
 	}
 }

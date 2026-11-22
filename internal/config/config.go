@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -41,6 +42,8 @@ type Server struct {
 	Responses    Responses `yaml:"responses" doc:"Limits on the Responses conversations the gateway keeps for clients that send previous_response_id."`
 	// Groups names sets of keys, by the names of their entries in APIKeys.
 	Groups map[string][]string `yaml:"groups" doc:"Named groups of keys, each a list of names from apiKeys, for access lists. all and unknown are built in." schema:"ref=keys"`
+	// TLS is the HTTPS of the side listen serves.
+	TLS TLS `yaml:"tls" doc:"HTTPS support for the client APIs, and the admin endpoints and admin UI unless adminApi.listen moves them."`
 	// AdminAPI configures the endpoints that read and change the config and
 	// read the log.
 	AdminAPI AdminAPI `yaml:"adminApi" doc:"Who may read and change the config and read the log over /amf, and where those endpoints listen."`
@@ -291,8 +294,9 @@ type Entry struct {
 }
 
 // Load reads, expands and strictly decodes the config file at path, with
-// the secrets file at secretsPath merged in, or none if it is "". An error
-// names the file it is in.
+// the secrets file at secretsPath merged in, or none if it is "", and reads
+// the TLS key pairs it names, from path's folder for a relative path. An
+// error names the file it is in.
 func Load(path, secretsPath string) (*Config, error) {
 	d, err := ReadFiles(path, secretsPath)
 	if err != nil {
@@ -301,6 +305,9 @@ func Load(path, secretsPath string) (*Config, error) {
 	cfg, err := d.Parse(os.LookupEnv)
 	if err != nil {
 		return nil, nameFile(err, path, secretsPath)
+	}
+	if err := cfg.LoadTLS(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -340,33 +347,65 @@ func nameFile(err error, path, secretsPath string) error {
 	return fmt.Errorf("%s: %w", path, err)
 }
 
-// Listen reads server.listen from the config file at path, with ${NAME}
-// expanded, and nothing else, for the health command: it runs without the
-// secrets file, so it must not fail on what the rest of the config needs
-// that file for, such as an access list naming a key defined there.
-func Listen(path string) (string, error) {
+// HealthAddress reads where a local health check reaches the gateway at
+// path: server.listen over plain HTTP, or, where server.tls serves only
+// HTTPS, its HTTPS address, with https set. It reads those keys, with
+// ${NAME} expanded, and nothing else, for the health command: it runs
+// without the secrets file, so it must not fail on what the rest of the
+// config needs that file for, such as an access list naming a key defined
+// there.
+func HealthAddress(path string) (addr string, https bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
+		return "", false, fmt.Errorf("%s: %w", path, err)
 	}
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return "", fmt.Errorf("%s: config is empty", path)
+		return "", false, fmt.Errorf("%s: config is empty", path)
 	}
 	server, _ := lookup(doc.Content[0], "server")
-	var listen *yaml.Node
+	listen, err := scalarAt(server, "listen")
+	if err != nil {
+		return "", false, fmt.Errorf("%s: server.listen: %w", path, err)
+	}
+	if listen == "" {
+		return "", false, fmt.Errorf("%s: server.listen is required", path)
+	}
+	var tlsBlock *yaml.Node
 	if server != nil {
-		listen, _ = lookup(server, "listen")
+		tlsBlock, _ = lookup(server, "tls")
 	}
-	if listen == nil || resolve(listen).Kind != yaml.ScalarNode || resolve(listen).Value == "" {
-		return "", fmt.Errorf("%s: server.listen is required", path)
+	values := map[string]string{}
+	for _, key := range []string{"cert", "serve", "listen"} {
+		if values[key], err = scalarAt(tlsBlock, key); err != nil {
+			return "", false, fmt.Errorf("%s: server.tls.%w", path, err)
+		}
 	}
-	value := *resolve(listen) // a copy, since expanding changes it
+	if values["cert"] != "" && values["serve"] == ServeHTTPS {
+		return firstSet(values["listen"], listen), true, nil
+	}
+	return listen, false, nil
+}
+
+// scalarAt is the value of key in mapping, with ${NAME} expanded, "" if
+// mapping or key is absent. An error starts with key.
+func scalarAt(mapping *yaml.Node, key string) (string, error) {
+	if mapping == nil || resolve(mapping).Kind != yaml.MappingNode {
+		return "", nil
+	}
+	n, _ := lookup(resolve(mapping), key)
+	if n == nil {
+		return "", nil
+	}
+	if resolve(n).Kind != yaml.ScalarNode {
+		return "", fmt.Errorf("%s is not a single value", key)
+	}
+	value := *resolve(n) // a copy, since expanding changes it
 	if err := expandEnv(&value, os.LookupEnv); err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
+		return "", err
 	}
 	return value.Value, nil
 }

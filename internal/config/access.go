@@ -100,6 +100,8 @@ type AdminAPI struct {
 	// UIBasePath is the path the admin UI is served under, DefaultUIBasePath
 	// when left out; see applyUIDefault.
 	UIBasePath string `yaml:"uiBasePath" doc:"The path the admin UI is served under. / serves it at the root, which needs listen, since server.listen serves the client APIs. Default /amf/ui."`
+	// TLS is the admin side's own HTTPS, apart from server.tls.
+	TLS TLS `yaml:"tls" doc:"HTTPS support for the admin endpoints and the admin UI. Set cert and key here even if server.tls has them; use an anchor to share a certificate."`
 }
 
 // DefaultUIBasePath is where the admin UI is served when

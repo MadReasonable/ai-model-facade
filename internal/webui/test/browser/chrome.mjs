@@ -25,15 +25,20 @@ export function chromePath() {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// launch starts Chrome with an empty profile and returns its page.
-export async function launch({ width = 1280, height = 860, dark = false } = {}) {
+// launch starts Chrome with an empty profile and returns its page. With
+// insecure, it accepts any certificate, for a gateway on a test's own.
+export async function launch({ width = 1280, height = 860, dark = false, insecure = false } = {}) {
 	const profile = mkdtempSync(join(tmpdir(), 'amf-chrome-'));
 	const port = 9300 + Math.floor(Math.random() * 600);
 	// --password-store=basic keeps Chrome from asking the desktop's keyring
 	// over D-Bus for the key its cookies are stored with, before its first
 	// request: with no keyring to answer, that request waits out D-Bus's
 	// 25-second timeout.
-	const chrome = spawn(chromePath(), ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--password-store=basic', '--remote-debugging-port=' + port, '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore', detached: true });
+	const flags = ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--password-store=basic', '--remote-debugging-port=' + port, '--user-data-dir=' + profile];
+	if (insecure) {
+		flags.push('--ignore-certificate-errors');
+	}
+	const chrome = spawn(chromePath(), [...flags, 'about:blank'], { stdio: 'ignore', detached: true });
 	let socket;
 	for (let i = 0; i < 100 && !socket; i++) {
 		try {

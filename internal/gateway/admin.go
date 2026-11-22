@@ -114,6 +114,13 @@ func (l *Live) ApplyDraft(by, ifMatch string) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	dir := ""
+	if l.files != nil {
+		dir = l.files.Dir()
+	}
+	if err := cfg.LoadTLS(dir); err != nil {
+		return nil, err
+	}
 	if !cfg.Server.Writers() {
 		return nil, fmt.Errorf("server.adminApi.write: the draft leaves no key in server.apiKeys that may change the config again, so it isn't applied")
 	}

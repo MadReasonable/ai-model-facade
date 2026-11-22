@@ -31,6 +31,8 @@ type loadOnly func() (*config.Config, error)
 
 func (f loadOnly) Load() (*config.Config, error) { return f() }
 
+func (loadOnly) Dir() string { return "" }
+
 func (loadOnly) Read() (*config.Document, error) {
 	return nil, errors.New("this test has no config files")
 }

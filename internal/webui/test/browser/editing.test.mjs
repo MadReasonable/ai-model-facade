@@ -163,3 +163,25 @@ test('another admin\'s edit shows from the status stream, and nothing but the st
 	assert.ok(!(await page.run(() => window.reads)).includes('/amf/config-status'), 'the status comes from the stream, not read again');
 	assert.deepEqual(page.problems, []);
 });
+
+test('the Server sheet shows every server and adminApi key no other card owns, both tls blocks included', { skip }, async t => {
+	const { gw, page } = await session(t);
+	await signIn(page, gw, '#/server');
+	const names = title => page.run(title => {
+		const card = [...document.querySelectorAll('section.card')].find(c => c.querySelector('h2')?.textContent.startsWith(title));
+		return card ? [...card.querySelectorAll('.field .name')].map(n => n.textContent.trim().split(/\s/)[0]) : null;
+	}, title);
+	const schema = await gw.api('/amf/schema');
+	const server = schema.config.properties.server.properties;
+	const want = (props, owned) => Object.keys(props).filter(k => !owned.includes(k));
+	const general = await names('General');
+	for (const key of want(server, ['apiKeys', 'groups', 'responses', 'adminApi'])) {
+		assert.ok(general.includes(key), 'General shows server.' + key + ': ' + general);
+	}
+	const admin = await names('Admin API');
+	for (const key of want(server.adminApi.properties, ['logs', 'configBackups'])) {
+		assert.ok(admin.includes(key), 'Admin API shows server.adminApi.' + key + ': ' + admin);
+	}
+	assert.ok(general.includes('tls') && admin.includes('tls'), 'both tls blocks');
+	assert.deepEqual(page.problems, []);
+});

@@ -77,13 +77,21 @@ export const secrets = `server:
 // start starts a gateway, and returns its URL, its files, a stop, and down
 // and up, which stop it and start it again on the same port and files, for
 // a page that loses the gateway. With swap, the URL of a fakeLlamaSwap, the
-// llama-swap backend is that fake.
-export async function start({ swap } = {}) {
+// llama-swap backend is that fake. With tls, the gateway also serves HTTPS
+// on its port, with a self-signed certificate openssl makes, at httpsUrl.
+export async function start({ swap, tls = false } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'amf-gw-'));
 	const port = await freePort();
 	const files = { config: join(dir, 'config.yaml'), secrets: join(dir, 'secrets.yaml') };
-	const text = config(port);
-	writeFileSync(files.config, swap ? text.replace('baseUrl: http://127.0.0.1:1 # nothing listens here', 'baseUrl: ' + swap) : text);
+	let text = config(port);
+	if (swap) {
+		text = text.replace('baseUrl: http://127.0.0.1:1 # nothing listens here', 'baseUrl: ' + swap);
+	}
+	if (tls) {
+		execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=gateway', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', join(dir, 'tls.key'), '-out', join(dir, 'tls.crt')], { stdio: 'ignore' });
+		text = text.replace('  listen: 127.0.0.1:' + port + '\n', '  listen: 127.0.0.1:' + port + '\n  tls: {cert: tls.crt, key: tls.key}\n');
+	}
+	writeFileSync(files.config, text);
 	writeFileSync(files.secrets, secrets, { mode: 0o600 });
 	const url = 'http://127.0.0.1:' + port;
 	let proc = null;
@@ -103,6 +111,7 @@ export async function start({ swap } = {}) {
 	await up();
 	return {
 		url,
+		httpsUrl: 'https://127.0.0.1:' + port,
 		files,
 		read: name => readFileSync(files[name], 'utf8'),
 		// api reads an admin endpoint as the admin.

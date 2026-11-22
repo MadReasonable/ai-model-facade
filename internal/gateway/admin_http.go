@@ -34,39 +34,47 @@ const configHeader = "X-Gateway-Config"
 
 // routeAdmin adds the endpoints that read and change the config, each for
 // the callers that server.adminApi lists, and the admin UI under uiPath.
-func (s *server) routeAdmin(mux *http.ServeMux, uiPath string) {
+// With adminTLS set, each of them instead redirects to that HTTPS address,
+// for an admin side that serves only HTTPS but shares server.listen's plain
+// HTTP with the client APIs.
+func (s *server) routeAdmin(mux *http.ServeMux, uiPath, adminTLS string) {
+	route := mux.HandleFunc
+	if adminTLS != "" {
+		redirect := redirectToTLS(adminTLS)
+		route = func(pattern string, _ func(http.ResponseWriter, *http.Request)) { mux.Handle(pattern, redirect) }
+	}
 	read := func(h clientHandler) http.HandlerFunc {
 		return s.authenticated(amfFamily, s.admin(false, "read the config", h))
 	}
 	write := func(what string, h clientHandler) http.HandlerFunc {
 		return s.authenticated(amfFamily, s.admin(true, what, h))
 	}
-	mux.HandleFunc("GET /amf/config", read(s.getConfig))
-	mux.HandleFunc("GET /amf/config/{path...}", read(s.getConfig))
-	mux.HandleFunc("PUT /amf/config", write("edit the config", s.putConfig))
-	mux.HandleFunc("PUT /amf/config/{path...}", write("edit the config", s.putConfig))
-	mux.HandleFunc("DELETE /amf/config/{path...}", write("edit the config", s.deleteConfig))
-	mux.HandleFunc("POST /amf/config-rename/{path...}", write("edit the config", s.renameConfig))
-	mux.HandleFunc("GET /amf/config-anchors", read(s.configAnchors))
-	mux.HandleFunc("GET /amf/schema", read(s.getSchema))
-	mux.HandleFunc("GET /amf/config-status", read(s.configStatus))
-	mux.HandleFunc("GET /amf/config-backups", read(s.configBackups))
+	route("GET /amf/config", read(s.getConfig))
+	route("GET /amf/config/{path...}", read(s.getConfig))
+	route("PUT /amf/config", write("edit the config", s.putConfig))
+	route("PUT /amf/config/{path...}", write("edit the config", s.putConfig))
+	route("DELETE /amf/config/{path...}", write("edit the config", s.deleteConfig))
+	route("POST /amf/config-rename/{path...}", write("edit the config", s.renameConfig))
+	route("GET /amf/config-anchors", read(s.configAnchors))
+	route("GET /amf/schema", read(s.getSchema))
+	route("GET /amf/config-status", read(s.configStatus))
+	route("GET /amf/config-backups", read(s.configBackups))
 	if s.live.logs != nil {
-		mux.HandleFunc("GET /amf/logs", read(s.getLogs))
+		route("GET /amf/logs", read(s.getLogs))
 	}
-	mux.HandleFunc("POST /amf/reload", write("reload the config", s.reloadConfig))
-	mux.HandleFunc("POST /amf/config-apply", write("apply the draft", s.applyConfig))
-	mux.HandleFunc("POST /amf/config-revert", write("revert the draft", s.revertConfig))
-	mux.HandleFunc("POST /amf/config-load", write("load the config", s.loadConfig))
-	mux.HandleFunc("POST /amf/config-save", write("save the config", s.saveConfig))
-	mux.HandleFunc("POST /amf/backend-test/{name}", write("check a backend's address and key", s.testBackend))
+	route("POST /amf/reload", write("reload the config", s.reloadConfig))
+	route("POST /amf/config-apply", write("apply the draft", s.applyConfig))
+	route("POST /amf/config-revert", write("revert the draft", s.revertConfig))
+	route("POST /amf/config-load", write("load the config", s.loadConfig))
+	route("POST /amf/config-save", write("save the config", s.saveConfig))
+	route("POST /amf/backend-test/{name}", write("check a backend's address and key", s.testBackend))
 	prefix := strings.TrimSuffix(uiPath, "/") + "/"
 	if uiPath != "/" {
-		mux.HandleFunc("GET "+uiPath, func(w http.ResponseWriter, r *http.Request) {
+		route("GET "+uiPath, func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, prefix, http.StatusMovedPermanently)
 		})
 	}
-	mux.HandleFunc("GET "+prefix+"{file...}", s.adminUI(prefix))
+	route("GET "+prefix+"{file...}", s.adminUI(prefix))
 }
 
 // adminUI serves the admin UI's files under prefix, which need no key,

@@ -105,6 +105,9 @@ func (d *Document) Parse(lookupEnv func(string) (string, bool)) (*Config, error)
 	if err := cfg.Server.checkAdmins(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Server.checkTLS(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -175,6 +178,9 @@ func (d *Document) parseSchema(lookupEnv func(string) (string, bool)) (*Config, 
 	}
 	if cfg.Server.AdminAPI.Listen != "" && cfg.Server.AdminAPI.Listen == cfg.Server.Listen {
 		return nil, fmt.Errorf("server.adminApi.listen is server.listen, '%s'; give the admin endpoints an address of their own, or leave it out to serve them on server.listen", cfg.Server.Listen)
+	}
+	if err := cfg.Server.checkServe(); err != nil {
+		return nil, err
 	}
 	if cfg.Server.TargetHeader == "" {
 		cfg.Server.TargetHeader = "X-Gateway-Target"

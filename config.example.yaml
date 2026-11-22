@@ -29,6 +29,14 @@ server:
   # machines or containers, listen on 0.0.0.0 or a specific IP, and set
   # apiKeys below: anyone who can reach the port can use the gateway.
   listen: 127.0.0.1:8088
+  # HTTPS, on the same port as plain HTTP unless tls.listen gives it one of
+  # its own. Paths are relative to this file's folder; a reload reads the
+  # files again, so a renewed certificate needs no restart.
+  # tls:
+  #   listen: 0.0.0.0:8443          # optional; left out, HTTPS shares listen
+  #   cert: tls/fullchain.pem
+  #   key: tls/privkey.pem
+  #   serve: both                   # or https: redirect plain requests; or http
   # Without apiKeys, every request is accepted. With them, a client needs one
   # of these keys, and its name appears in the log. An entry gives the key's
   # hash, which `ai-model-facade hash-key` prints with a new key, or the key

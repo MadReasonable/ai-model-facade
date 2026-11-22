@@ -2,6 +2,17 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Added
+
+- The gateway serves HTTPS itself: `server.tls` names the certificate and key for HTTPS on the client APIs, and on the admin endpoints and admin UI unless `server.adminApi.listen` moves them, from files relative to the config's folder, which a reload reads again. HTTPS shares `server.listen` with plain HTTP, told apart by each connection's first byte, or has an address of its own in `tls.listen`, and `tls.serve` chooses `both`, the default, `https`, which redirects plain requests with `308`, or `http`. `server.adminApi.tls` does the same for the admin side, on `server.adminApi.listen`, or on `server.listen`, where its HTTPS serves only the admin endpoints and the admin UI. HTTPS is served with HTTP/2.
+
+### Changed
+
+- `health` checks over HTTPS, without checking the certificate, where `server.tls` serves HTTPS only.
+- The `listening` log line names each HTTPS address, as `https` and `adminHttps`.
+
 ## [0.4.1] - 2026-11-22
 
 The admin UI is told of each change to the config's status and to what each facade routes to, through two new streams, instead of reading the draft every 5 seconds and the facades every 15.

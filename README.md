@@ -1234,12 +1234,16 @@ Every backend is asked for its models once, all at the same time, so backends th
 | Key | Description |
 |-----|-------------|
 | `listen` | Address and port to listen on. `127.0.0.1` accepts local connections only; to accept them from other machines or containers, use `0.0.0.0` or a specific IP, and set `apiKeys`. Required. |
+| `tls.listen` | The address and port HTTPS is served on. A change takes effect on restart. Default: `listen`, which then serves plain HTTP and HTTPS on one port. |
+| `tls.cert`, `tls.key` | The certificate file, with any intermediate certificates after it, such as certbot's `fullchain.pem`, and its private key file, both PEM, for HTTPS on the client APIs, and on the admin endpoints and admin UI unless `adminApi.listen` moves them. The path is relative from the config file's folder. A reload reads both again. Give both or neither; without them, only plain HTTP is served. See [Serving HTTPS](#serving-https). |
+| `tls.serve` | `both` (default): plain HTTP and HTTPS. `https`: HTTPS only, with a plain request redirected to it. `http`: plain HTTP only, even with `tls.cert` set. |
 | `apiKeys` | A list of entries, each a `name` and either `hash`, the key's hash as `hash-key` prints it, or `key`, the key itself. When set, requests need one of these keys, and the key's name appears in the log. A name can have several entries, one per key, and `unknown` and `all` are reserved. See [Keys](#keys). Optional. |
 | `unknownKeys` | `reject` (default): an unlisted key gets `401`. `allow`: accept it and log it as `unknown` with a fingerprint. See [Keys](#keys). |
 | `groups` | Named groups of keys, each a list of names from `apiKeys`, for the access lists of facades and backends. `all` and `unknown` are built in. See [Access](#access). Optional. |
 | `adminApi.read` | The keys and groups that may read the config, its status, its backups and the log, with `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and `/amf/logs`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, and check a backend's address and key, through `PUT` and `DELETE` on `/amf/config`, `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, `POST /amf/reload`, and `POST /amf/backend-test`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.listen` | The address and port the admin endpoints and the [admin UI](#the-admin-ui) listen on, instead of `listen`, which then serves only the client APIs, `/health` and `/amf/models`. A client API can then face a wider network than the admin side, such as `listen` on `0.0.0.0` and this on `127.0.0.1`. It must differ from `listen`, and a change takes effect on restart; see [Reloading the config](#reloading-the-config). Default: the admin endpoints are served on `listen`. |
+| `adminApi.tls` | HTTPS for the admin endpoints and the admin UI, with the same keys as `tls`: on `adminApi.listen`, or on `listen` if that is left out. Nothing in it falls back to `tls`; give a certificate both use through an anchor. See [Serving HTTPS](#serving-https). Optional. |
 | `adminApi.uiBasePath` | The path the [admin UI](#the-admin-ui) is served under, such as `/admin`; the admin endpoints stay under `/amf`. `/` serves it at the root, and needs `adminApi.listen`, since `listen` serves the client APIs at its root; until a restart moves the admin side there, the UI stays at the path it was served at, or at the default if the config now gives that path to a client API, and [`restart`](#reloading-the-config) in `/amf/config-status` says so. It can't overlap `/v1`, `/health`, either client API's `basePath`, or `/amf` other than the default, since those are routes of their own. A change takes effect when applied. Default `/amf/ui`. |
 | `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
@@ -1526,7 +1530,7 @@ ai-model-facade serve <config>    run the gateway
 ai-model-facade check <config>    validate the config and print each candidate's resolved params
                                   init, serve and check take --secrets <file> after the config,
                                   a secrets file merged into it
-ai-model-facade health <config>   exit 0 if the gateway at server.listen answers /health, 1 if not
+ai-model-facade health <config>   exit 0 if the gateway answers /health, 1 if not
 ai-model-facade hash-key          print a new key and its hash for server.apiKeys
 ai-model-facade hash-key --stdin  print the hash of a key read from standard input
 ai-model-facade version           print the version, which the startup log line also reports
@@ -1543,16 +1547,57 @@ A config with no facades is an error, since such a gateway serves nothing, excep
 
 `hash-key` prints a key that starts with `amf-`, so a secret scanner can recognize one that leaks, and the `hash:` line to put in its `server.apiKeys` entry; see [Keys](#keys).
 
-`health` only reads `server.listen` from the config and contacts no backend; a wildcard address such as `0.0.0.0:8088` is checked on `127.0.0.1`.
+`health` only reads `server.listen` and `server.tls` from the config and contacts no backend; a wildcard address such as `0.0.0.0:8088` is checked on `127.0.0.1`.
+Where `server.tls` serves HTTPS only, it checks over HTTPS, on `server.tls.listen` if that is set, and doesn't check the certificate, which doesn't cover the loopback address it calls.
 
 On Ctrl+C or `SIGTERM`, `serve` stops accepting requests and gives those in flight up to 10 seconds to finish, then exits; a stream still running then is cut off.
+
+### Serving HTTPS
+
+The gateway serves HTTPS itself, from a certificate and key the config names, so clients can reach it over TLS without a proxy in front, and a browser treats the admin UI as a secure origin.
+It serves HTTPS with HTTP/2, and plain HTTP with HTTP/1.1.
+The smallest setup serves everything, client APIs, admin endpoints and admin UI, on one port:
+
+```yaml
+server:
+  listen: 0.0.0.0:8443
+  tls:
+    cert: tls/fullchain.pem # relative to the config file's folder
+    key: tls/privkey.pem
+```
+
+That port answers plain HTTP and HTTPS alike: every TLS connection starts with a byte no HTTP request starts with, and the gateway hands each connection to the right server by it.
+`serve: https` turns plain HTTP into a `308` redirect to the same URL under `https://`, which keeps a `POST` a `POST`.
+`tls.listen` puts HTTPS on an address of its own, leaving `listen` to plain HTTP; that address redirects a plain request to itself.
+
+The certificate can come from anywhere that writes the two files: certbot, acme.sh, mkcert or a private CA.
+A reload reads them again, but a renewal tool doesn't reload the gateway by itself, so give it a deploy hook that does, `kill -HUP <pid>` or `POST /amf/reload`.
+A file that can't be read, or a key that isn't the certificate's, is an error at startup and fails a reload, which keeps the running config.
+
+The admin side has a `tls` block of its own, `server.adminApi.tls`, and nothing in it falls back to `server.tls`; a certificate both use goes in an anchor under `vars:`.
+With `server.adminApi.listen`, it serves HTTPS on that address, or on its own `tls.listen`.
+Without it, the admin side's HTTPS shares `server.listen`, serving the admin endpoints and the admin UI only, and with `serve: https`, a plain request to an admin path there is redirected to it while the client APIs stay on plain HTTP:
+
+```yaml
+server:
+  listen: 0.0.0.0:8088 # client APIs over plain HTTP
+  adminApi:
+    tls:
+      cert: tls/fullchain.pem
+      key: tls/privkey.pem
+      serve: https     # the admin side over HTTPS only, on the same port
+```
+
+Two `tls` blocks can't serve HTTPS on the same address, since a connection gets one certificate; that is a startup error.
+`listening` in the log names each HTTPS address, as `https` and `adminHttps`.
 
 ### Reloading the config
 
 `serve` reloads its config without a restart, from the same files it started with: the config and the [secrets file](#secrets-file), but not the environment, which is fixed when the gateway starts.
 The new config is loaded and validated in full first, and replaces the running one only if it has no errors; otherwise the running config stays.
 Requests already in flight, including streams, finish on the config that accepted them.
-Everything can change on reload, but a changed `server.listen` or `server.adminApi.listen` takes effect only on a restart, since those addresses are already bound: the reload takes the rest, the gateway goes on listening where it started, and the log line `restart needed` names the address waiting.
+Everything can change on reload, but a changed `server.listen`, `server.adminApi.listen` or `tls.listen` takes effect only on a restart, since those addresses are already bound: the reload takes the rest, the gateway goes on listening where it started, and the log line `restart needed` names the address waiting.
+A reload does read `tls.cert` and `tls.key` again, so a renewed certificate reaches new connections without a restart.
 `GET /amf/config-status` lists each such address in `restart`, with where the gateway listens, what the running config says, and whether the files hold it yet, which is when a restart takes it:
 
 ```json
