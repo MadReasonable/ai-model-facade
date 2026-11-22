@@ -51,6 +51,7 @@ Mistakes that compile, pass the nearby tests, and break a rule elsewhere:
 - **Printing or logging from a map in iteration order.** Go randomizes it, so sort first, or `check`'s output and its golden files differ between runs.
 - **An adapter that shadows `Client.Chat` without shadowing `Client.Protocols`.** It inherits the forwarding protocols, so the gateway sends it requests its `Chat` wasn't written for (Interfaces).
 - **Passing on another backend header.** Only `Retry-After` is passed on, deliberately; add one through `backend.ChatResponse` only on purpose (Errors).
+- **An admin UI control beside one item that acts on more.** A button next to an item acts on that item only; a value whose parts each have their own remove button, such as a map, a list of objects, a nested block or a list of names, gets the button that removes it entirely in its heading, next to the field's name (Admin UI).
 - **Adding a config key without its docs.** Give its field a `doc` tag, and a `schema` tag for its default or allowed values, which `GET /amf/schema` and the admin UI show; update the README's config section, `config.example.yaml` where it belongs, and the golden files if `check` prints it.
 
 ## Code map

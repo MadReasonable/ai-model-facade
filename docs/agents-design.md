@@ -703,6 +703,37 @@ A few rules guard the byte-level design:
 - **A started response that goes silent is ended after `stallTimeoutSeconds`, 600 s by default.** `requestTimeoutSeconds` ends at the headers, so without it a backend that stops mid-response without closing would hold the request and its client forever. Only time spent waiting in a body read counts (`httpbackend`'s `stallBody`), so a client slow to take a stream doesn't end it. Open WebUI's replies arrive by polling, each poll a complete response, so the adapter applies the limit to the time since the message last changed, and stops the task. Decided: on by default, unlike the other timeouts, whose right value depends on the network or the load time; ten minutes without a byte mid-response is long for any backend, and a limit left off would leave the hang in place for everyone who hasn't set it.
 - **SSE is parsed per spec.** An event left unterminated at the end of a stream is discarded, and a stream that ends without `[DONE]` is an error that includes the last line, since llama-server may write a bare JSON error before closing.
 
+## Serving TLS
+
+To do: the gateway serves its own HTTPS, so a client reaches it over TLS without a proxy in front, and a browser treats the admin UI as a secure origin, which Chrome needs before it offers to install a page as an app.
+Nothing in this section is built yet.
+
+Decided: a certificate comes from files the config names, `cert` and `key` in a side's `tls` block, however it was made: certbot, acme.sh, mkcert or a private CA.
+Decided against: ACME in the gateway; Go's client for it, `autocert`, is in `golang.org/x/crypto`, outside the three modules the project allows, and the tools above already keep the files current.
+
+Each side that has a listener has its own `tls` block: `server.tls` for `server.listen`, `server.adminApi.tls` for the admin side.
+`server.tls.listen` is the address HTTPS is served on, and falls back to `server.listen`; `server.adminApi.tls.listen` falls back to `server.adminApi.listen`, which falls back to `server.listen`.
+So a config with `server.tls` and no admin settings serves everything, client APIs, admin endpoints and the admin UI, on one address, and the admin side gets listeners of its own only where it sets an address.
+An HTTPS listener that comes from a side's block serves that side's endpoints: one from `server.adminApi.tls` serves the admin endpoints and the admin UI only, so an admin block can't give the client APIs HTTPS too.
+Decided: `cert` and `key` don't fall back from `server.tls` to `server.adminApi.tls`; a certificate used by both is an anchor under `vars:`, as other shared settings are (The concept: facades), so each block says everything about its listener.
+
+Two TLS blocks that resolve to the same address are a startup error that names both keys, because a port completes one handshake per connection, with one certificate.
+It extends the rule that `server.adminApi.listen` differs from `server.listen` to every address the gateway resolves to listen on.
+
+`serve` in each block is `http`, `https` or `both`, `both` by default, which serves plain HTTP alone until `cert` and `key` are set, since there is no certificate to serve HTTPS with.
+Where HTTPS and plain HTTP share an address, the first byte of each connection tells them apart: a TLS connection starts with a handshake record, `0x16`, which no HTTP request starts with, and the listener hands the connection to the TLS server or the plain one.
+With `serve: https`, a plain request gets `308` to the same host and path under `https://`, on that side's HTTPS address; `308` keeps the method and body, so a client's `POST` isn't turned into a `GET`.
+Verified 2026-11-22, with a standalone program built with Go 1.27.3 that split one port this way: curl 8.14.1 got plain HTTP/1.1, and HTTP/2 or HTTP/1.1 over TLS as asked; Go's own client got HTTP/1.1 and HTTP/2 over TLS; and headless Chrome 158 got HTTP/1.1, and HTTP/2 over TLS, offered through ALPN by `http.Server.ServeTLS` on the split listener.
+HTTP/2 without TLS (h2c) isn't served, as on the gateway's plain port today.
+
+A reload, `SIGHUP` or `POST /amf/reload`, reads `cert` and `key` again, and the TLS server hands out the current certificate through `tls.Config.GetCertificate`, so new connections get a renewed certificate and open ones keep theirs.
+A renewal tool doesn't reload the gateway by itself, so its deploy hook sends `SIGHUP` or posts to `/amf/reload`.
+Files that can't be read or don't make a key pair are an error at startup and fail a reload, which keeps the running gateway.
+A changed `serve`, `cert` or `key` takes effect on the reload, since each connection is handed to a server, and given a certificate, as it arrives.
+A changed `tls.listen` is taken but waits for a restart, as `listen` does, since a new address has to be bound (Reload), and `restart` in `/amf/config-status` says so.
+
+`ai-model-facade health`, which the image's `HEALTHCHECK` runs, connects over HTTPS where its side serves only HTTPS, without checking the certificate: it reaches the gateway by its local address, which a certificate for the gateway's name doesn't cover, and it sends no key or other secret.
+
 ## Admin UI
 
 The admin UI is a page for editing the config and following the log, served at `/amf/ui/` from files built into the binary (`internal/webui`).
@@ -725,6 +756,9 @@ The backend types are one table, `gateway.backendTypes`, that both building a ba
 Decided: a sheet edits a node by sending all of it back as JSON, with the `ETag` it read, and the edit endpoints keep each part sent unchanged as the file holds it, aliases, merges and comments included (Config loading).
 Values shared through an anchor are read-only on their users' sheets until the user asks for a value of its own, since an edit there would silently stop sharing it; `GET /amf/config-anchors` says which values those are.
 
+Decided: a control acts on what it sits next to.
+A button beside an item, such as a list entry or a map key, changes or removes that item only; a value whose parts each have their own remove button gets the button that removes it entirely in its heading, next to the field's name (`fields.mjs`), because a remove button beside an item that removed every item was read as removing that one.
+
 Decided: `server.adminApi.listen` moves the admin endpoints and the page together.
 A port for the page alone would protect nothing, since the endpoints it calls would still answer on `server.listen`.
 
@@ -742,6 +776,7 @@ Stock nginx can't rewrite a body by its JSON content; njs or OpenResty could, bu
 
 ## Open decisions
 
+- **To do: serving TLS.** As Serving TLS describes; not built.
 - **To do: Messages untranslated to local backends.** A Messages client's request to a local backend is translated to Chat Completions (Translation), since the local adapters declare only Chat Completions and legacy completions, so `thinking`, `cache_control` and the rest the README's "Messages on a Chat Completions backend" lists are dropped. Every local backend dev-env runs serves `/v1/messages` itself: verified with one non-streaming request each against llama-server b11580, llama-swap v263, Ollama 0.40.8, LM Studio's llmster 0.0.25-1 and LocalAI v4.11.0; streaming, tools, thinking and images not checked. Declaring Messages in those adapters needs a fallback to translation for a server without the endpoint, which only a backend check could find (a warning, per Errors and warnings), and changes which params block a candidate's requests get, so existing configs would see different patches.
   The same holds for Responses: all of them serve `/v1/responses`, and two keep conversations, LM Studio (llmster 0.0.25-1) and LocalAI (v4.11.0), which answer a `GET` by ID and refuse an unknown `previous_response_id`; sent Responses as they are, a candidate on them could take `responsesHistory: service`, as one on OpenAI's API can. llama-server (b11580) refuses `previous_response_id`, and Ollama (0.40.8) accepts one it doesn't know, so it ignores it. Checked by those answers only, not by whether a follow-up's reply used the earlier turn.
 - **To do: a hub form.** An intermediate form every protocol translates to and from, so a new protocol needs one translator pair instead of one per existing protocol. The direct pairs stay as routes beside it (Translation).
