@@ -547,7 +547,7 @@ function App() {
 	const s = useStore();
 	return html`
 		${s.phase === 'signin' && html`<${SignIn} />`}
-		${s.phase === 'loading' && html`<div class="signin"><p class="muted">Reading the config...</p></div>`}
+		${s.phase === 'loading' && html`<div class="signin"><p class="muted">Connecting to the gateway...</p></div>`}
 		${s.phase === 'ready' && html`<${Ready} />`}
 		<${Dialogs} />
 	`;

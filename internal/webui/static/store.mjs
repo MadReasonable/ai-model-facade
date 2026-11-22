@@ -10,7 +10,7 @@ import { ApiError, configURL, entriesOf, followModels, followStatus, request } f
 const listeners = new Set();
 
 export const state = {
-	phase: 'signin', // signin | loading | ready
+	phase: 'loading', // loading | signin | ready; loading first, so a reload doesn't show the sign-in form before start tries the key
 	signInError: null,
 	caller: null, // {name, write}
 	schema: null,
@@ -43,6 +43,7 @@ export function useStore() {
 	useEffect(() => {
 		const f = () => tick(n => n + 1);
 		listeners.add(f);
+		f(); // a change made after the first render, before this subscribed, would otherwise never be drawn
 		return () => listeners.delete(f);
 	}, []);
 	return state;

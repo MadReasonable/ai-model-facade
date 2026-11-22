@@ -19,6 +19,7 @@ Before 1.0, a minor release can change config keys.
 
 ### Fixed
 
+- The admin UI could stay on its sign-in form after a reload had already signed in with the stored key, or on its loading message after the gateway had refused a request without a key: a change to the page's state made before a part of the page had started listening for changes was never drawn. The page now opens on **Connecting to the gateway...** until it knows which to show.
 - A Docker image built from a clean checkout without `--build-arg VERSION` reports the checkout's version, without `+dirty`. Every such image reported `+dirty`, because the build context leaves out `dev-env`, whose tracked files git then saw as deleted.
 
 ## [0.4.0] - 2026-11-22
