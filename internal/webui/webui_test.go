@@ -106,3 +106,47 @@ func TestUI_RevalidatesByETag(t *testing.T) {
 		t.Errorf("unchanged: %d with %d bytes", w.Code, w.Body.Len())
 	}
 }
+
+// The manifest a browser installs the page by is served as one, parses,
+// starts and scopes the app where the page is, under any base path, and
+// names only icons the UI serves; the CSP lets the page load it.
+func TestUI_ServesItsManifest(t *testing.T) {
+	ui, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if csp := serve(t, ui, "/amf/ui/").Header().Get("Content-Security-Policy"); !strings.Contains(csp, "manifest-src 'self'") {
+		t.Errorf("CSP: %s", csp)
+	}
+	w := serve(t, ui, "/amf/ui/manifest.webmanifest")
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/manifest+json" {
+		t.Fatalf("manifest: %d %s", w.Code, w.Header().Get("Content-Type"))
+	}
+	var manifest struct {
+		ShortName string `json:"short_name"`
+		StartURL  string `json:"start_url"`
+		Scope     string `json:"scope"`
+		Display   string `json:"display"`
+		Icons     []struct {
+			Src     string `json:"src"`
+			Type    string `json:"type"`
+			Purpose string `json:"purpose"`
+		} `json:"icons"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ShortName != "Model Facade" || manifest.StartURL != "./" || manifest.Scope != "./" || manifest.Display != "standalone" {
+		t.Errorf("manifest: %+v", manifest)
+	}
+	purposes := map[string]bool{}
+	for _, icon := range manifest.Icons {
+		purposes[icon.Purpose] = true
+		if got := serve(t, ui, "/amf/ui/"+icon.Src); got.Code != http.StatusOK || !strings.HasPrefix(got.Header().Get("Content-Type"), icon.Type) {
+			t.Errorf("icon %s: %d %s", icon.Src, got.Code, got.Header().Get("Content-Type"))
+		}
+	}
+	if !purposes["any"] || !purposes["maskable"] {
+		t.Errorf("icon purposes: %v", purposes)
+	}
+}

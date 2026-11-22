@@ -23,6 +23,16 @@ import (
 	"strings"
 )
 
+// static/icon.svg is the icon's source. icon-full-bleed.svg, beside this
+// file, is the same with its background to the edges and the letters inside
+// the circle a launcher may crop a maskable icon to; static/icon-maskable.png
+// and static/apple-touch-icon.png are it at 512 and 180 pixels, made with
+// Chrome, since ImageMagick's own SVG renderer drops the letters:
+//
+//	google-chrome --headless=new --force-device-scale-factor=1 --window-size=512,512 --screenshot=icon-maskable.png page.html
+//
+// where page.html shows icon-full-bleed.svg at that size with no margin.
+//
 //go:embed static
 var embedded embed.FS
 
@@ -59,6 +69,8 @@ func New() (*UI, error) {
 		switch path.Ext(p) {
 		case ".mjs", ".js":
 			contentType = "text/javascript; charset=utf-8"
+		case ".webmanifest":
+			contentType = "application/manifest+json" // what a browser looks for to install the page as an app
 		case ".md", "":
 			contentType = "text/plain; charset=utf-8"
 		}
@@ -86,6 +98,7 @@ func New() (*UI, error) {
 		"script-src 'self' 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'",
 		"style-src 'self'",
 		"img-src 'self' data:",
+		"manifest-src 'self'",
 		"connect-src 'self'",
 		"base-uri 'none'",
 		"form-action 'none'",

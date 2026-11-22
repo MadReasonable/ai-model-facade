@@ -1829,6 +1829,10 @@ Each selection is in the page's address, so the browser's back and forward butto
 On a phone, the tree slides in from the left with the button at the top left and closes once something is picked, and the log takes the entire screen.
 The bar's buttons and the sheet's name row move out of the way as the sheet scrolls down, and back as soon as it scrolls up.
 
+The page can be installed as an app, with its own window and its own icon in the dock, launcher or home screen: in Chrome or Edge, with **Install** in the address bar or the menu, and on an iPhone or iPad, with Safari's **Add to Home Screen**.
+A browser offers that only on a secure origin, so serve the page over [HTTPS](#serving-https), or open it on `localhost`.
+The app is the same page, with the same sign-in; nothing works offline, since everything it shows comes from the gateway.
+
 To keep the admin side off a network the client APIs face, give it an address of its own with [`server.adminApi.listen`](#server): the admin endpoints and the page then answer there and nowhere else.
 [`server.adminApi.uiBasePath`](#server) moves the page, such as to the root of that address with `/`.
 

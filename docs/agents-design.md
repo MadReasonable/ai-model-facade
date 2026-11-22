@@ -765,6 +765,10 @@ Values shared through an anchor are read-only on their users' sheets until the u
 Decided: a control acts on what it sits next to.
 A button beside an item, such as a list entry or a map key, changes or removes that item only; a value whose parts each have their own remove button gets the button that removes it entirely in its heading, next to the field's name (`fields.mjs`), because a remove button beside an item that removed every item was read as removing that one.
 
+Decided: the page can be installed as an app through a web app manifest alone, with no service worker: Chrome 158 reports no installability errors without one (verified 2026-11-22, `Page.getInstallabilityErrors`), and the page is no use offline, since all it shows comes from the gateway.
+The manifest's `start_url` and `scope` are `./`, so the app is the page wherever `uiBasePath` puts it.
+The icon has one source, `icon.svg`, which the favicon and the manifest use; the maskable icon for Android and the Apple touch icon are PNGs, since iOS takes no SVG there, made from `icon-full-bleed.svg` with Chrome, as `webui.go` says, since ImageMagick's SVG renderer drops the letters.
+
 Decided: `server.adminApi.listen` moves the admin endpoints and the page together.
 A port for the page alone would protect nothing, since the endpoints it calls would still answer on `server.listen`.
 

@@ -79,7 +79,8 @@ export const secrets = `server:
 // a page that loses the gateway. With swap, the URL of a fakeLlamaSwap, the
 // llama-swap backend is that fake. With tls, the gateway also serves HTTPS
 // on its port, with a self-signed certificate openssl makes, at httpsUrl.
-export async function start({ swap, tls = false } = {}) {
+// With uiBasePath, the admin UI is served there.
+export async function start({ swap, tls = false, uiBasePath } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'amf-gw-'));
 	const port = await freePort();
 	const files = { config: join(dir, 'config.yaml'), secrets: join(dir, 'secrets.yaml') };
@@ -90,6 +91,9 @@ export async function start({ swap, tls = false } = {}) {
 	if (tls) {
 		execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=gateway', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', join(dir, 'tls.key'), '-out', join(dir, 'tls.crt')], { stdio: 'ignore' });
 		text = text.replace('  listen: 127.0.0.1:' + port + '\n', '  listen: 127.0.0.1:' + port + '\n  tls: {cert: tls.crt, key: tls.key}\n');
+	}
+	if (uiBasePath) {
+		text = text.replace('  adminApi:\n', '  adminApi:\n    uiBasePath: ' + uiBasePath + '\n');
 	}
 	writeFileSync(files.config, text);
 	writeFileSync(files.secrets, secrets, { mode: 0o600 });
@@ -112,6 +116,7 @@ export async function start({ swap, tls = false } = {}) {
 	return {
 		url,
 		httpsUrl: 'https://127.0.0.1:' + port,
+		uiPath: (uiBasePath ?? '/amf/ui').replace(/\/$/, '') + '/',
 		files,
 		read: name => readFileSync(files[name], 'utf8'),
 		// api reads an admin endpoint as the admin.
@@ -131,7 +136,7 @@ export async function start({ swap, tls = false } = {}) {
 
 // signIn opens the UI at hash and signs in with key.
 export async function signIn(page, gw, hash = '#/server', key = adminKey) {
-	await page.goto(gw.url + '/amf/ui/' + hash);
+	await page.goto(gw.url + (gw.uiPath ?? '/amf/ui/') + hash);
 	await page.until(() => document.querySelector('.signin form'));
 	await page.type('input[name=password]', key);
 	await page.click('.signin button', 'Sign in');
