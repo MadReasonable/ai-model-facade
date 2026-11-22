@@ -64,6 +64,8 @@ type live struct {
 	// admin serves server.adminApi.listen, when the gateway listens there;
 	// nil otherwise.
 	admin http.Handler
+	// uiPath is where the admin UI is served; see uiPathFor.
+	uiPath string
 }
 
 // addresses are what a config says the gateway listens on.
@@ -151,10 +153,30 @@ func (l *Live) Gateway() *Gateway {
 // the addresses listened on, not g's config, which may name others until
 // a restart.
 func (l *Live) serving(g *Gateway) *live {
+	uiPath := l.uiPathFor(g.Config)
 	if l.listening.admin == "" {
-		return &live{gateway: g, handler: g.handler(l.log, l, allEndpoints)}
+		return &live{gateway: g, handler: g.handler(l.log, l, allEndpoints, uiPath), uiPath: uiPath}
 	}
-	return &live{gateway: g, handler: g.handler(l.log, l, clientEndpoints), admin: g.handler(l.log, l, adminEndpoints)}
+	return &live{gateway: g, handler: g.handler(l.log, l, clientEndpoints, ""), admin: g.handler(l.log, l, adminEndpoints, uiPath), uiPath: uiPath}
+}
+
+// uiPathFor is where cfg's admin UI is served: server.adminApi.uiBasePath,
+// except at the root while the gateway listens on server.listen alone,
+// which serves the client APIs there, until a restart moves the admin side
+// to server.adminApi.listen. Until then the UI stays where it is served now,
+// or at the default if that path is now a route of cfg's own.
+func (l *Live) uiPathFor(cfg *config.Config) string {
+	want := cfg.Server.AdminAPI.UIBasePath
+	if want == "" {
+		want = config.DefaultUIBasePath // a config not made by Parse
+	}
+	if want != "/" || l.listening.admin != "" {
+		return want
+	}
+	if now := l.current.Load(); now != nil && now.uiPath != "/" && config.CheckUIBasePath(now.uiPath, cfg.API) == nil {
+		return now.uiPath
+	}
+	return config.DefaultUIBasePath
 }
 
 // Reload builds a gateway from cfg and, only if that fully succeeds, swaps
@@ -271,34 +293,44 @@ func (l *Live) swap(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 		return nil, err
 	}
 	g.history.SetLimits(historyLimits(cfg))
-	l.current.Store(l.serving(g))
+	now := l.serving(g)
+	l.current.Store(now)
 	g.start(l.log)
 	old.stop()
 	old.closeIdleConnections()
-	for _, p := range pendingRestarts(l.listening, addressesOf(cfg)) {
+	for _, p := range pendingRestarts(l.listening, now.uiPath, cfg) {
 		l.log.Warn("restart needed", "key", p.Key, "listening", p.Listening, "running", p.Running)
 	}
 	return g, nil
 }
 
 // PendingRestart is an address the running config names that the gateway
-// doesn't listen on yet, because it started with another.
+// doesn't listen on yet, because it started with another, or the admin UI's
+// root, which waits for the admin side's own address.
 type PendingRestart struct {
-	Key       string `json:"key"`       // server.listen or server.adminApi.listen
-	Listening string `json:"listening"` // where the gateway listens, "" for nowhere
-	Running   string `json:"running"`   // what the running config says, "" for nowhere
+	Key string `json:"key"` // server.listen, server.adminApi.listen or server.adminApi.uiBasePath
+	// Listening is where the gateway listens, "" for nowhere, or for
+	// server.adminApi.uiBasePath, the path the UI is served at.
+	Listening string `json:"listening"`
+	Running   string `json:"running"` // what the running config says, "" for nowhere
 	// Saved is whether the files hold Running too, so a restart takes it,
 	// and the health check probes it already.
 	Saved bool `json:"saved"`
 }
 
-func pendingRestarts(listening, running addresses) []PendingRestart {
+// pendingRestarts compares where the gateway listens, and the path it
+// serves the admin UI at, with what cfg says.
+func pendingRestarts(listening addresses, uiPath string, cfg *config.Config) []PendingRestart {
 	var out []PendingRestart
+	running := addressesOf(cfg)
 	if running.main != listening.main {
 		out = append(out, PendingRestart{Key: "server.listen", Listening: listening.main, Running: running.main})
 	}
 	if running.admin != listening.admin {
 		out = append(out, PendingRestart{Key: "server.adminApi.listen", Listening: listening.admin, Running: running.admin})
+	}
+	if want := cfg.Server.AdminAPI.UIBasePath; want != "" && want != uiPath {
+		out = append(out, PendingRestart{Key: "server.adminApi.uiBasePath", Listening: uiPath, Running: want})
 	}
 	return out
 }
@@ -306,7 +338,8 @@ func pendingRestarts(listening, running addresses) []PendingRestart {
 // Restart returns what a restart would change of where the gateway
 // listens, and whether the files hold it yet; none if nothing.
 func (l *Live) Restart() []PendingRestart {
-	pending := pendingRestarts(l.listening, addressesOf(l.Gateway().Config))
+	now := l.current.Load()
+	pending := pendingRestarts(l.listening, now.uiPath, now.gateway.Config)
 	if len(pending) == 0 {
 		return []PendingRestart{}
 	}
@@ -314,18 +347,21 @@ func (l *Live) Restart() []PendingRestart {
 	_, running := l.copies()
 	saved := l.saved
 	l.stateMu.Unlock()
-	files := addresses{}
+	files := &config.Config{}
 	if running.Saved {
-		files = addressesOf(l.Gateway().Config)
+		files = now.gateway.Config
 	} else if cfg, err := saved.Parse(os.LookupEnv); err == nil {
-		files = addressesOf(cfg)
+		files = cfg
 	}
 	for i := range pending {
 		p := &pending[i]
-		if p.Key == "server.listen" {
-			p.Saved = files.main == p.Running
-		} else {
-			p.Saved = files.admin == p.Running
+		switch p.Key {
+		case "server.listen":
+			p.Saved = files.Server.Listen == p.Running
+		case "server.adminApi.listen":
+			p.Saved = files.Server.AdminAPI.Listen == p.Running
+		default:
+			p.Saved = files.Server.AdminAPI.UIBasePath == p.Running
 		}
 	}
 	return pending

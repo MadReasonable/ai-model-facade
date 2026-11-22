@@ -188,6 +188,9 @@ func (d *Document) parseSchema(lookupEnv func(string) (string, bool)) (*Config, 
 	if err := cfg.Server.AdminAPI.Logs.applyDefaults(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Server.AdminAPI.applyUIDefault(cfg.API); err != nil {
+		return nil, err
+	}
 	if backups := cfg.Server.AdminAPI.ConfigBackups; backups != nil && *backups < 0 {
 		return nil, fmt.Errorf("server.adminApi.configBackups: %d is negative", *backups)
 	}

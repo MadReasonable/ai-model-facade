@@ -212,6 +212,48 @@ func checkBasePath(family, basePath string) error {
 	return nil
 }
 
+// applyUIDefault fills in the admin UI's path and refuses one that would
+// overlap another route: /v1, /health, either client API's basePath, in
+// either direction, or /amf, where the admin endpoints are, other than the
+// default. Those hold whichever listener serves the UI, since a change of
+// listen waits for a restart; / is the exception, allowed only with listen,
+// and not served until the gateway listens there (Live.uiPathFor).
+func (a *AdminAPI) applyUIDefault(api API) error {
+	p := a.UIBasePath
+	if p == "" {
+		a.UIBasePath = DefaultUIBasePath
+		return nil
+	}
+	if !strings.HasPrefix(p, "/") || path.Clean(p) != p || strings.ContainsAny(p, "{} ") {
+		return fmt.Errorf("server.adminApi.uiBasePath: '%s' is not a path such as '/admin', or '/'", p)
+	}
+	if p == "/" {
+		if a.Listen == "" {
+			return fmt.Errorf("server.adminApi.uiBasePath: '/' needs server.adminApi.listen, since server.listen serves the client APIs at its root")
+		}
+		return nil
+	}
+	if err := CheckUIBasePath(p, api); err != nil {
+		return fmt.Errorf("server.adminApi.uiBasePath: %w", err)
+	}
+	return nil
+}
+
+// CheckUIBasePath refuses a path for the admin UI, other than the root,
+// that overlaps a route of the gateway's own on a listener that also serves
+// the client APIs of api.
+func CheckUIBasePath(p string, api API) error {
+	if p != DefaultUIBasePath && (p == "/amf" || strings.HasPrefix(p, "/amf/")) {
+		return fmt.Errorf("'%s' is under '/amf', where the admin endpoints are; only the default, '%s', is allowed there", p, DefaultUIBasePath)
+	}
+	for _, taken := range []string{"/v1", "/health", api.OpenAI.BasePath, api.Anthropic.BasePath} {
+		if p == taken || strings.HasPrefix(p, taken+"/") || strings.HasPrefix(taken, p+"/") {
+			return fmt.Errorf("'%s' overlaps '%s', which the gateway serves itself", p, taken)
+		}
+	}
+	return nil
+}
+
 func (r *Responses) applyDefaults() error {
 	if r.MaxBytes < 0 {
 		return fmt.Errorf("server.responses.maxBytes: %d is negative", r.MaxBytes)

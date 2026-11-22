@@ -1228,6 +1228,7 @@ Every backend is asked for its models once, all at the same time, so backends th
 | `adminApi.read` | The keys and groups that may read the config, its status, its backups and the log, with `GET` on `/amf/config`, `/amf/config-status`, `/amf/config-backups` and `/amf/logs`: `allowedKeys` and `allowedGroups`, as on a facade. The keys in `adminApi.write` may too. Left out, with `adminApi.write` left out too, the endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.write` | The keys and groups that may edit the draft, apply, revert, reload and save the config, and check a backend's address and key, through `PUT` and `DELETE` on `/amf/config`, `POST` on `/amf/config-apply`, `-load`, `-revert` and `-save`, `POST /amf/reload`, and `POST /amf/backend-test`. Left out, no one may, and those endpoints answer `404`. See [Access](#access). Optional. |
 | `adminApi.listen` | The address and port the admin endpoints and the [admin UI](#the-admin-ui) listen on, instead of `listen`, which then serves only the client APIs, `/health` and `/amf/models`. A client API can then face a wider network than the admin side, such as `listen` on `0.0.0.0` and this on `127.0.0.1`. It must differ from `listen`, and a change takes effect on restart; see [Reloading the config](#reloading-the-config). Default: the admin endpoints are served on `listen`. |
+| `adminApi.uiBasePath` | The path the [admin UI](#the-admin-ui) is served under, such as `/admin`; the admin endpoints stay under `/amf`. `/` serves it at the root, and needs `adminApi.listen`, since `listen` serves the client APIs at its root; until a restart moves the admin side there, the UI stays at the path it was served at, or at the default if the config now gives that path to a client API, and [`restart`](#reloading-the-config) in `/amf/config-status` says so. It can't overlap `/v1`, `/health`, either client API's `basePath`, or `/amf` other than the default, since those are routes of their own. A change takes effect when applied. Default `/amf/ui`. |
 | `adminApi.configBackups` | How many backups of the config files a save keeps, a folder each in `backups/` beside the config; see [Editing the config](#editing-the-config). With `0`, a save removes its own backup once it succeeds. Default `10`. |
 | `targetHeader` | Name of the response header naming the chosen model. Default `X-Gateway-Target`. |
 | `responses.maxBytes` | The most the Responses [conversations](#conversations) the gateway keeps may hold, in bytes; past it, the least recently used are evicted. Default `268435456` (256 MiB). |
@@ -1547,6 +1548,8 @@ Everything can change on reload, but a changed `server.listen` or `server.adminA
 "restart": [{"key": "server.listen", "listening": "127.0.0.1:8088", "running": "0.0.0.0:8088", "saved": true}]
 ```
 
+A `server.adminApi.uiBasePath` of `/` that waits for `server.adminApi.listen` is listed there too, with the path the UI is at in `listening`.
+
 Once the files hold a new `server.listen`, `health`, and so a Docker health check, probes that address, and reports the gateway unhealthy until it restarts.
 An apply takes a changed address the same way, and says so in its `notes`, as a reload does.
 Run `check` first to see what a reload would load.
@@ -1757,6 +1760,7 @@ On a phone, the tree slides in from the left with the button at the top left and
 The bar's buttons and the sheet's name row move out of the way as the sheet scrolls down, and back as soon as it scrolls up.
 
 To keep the admin side off a network the client APIs face, give it an address of its own with [`server.adminApi.listen`](#server): the admin endpoints and the page then answer there and nowhere else.
+[`server.adminApi.uiBasePath`](#server) moves the page, such as to the root of that address with `/`.
 
 ## Upgrading
 

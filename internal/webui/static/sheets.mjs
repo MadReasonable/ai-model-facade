@@ -83,7 +83,7 @@ export function ServerSheet() {
 			<//>
 			<${Clients} server=${server} />
 			<${Card} title="Admin API" intro="Who may read and change the config over /amf, including this page, and where those endpoints listen.">
-				<${Sheet} schema=${admin} only=${['read', 'write', 'listen']} value=${sv.adminApi} path=${['server', 'adminApi']} readOnly=${ro} onChange=${setAdmin} />
+				<${Sheet} schema=${admin} only=${['read', 'write', 'listen', 'uiBasePath']} value=${sv.adminApi} path=${['server', 'adminApi']} readOnly=${ro} onChange=${setAdmin} />
 			<//>
 			<${Card} title="Logging">
 				<${Sheet} schema=${config.logging} value=${logging.value} path=${['logging']} readOnly=${ro} onChange=${logging.commit} />

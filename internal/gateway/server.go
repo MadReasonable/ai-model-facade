@@ -45,7 +45,7 @@ type server struct {
 // Handler returns the front end for every client API: HTTP and SSE framing
 // only.
 func (g *Gateway) Handler(log *slog.Logger) http.Handler {
-	return g.handler(log, nil, allEndpoints)
+	return g.handler(log, nil, allEndpoints, "")
 }
 
 // The sets of endpoints a handler serves. With server.adminApi.listen set,
@@ -59,8 +59,9 @@ const (
 )
 
 // handler is Handler for one set of endpoints, with the Live that serves g,
-// for the admin endpoints, or nil to leave them out.
-func (g *Gateway) handler(log *slog.Logger, live *Live, endpoints int) http.Handler {
+// for the admin endpoints, or nil to leave them out, and the path to serve
+// the admin UI at.
+func (g *Gateway) handler(log *slog.Logger, live *Live, endpoints int, uiPath string) http.Handler {
 	s := &server{gateway: g, models: map[string]virtualmodel.Handler{}, log: log, started: time.Now().Unix(), live: live}
 	for _, m := range g.Models {
 		s.models[m.Name] = m.Handler
@@ -70,7 +71,7 @@ func (g *Gateway) handler(log *slog.Logger, live *Live, endpoints int) http.Hand
 	mux.HandleFunc("GET /amf/models", s.authenticated(amfFamily, s.listFacades))
 	mux.HandleFunc("GET /amf/models/{id...}", s.authenticated(amfFamily, s.getFacade))
 	if live != nil && endpoints != clientEndpoints {
-		s.routeAdmin(mux)
+		s.routeAdmin(mux, uiPath)
 	}
 	if endpoints != adminEndpoints {
 		api := g.Config.API

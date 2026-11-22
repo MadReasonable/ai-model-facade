@@ -62,6 +62,7 @@ server:
   #   read: {allowedGroups: [family]}
   #   write: {allowedKeys: [alice]}
   #   listen: 127.0.0.1:8089          # the admin endpoints and the admin UI, /amf/ui/, on their own address
+  #   uiBasePath: /                   # the admin UI at that address's root; default /amf/ui
   #   configBackups: 10               # backups a save keeps in backups/ beside this file
   #   logs:
   #     level: debug                  # default: logging.level

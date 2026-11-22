@@ -32,8 +32,8 @@ import (
 const configHeader = "X-Gateway-Config"
 
 // routeAdmin adds the endpoints that read and change the config, each for
-// the callers that server.adminApi lists.
-func (s *server) routeAdmin(mux *http.ServeMux) {
+// the callers that server.adminApi lists, and the admin UI under uiPath.
+func (s *server) routeAdmin(mux *http.ServeMux, uiPath string) {
 	read := func(h clientHandler) http.HandlerFunc {
 		return s.authenticated(amfFamily, s.admin(false, "read the config", h))
 	}
@@ -59,26 +59,31 @@ func (s *server) routeAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /amf/config-load", write("load the config", s.loadConfig))
 	mux.HandleFunc("POST /amf/config-save", write("save the config", s.saveConfig))
 	mux.HandleFunc("POST /amf/backend-test/{name}", write("check a backend's address and key", s.testBackend))
-	mux.HandleFunc("GET /amf/ui", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/amf/ui/", http.StatusMovedPermanently)
-	})
-	mux.HandleFunc("GET /amf/ui/{file...}", s.adminUI)
+	prefix := strings.TrimSuffix(uiPath, "/") + "/"
+	if uiPath != "/" {
+		mux.HandleFunc("GET "+uiPath, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, prefix, http.StatusMovedPermanently)
+		})
+	}
+	mux.HandleFunc("GET "+prefix+"{file...}", s.adminUI(prefix))
 }
 
-// adminUI serves the admin UI's files, which need no key, since the page
-// holds no secret and signs in to the endpoints it calls. With the read
-// endpoints off, it is off too, as they are.
-func (s *server) adminUI(w http.ResponseWriter, r *http.Request) {
-	if !s.gateway.Config.Server.AdminAPI.ReadOn() {
-		s.reject(amfFamily, w, r, backend.Client{}, http.StatusNotFound, "not_found", "/amf/ui is off; list its admins in server.adminApi.read or server.adminApi.write to turn it on")
-		return
+// adminUI serves the admin UI's files under prefix, which need no key,
+// since the page holds no secret and signs in to the endpoints it calls.
+// With the read endpoints off, it is off too, as they are.
+func (s *server) adminUI(prefix string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.gateway.Config.Server.AdminAPI.ReadOn() {
+			s.reject(amfFamily, w, r, backend.Client{}, http.StatusNotFound, "not_found", "the admin UI is off; list its admins in server.adminApi.read or server.adminApi.write to turn it on")
+			return
+		}
+		ui, err := adminUIFiles()
+		if err != nil {
+			writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
+		ui.ServeHTTP(w, r, prefix)
 	}
-	ui, err := adminUIFiles()
-	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
-		return
-	}
-	ui.ServeHTTP(w, r, "/amf/ui/")
 }
 
 // adminUIFiles reads the admin UI's files once, the first time they are
@@ -402,6 +407,8 @@ func restartNotes(pending []PendingRestart) []string {
 	var notes []string
 	for _, p := range pending {
 		switch {
+		case p.Key == "server.adminApi.uiBasePath":
+			notes = append(notes, fmt.Sprintf("%s is '%s' now, but the admin UI stays at '%s' until a restart moves the admin side to server.adminApi.listen", p.Key, p.Running, p.Listening))
 		case p.Running == "":
 			notes = append(notes, fmt.Sprintf("%s is left out now, but the gateway listens on '%s' until it restarts; then the admin endpoints move to server.listen", p.Key, p.Listening))
 		case p.Listening == "":

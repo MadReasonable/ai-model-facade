@@ -685,3 +685,47 @@ backends:
 		t.Errorf("an undefined backend: %v", err)
 	}
 }
+
+// The admin UI's path defaults to /amf/ui, and may be any path that no
+// other route overlaps, on whichever listener serves it, since a change of
+// server.adminApi.listen waits for a restart. The root needs a listener of
+// its own, since server.listen serves the client APIs there.
+func TestParse_UIBasePath(t *testing.T) {
+	base := strings.Replace(minimal, "  listen: 0.0.0.0:8090\n", "  listen: 0.0.0.0:8090\n  adminApi: {%s}\n", 1)
+	for _, c := range []struct {
+		name, adminAPI, want, err string
+	}{
+		{"left out", ``, "/amf/ui", ""},
+		{"a path of its own", `uiBasePath: /admin`, "/admin", ""},
+		{"the root on a listener of its own", `listen: 0.0.0.0:8091, uiBasePath: /`, "/", ""},
+		{"the default, given", `uiBasePath: /amf/ui`, "/amf/ui", ""},
+		{"the root on server.listen", `uiBasePath: /`, "", "'/' needs server.adminApi.listen"},
+		{"a trailing slash", `uiBasePath: /admin/`, "", "is not a path"},
+		{"no leading slash", `uiBasePath: admin`, "", "is not a path"},
+		{"under /amf", `uiBasePath: /amf/admin`, "", "under '/amf'"},
+		{"under /v1", `uiBasePath: /v1/ui`, "", "overlaps '/v1'"},
+		{"a client API's basePath", `uiBasePath: /openai`, "", "overlaps '/openai'"},
+		{"above a client API's basePath", `uiBasePath: /x`, "", "overlaps '/x/anthropic'"},
+		{"/health", `uiBasePath: /health`, "", "overlaps '/health'"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := strings.Replace(base, "%s", c.adminAPI, 1)
+			if c.name == "above a client API's basePath" {
+				src += "api: {anthropic: {basePath: /x/anthropic}}\n"
+			}
+			cfg, err := Parse([]byte(src), env(nil))
+			if c.err != "" {
+				if err == nil || !strings.Contains(err.Error(), c.err) {
+					t.Fatalf("got %v, want an error containing %q", err, c.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Server.AdminAPI.UIBasePath != c.want {
+				t.Errorf("uiBasePath %q, want %q", cfg.Server.AdminAPI.UIBasePath, c.want)
+			}
+		})
+	}
+}

@@ -167,3 +167,79 @@ func logText(a *adminLive) string {
 	}
 	return b.String()
 }
+
+// server.adminApi.uiBasePath moves the admin UI, and the admin endpoints
+// stay at /amf. At the root, on a listener of its own, the UI is served
+// there. Set to the root while the gateway still listens on server.listen
+// alone, which serves the client APIs there, it stays where it was until a
+// restart, or at the default if the config now routes that path itself,
+// and /amf/config-status says so.
+func TestAdminUI_ServedUnderUIBasePath(t *testing.T) {
+	swap := newSwap(t)
+	get := func(base, path string) (int, string) {
+		t.Helper()
+		noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		resp, err := noRedirect.Get(base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusMovedPermanently {
+			return resp.StatusCode, resp.Header.Get("Location")
+		}
+		return resp.StatusCode, string(body)
+	}
+	page := func(base, path string) bool {
+		t.Helper()
+		status, body := get(base, path)
+		return status == http.StatusOK && strings.Contains(body, `src="./app.mjs"`)
+	}
+
+	moved := startAdmin(t, swap.URL, strings.Replace(adminMain, "  adminApi:\n", "  adminApi:\n    uiBasePath: /admin\n", 1), adminSecrets)
+	if !page(moved.URL, "/admin/") || page(moved.URL, "/amf/ui/") {
+		t.Error("with uiBasePath /admin: the page is not at /admin/ alone")
+	}
+	if status, to := get(moved.URL, "/admin"); status != http.StatusMovedPermanently || to != "/admin/" {
+		t.Errorf("/admin: %d to %s", status, to)
+	}
+	if status, _ := get(moved.URL, "/admin/app.mjs"); status != http.StatusOK {
+		t.Errorf("a module under /admin: %d", status)
+	}
+
+	root := startAdmin(t, swap.URL, strings.Replace(adminMain, "  adminApi:\n", "  adminApi:\n    listen: 127.0.0.1:0\n    uiBasePath: /\n", 1), adminSecrets)
+	admin := httptest.NewServer(root.live.Admin())
+	t.Cleanup(admin.Close)
+	if !page(admin.URL, "/") || page(admin.URL, "/amf/ui/") || page(root.URL, "/") {
+		t.Error("with uiBasePath /: the page is not at the admin listener's root alone")
+	}
+	if status, _ := get(admin.URL, "/app.mjs"); status != http.StatusOK {
+		t.Errorf("a module at the root: %d", status)
+	}
+	if r := root.send(t, "GET", "/amf/config-status", "bobs-key", ""); r.StatusCode != http.StatusNotFound {
+		t.Errorf("server.listen serves the admin endpoints: %d", r.StatusCode)
+	}
+
+	shared := startAdmin(t, swap.URL, strings.Replace(adminMain, "  adminApi:\n", "  adminApi:\n    uiBasePath: /admin\n", 1), adminSecrets)
+	shared.expect(t, shared.send(t, "PUT", "/amf/config/server/adminApi/listen", "alices-key", `"127.0.0.1:0"`), http.StatusCreated, "edit")
+	shared.expect(t, shared.send(t, "PUT", "/amf/config/server/adminApi/uiBasePath", "alices-key", `"/"`), http.StatusOK, "edit")
+	r := shared.send(t, "POST", "/amf/config-apply", "alices-key", "")
+	shared.expect(t, r, http.StatusOK, "apply")
+	if !page(shared.URL, "/admin/") || page(shared.URL, "/amf/ui/") || page(shared.URL, "/") {
+		t.Error("before a restart: the page is not where it was")
+	}
+	if !strings.Contains(r.body, "server.adminApi.uiBasePath is '/' now, but the admin UI stays at '/admin' until a restart") {
+		t.Errorf("apply's notes: %s", r.body)
+	}
+	status := shared.send(t, "GET", "/amf/config-status", "bobs-key", "").body
+	if got := gjson.Get(status, `restart.#(key=="server.adminApi.uiBasePath")`).Raw; got != `{"key":"server.adminApi.uiBasePath","listening":"/admin","running":"/","saved":false}` {
+		t.Errorf("restart: %s", gjson.Get(status, "restart").Raw)
+	}
+	// A path the new config gives a client API leaves the UI at the
+	// default.
+	shared.expect(t, shared.send(t, "PUT", "/amf/config/api", "alices-key", `{"openAi": {"basePath": "/admin"}}`), http.StatusCreated, "edit")
+	shared.expect(t, shared.send(t, "POST", "/amf/config-apply", "alices-key", ""), http.StatusOK, "apply")
+	if !page(shared.URL, "/amf/ui/") || page(shared.URL, "/admin/") {
+		t.Error("with /admin a client API's: the page is not at the default")
+	}
+}

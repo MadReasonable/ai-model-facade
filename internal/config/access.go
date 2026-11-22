@@ -97,7 +97,14 @@ type AdminAPI struct {
 	// are served on, instead of server.listen, which then serves only the
 	// client APIs.
 	Listen string `yaml:"listen" doc:"The address and port the admin endpoints and the admin UI listen on, instead of server.listen, which then serves only the client APIs. Left out, they are served on server.listen. A change takes effect on restart."`
+	// UIBasePath is the path the admin UI is served under, DefaultUIBasePath
+	// when left out; see applyUIDefault.
+	UIBasePath string `yaml:"uiBasePath" doc:"The path the admin UI is served under. / serves it at the root, which needs listen, since server.listen serves the client APIs. Default /amf/ui."`
 }
+
+// DefaultUIBasePath is where the admin UI is served when
+// server.adminApi.uiBasePath is left out.
+const DefaultUIBasePath = "/amf/ui"
 
 // CanRead reports whether a caller with key name name and groups may use the
 // read endpoints: one listed in read, or in write, since a client that edits

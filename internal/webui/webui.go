@@ -1,7 +1,8 @@
 // Package webui is the admin UI: a page and its modules, built into the
-// binary, that the gateway serves under /amf/ui/. The page is static and
-// holds no secret, so anyone who reaches it may load it; everything it shows
-// comes from the admin endpoints, with the key its user signs in with.
+// binary, that the gateway serves under /amf/ui/, or where
+// server.adminApi.uiBasePath puts it. The page is static and holds no
+// secret, so anyone who reaches it may load it; everything it shows comes
+// from the admin endpoints, with the key its user signs in with.
 //
 // The files are served as they are in static/, with no build step: the
 // UI's modules import Preact and htm, vendored in static/vendor, and an

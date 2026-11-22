@@ -129,10 +129,13 @@ function PillNote({ kind, label, title, lines }) {
 }
 
 // restartLines says what a restart would change of where the gateway
-// listens, and what to know until then.
+// listens, and of where it serves the admin UI, and what to know until
+// then.
 function restartLines(pending) {
 	const where = (key, address) => (address ? address : key === 'server.adminApi.listen' ? 'server.listen, with the client APIs' : 'nowhere');
-	const lines = pending.map(p => p.key + ': listening on ' + where(p.key, p.listening) + '; the running config says ' + where(p.key, p.running) + '.');
+	const lines = pending.map(p => p.key === 'server.adminApi.uiBasePath'
+		? p.key + ': the admin UI is at ' + p.listening + '; the running config says ' + p.running + ', which waits for server.adminApi.listen.'
+		: p.key + ': listening on ' + where(p.key, p.listening) + '; the running config says ' + where(p.key, p.running) + '.');
 	lines.push('The gateway goes on listening where it started until it restarts, since those addresses are bound.');
 	if (pending.some(p => !p.saved)) {
 		lines.push('The files don\'t hold the new address yet, so save the running config before restarting; a restart before that starts from the files and loses it.');
