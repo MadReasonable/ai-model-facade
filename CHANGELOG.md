@@ -2,7 +2,11 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.4.1] - 2026-11-22
+
+The admin UI is told of each change to the config's status and to what each facade routes to, through two new streams, instead of reading the draft every 5 seconds and the facades every 15.
+While it can't reach the gateway, it says so in place of pills that would be out of date, and a reload no longer stays on the sign-in form after the stored key has signed in.
+A Docker image built from a clean checkout reports its version without `+dirty`.
 
 ### Added
 
@@ -13,7 +17,7 @@ Before 1.0, a minor release can change config keys.
 ### Changed
 
 - The admin UI's **Diff** button looks disabled while the draft holds what is running, as **Revert** is, but can still be clicked to confirm there is nothing to show.
-- The admin UI calls the config files on disk the current save: **Load the current save** loads them into the draft, and **Reload: load and run the current save** runs them.
+- The admin UI calls the config files on disk the current save: **Load the current save** loads them into the draft, and **Reload: load and run the current save** runs them. A backup's button is **Load into draft**.
 - The admin UI's **Load a backup...** scrolls the Server sheet to **Files and backups**, where the backups are listed.
 - While the admin UI can't reach the gateway, by its streams or by reading, its bar shows only **can't reach the gateway**, in place of pills that would be out of date, and it tries again after 1 second, then twice as long each time, up to 30 seconds, as its log panel does.
 
