@@ -242,6 +242,9 @@ type Status struct {
 	// Restart lists the addresses the running config names that the
 	// gateway won't listen on until it restarts.
 	Restart []PendingRestart `json:"restart"`
+	// Version is the gateway's, as ai-model-facade version prints it, so a
+	// page loaded from an earlier build can tell it should reload.
+	Version string `json:"version"`
 }
 
 // DraftStatus is where the draft came from, whether it was edited since,
@@ -290,6 +293,7 @@ func (l *Live) Status() Status {
 		s.Files, s.Backups = files, &backups
 	}
 	s.Restart = l.Restart()
+	s.Version = l.version
 	return s
 }
 

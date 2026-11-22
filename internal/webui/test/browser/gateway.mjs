@@ -13,16 +13,23 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const repo = resolve(import.meta.dirname, '../../../..');
-let binary = null;
+const binaries = new Map();
 
-function build() {
-	if (!binary) {
+// build builds the gateway from this checkout, once per version: the one
+// the checkout gives, or version in its place, as a release build sets it.
+function build(version = '') {
+	if (!binaries.has(version)) {
 		const dir = mkdtempSync(join(tmpdir(), 'amf-bin-'));
 		process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
-		binary = join(dir, 'ai-model-facade');
-		execFileSync('go', ['build', '-o', binary, './cmd/ai-model-facade'], { cwd: repo, stdio: 'inherit' });
+		const binary = join(dir, 'ai-model-facade');
+		const args = ['build', '-o', binary];
+		if (version) {
+			args.push('-ldflags', '-X main.version=' + version);
+		}
+		execFileSync('go', [...args, './cmd/ai-model-facade'], { cwd: repo, stdio: 'inherit' });
+		binaries.set(version, binary);
 	}
-	return binary;
+	return binaries.get(version);
 }
 
 function freePort() {
@@ -76,11 +83,12 @@ export const secrets = `server:
 
 // start starts a gateway, and returns its URL, its files, a stop, and down
 // and up, which stop it and start it again on the same port and files, for
-// a page that loses the gateway. With swap, the URL of a fakeLlamaSwap, the
-// llama-swap backend is that fake. With tls, the gateway also serves HTTPS
-// on its port, with a self-signed certificate openssl makes, at httpsUrl.
-// With uiBasePath, the admin UI is served there.
-export async function start({ swap, tls = false, uiBasePath } = {}) {
+// a page that loses the gateway; up({as}) starts it as another version.
+// With swap, the URL of a fakeLlamaSwap, the llama-swap backend is that
+// fake. With tls, the gateway also serves HTTPS on its port, with a
+// self-signed certificate openssl makes, at httpsUrl. With uiBasePath, the
+// admin UI is served there. With version, the gateway reports that version.
+export async function start({ swap, tls = false, uiBasePath, version = '' } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'amf-gw-'));
 	const port = await freePort();
 	const files = { config: join(dir, 'config.yaml'), secrets: join(dir, 'secrets.yaml') };
@@ -99,8 +107,8 @@ export async function start({ swap, tls = false, uiBasePath } = {}) {
 	writeFileSync(files.secrets, secrets, { mode: 0o600 });
 	const url = 'http://127.0.0.1:' + port;
 	let proc = null;
-	const up = async () => {
-		proc = spawn(build(), ['serve', files.config, '--secrets', files.secrets], { stdio: 'ignore' });
+	const up = async ({ as = version } = {}) => {
+		proc = spawn(build(as), ['serve', files.config, '--secrets', files.secrets], { stdio: 'ignore' });
 		for (let i = 0; i < 200; i++) {
 			try {
 				if ((await fetch(url + '/health')).ok) {

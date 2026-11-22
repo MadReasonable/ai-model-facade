@@ -1713,7 +1713,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_KEY" "http://127.0.0.1:8088/amf/co
 Every `GET` answers with an `ETag` for the node it read, and `PUT` and `DELETE` take `If-Match`, to change a node only if no one else has since, and `If-None-Match: *`, to add one only if it doesn't exist yet; each answers `412` when it doesn't hold.
 Neither is required.
 `POST /amf/config-apply` takes `If-Match` with the `ETag` of `GET /amf/config`, so an admin applies the draft they read.
-`GET /amf/config-status` reports, for the draft and for the running config, where its content came from, in `source`: `files` for one read from the files, at startup, on a reload or by `config-load`; `backup:<id>` for one loaded from a backup; `api` for one sent entire by a `PUT` of the config itself.
+`GET /amf/config-status` reports the gateway's version in `version`, and, for the draft and for the running config, where its content came from, in `source`: `files` for one read from the files, at startup, on a reload or by `config-load`; `backup:<id>` for one loaded from a backup; `api` for one sent entire by a `PUT` of the config itself.
 `edited` says whether a path `PUT` or `DELETE` has changed it since, even if undone, and `live` and `saved` whether it holds what is running and what the files held when the gateway last read or wrote them; whether a file changed on disk since is that file's `changedOnDisk`.
 Each copy keeps these as it moves: a revert gives the draft the running config's, and an apply gives the running config the draft's.
 A save makes the running config's `files`, not edited, since it then holds what the files do, as after a reload; the draft, which a save doesn't touch, keeps its own.
@@ -1816,6 +1816,7 @@ Each change goes into the draft as a `PUT` does, half a second after typing in a
 A **restart needed** pill means the running config names an address the gateway doesn't listen on yet; it, and **can't save**, show their details on hover or on a click.
 The page follows `/amf/config-status?follow` and `/amf/models?follow`, and reads each on a timer instead only while it can't follow the stream.
 While it can't read the status either way, the bar shows only **can't reach the gateway**, since the other pills would be out of date, and the page tries again after 1 second, then twice as long each time, up to 30 seconds; the pills come back once it reads the status again.
+Once the gateway runs another build than the page was loaded from, such as after an upgrade, a **new version: reload** pill reloads the page, so it matches the gateway it talks to.
 **Diff** shows what applying the draft would change, **Apply** puts it into service, **Revert** throws its edits away, and **Save** writes the running config to the files; the **...** menu loads the files on disk or a backup into the draft, or reloads the files as `SIGHUP` does.
 See [Editing the config](#editing-the-config) for what each step does.
 
@@ -1831,7 +1832,7 @@ The bar's buttons and the sheet's name row move out of the way as the sheet scro
 
 The page can be installed as an app, with its own window and its own icon in the dock, launcher or home screen: in Chrome or Edge, with **Install** in the address bar or the menu, and on an iPhone or iPad, with Safari's **Add to Home Screen**.
 A browser offers that only on a secure origin, so serve the page over [HTTPS](#serving-https), or open it on `localhost`.
-The app is the same page, with the same sign-in; nothing works offline, since everything it shows comes from the gateway.
+The app is the same page, with the same sign-in, and it reloads itself as the page does; nothing works offline, since everything it shows comes from the gateway.
 
 To keep the admin side off a network the client APIs face, give it an address of its own with [`server.adminApi.listen`](#server): the admin endpoints and the page then answer there and nowhere else.
 [`server.adminApi.uiBasePath`](#server) moves the page, such as to the root of that address with `/`.

@@ -768,6 +768,7 @@ A button beside an item, such as a list entry or a map key, changes or removes t
 Decided: the page can be installed as an app through a web app manifest alone, with no service worker: Chrome 158 reports no installability errors without one (verified 2026-11-22, `Page.getInstallabilityErrors`), and the page is no use offline, since all it shows comes from the gateway.
 The manifest's `start_url` and `scope` are `./`, so the app is the page wherever `uiBasePath` puts it.
 The icon has one source, `icon.svg`, which the favicon and the manifest use; the maskable icon for Android and the Apple touch icon are PNGs, since iOS takes no SVG there, made from `icon-full-bleed.svg` with Chrome, as `webui.go` says, since ImageMagick's SVG renderer drops the letters.
+Decided: the page learns of a new build from the status, which reports the version, rather than by polling a version file as SvelteKit's apps such as Open WebUI's do: the page already follows the status stream, which sends the version in its first event after the gateway restarts.
 
 Decided: `server.adminApi.listen` moves the admin endpoints and the page together.
 A port for the page alone would protect nothing, since the endpoints it calls would still answer on `server.listen`.

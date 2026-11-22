@@ -7,6 +7,7 @@ Before 1.0, a minor release can change config keys.
 ### Added
 
 - The admin UI can be installed as an app, with its own window and icon, from Chrome or Edge, or from Safari on an iPhone or iPad, wherever it is served over HTTPS or on `localhost`. Its icon is the MF logo, with a maskable variant for Android and an Apple touch icon.
+- `GET /amf/config-status` reports the gateway's version, and the admin UI, once the gateway runs another build than the page was loaded from, offers a **new version: reload** pill.
 - The gateway serves HTTPS itself: `server.tls` names the certificate and key for HTTPS on the client APIs, and on the admin endpoints and admin UI unless `server.adminApi.listen` moves them, from files relative to the config's folder, which a reload reads again. HTTPS shares `server.listen` with plain HTTP, told apart by each connection's first byte, or has an address of its own in `tls.listen`, and `tls.serve` chooses `both`, the default, `https`, which redirects plain requests with `308`, or `http`. `server.adminApi.tls` does the same for the admin side, on `server.adminApi.listen`, or on `server.listen`, where its HTTPS serves only the admin endpoints and the admin UI. HTTPS is served with HTTP/2.
 - `serve` logs `starting`, with the version and the config's files, before it builds the gateway.
 

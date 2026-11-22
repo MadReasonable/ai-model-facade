@@ -1,5 +1,6 @@
 // The admin UI as an app: Chrome can install it, from its manifest, over
-// HTTPS and under any base path.
+// HTTPS and under any base path, and a page loaded from one build offers a
+// reload once the gateway runs another.
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -55,4 +56,25 @@ test('Chrome can install the admin UI under another base path, as an app of that
 		return new URL(manifest.scope, document.querySelector('link[rel=manifest]').href).pathname;
 	});
 	assert.equal(scope, '/admin/');
+});
+
+test('a page loaded from one build offers a reload once the gateway runs another', { skip: noChrome }, async t => {
+	const gw = await start({ version: 'v1.0.0-old' });
+	const page = await launch();
+	t.after(async () => {
+		gw.stop();
+		await page.close();
+	});
+	await signIn(page, gw);
+	await page.until(() => document.querySelector('.topbar .states').textContent.includes('config live'));
+	assert.ok(!(await page.run(() => document.querySelector('.topbar .states').textContent)).includes('new version'));
+	await gw.down();
+	await gw.up({ as: 'v1.0.1-new' });
+	await page.until(() => document.querySelector('.topbar .states').textContent.includes('new version: reload'), 15000);
+	assert.match(await page.run(() => [...document.querySelectorAll('.topbar .pill')].find(p => p.textContent.includes('new version')).title), /now runs v1\.0\.1-new; this page was loaded from v1\.0\.0-old/);
+	await page.click('.topbar .pill', 'new version: reload');
+	await page.until(() => document.querySelector('.app .head-row h1'));
+	await page.until(() => document.querySelector('.topbar .states').textContent.includes('config live'));
+	assert.ok(!(await page.run(() => document.querySelector('.topbar .states').textContent)).includes('new version'), 'no prompt once reloaded');
+	assert.deepEqual(page.problems, []);
 });

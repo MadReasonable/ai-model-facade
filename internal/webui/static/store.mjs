@@ -24,7 +24,21 @@ export const state = {
 	view: 'properties', // properties | yaml | vars
 	scrollTo: null, // the id of a Card to scroll to once the sheet shows it
 	unreachable: null, // {error, retry}: why the status can't be read, and the seconds to the next try; null while it can
+	loadedVersion: null, // the gateway's version when the page loaded, from its first status
+	newVersion: null, // a later status's version, when it differs: the gateway runs a build the page didn't load from
 };
+
+// versionOf is the part of the state a status's version sets: the version
+// the page loaded with, from the first, and newVersion once one differs.
+function versionOf(status) {
+	if (!status.version) {
+		return {};
+	}
+	if (state.loadedVersion === null) {
+		return { loadedVersion: status.version };
+	}
+	return status.version === state.loadedVersion ? { newVersion: null } : { newVersion: status.version };
+}
 
 function changed() {
 	for (const f of listeners) {
@@ -74,6 +88,7 @@ export async function refresh(given) {
 		anchors: anchors.data.anchors,
 		status,
 		caller: status.caller,
+		...versionOf(status),
 		backups: backups ? backups.data.backups : state.backups,
 		phase: 'ready',
 	});
@@ -186,7 +201,7 @@ async function took(status) {
 	if (status.draft.etag !== state.draftETag || JSON.stringify(status.live) !== JSON.stringify(state.status?.live)) {
 		return refresh(status);
 	}
-	set({ status, caller: status.caller });
+	set({ status, caller: status.caller, ...versionOf(status) });
 }
 
 // signedOutBy sends the page back to sign-in if e says the gateway no longer

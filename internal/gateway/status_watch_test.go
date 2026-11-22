@@ -181,3 +181,17 @@ func TestStatus_CheckStopsWithTheLastStream(t *testing.T) {
 	defer closeLate()
 	next("event: end")
 }
+
+// The status says which build the gateway runs, so a page loaded from
+// another can tell; the stream sends it in every event.
+func TestStatus_SaysTheVersion(t *testing.T) {
+	swap := newSwap(t)
+	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
+	a.live.SetVersion("v9.9.9")
+	if v := gjson.Get(a.send(t, "GET", "/amf/config-status", "bobs-key", "").body, "version").String(); v != "v9.9.9" {
+		t.Errorf("GET: %q", v)
+	}
+	next, closeStream := followStatusStream(t, a, "bobs-key")
+	defer closeStream()
+	next(`"version":"v9.9.9"`)
+}

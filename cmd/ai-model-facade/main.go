@@ -326,6 +326,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 	}
 	live := gateway.NewLive(g, log, &levelVar, configfile.Files{Config: files.config, Secrets: files.secrets})
 	live.KeepLogs(logs)
+	live.SetVersion(currentVersion())
 	// Listen before logging "listening", so the log line, and anything that
 	// waits for it, never comes before the ports are open. A log stream never
 	// ends by itself, nor does a status or models stream.

@@ -62,6 +62,8 @@ type Live struct {
 	watch statusWatch
 	// models tells the streams of GET /amf/models?follow when to list again.
 	models modelsWatch
+	// version is the gateway's, for the status; see SetVersion.
+	version string
 }
 
 type live struct {
@@ -192,6 +194,12 @@ func (l *Live) KeepLogs(logs *loghub.Hub) {
 	g := l.Gateway()
 	logs.Configure(g.Config)
 	l.current.Store(l.serving(g))
+}
+
+// SetVersion gives the version the status reports, as ai-model-facade
+// version prints it. Call it before serving.
+func (l *Live) SetVersion(version string) {
+	l.version = version
 }
 
 // ServeHTTP serves server.listen's plain HTTP.
