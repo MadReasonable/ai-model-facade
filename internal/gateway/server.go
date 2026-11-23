@@ -499,7 +499,7 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 		w.Write(res.Chat.Response.Body)
 	}
 
-	attrs := []any{"model", name, "checked", res.Checked, "winner", res.Target, "reason", res.Reason, "status", status, "duration", time.Since(start).Round(time.Millisecond)}
+	attrs := []any{"model", name, "checked", res.Checked, "winner", res.Target, "reason", res.Reason, "status", status, "durationMs", time.Since(start).Round(time.Millisecond).Milliseconds()}
 	if protocol != backend.OpenAIChat {
 		endpoint := protocols.Of(protocol).Path
 		if strings.HasSuffix(r.URL.Path, "/count_tokens") {

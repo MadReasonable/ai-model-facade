@@ -2,6 +2,12 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Changed
+
+- The selection log line's `duration` is `durationMs`, a number of whole milliseconds, in the text log and the JSON one alike; it was a Go duration, which the JSON log wrote in nanoseconds.
+
 ## [0.4.2] - 2026-11-22
 
 The gateway serves HTTPS itself, on a port of its own or beside plain HTTP, so the admin UI is a secure origin, and it can be installed as an app.

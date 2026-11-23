@@ -386,11 +386,12 @@ X-Gateway-Target: qwen3.8-27b:q6_k
 The log has one line for each request, with every candidate checked, the winner, and why it won:
 
 ```
-level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 duration=3ms
-level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 duration=2ms endpoint=/v1/messages
+level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=3
+level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=2 endpoint=/v1/messages
 ```
 
 The first candidate wasn't loaded, so the pattern won with the quant llama-swap had loaded, and nothing was loaded for the request.
+`durationMs` is the time from the request's arrival to the end of its response, a stream's included, in whole milliseconds.
 The second line's request was translated from Messages to Chat Completions, since the gateway reaches llama-swap through Chat Completions; see [Client APIs](#client-apis).
 
 `config.example.yaml` is a fuller starting point, with two facades for Open WebUI's background tasks and a voice assistant, and a commented-out entry for each other backend.

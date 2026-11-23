@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -207,4 +208,23 @@ func TestLogs_SlowStreamSaysWhatItDropped(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A selection line's duration is a number of whole milliseconds, in
+// durationMs, so the unit is in the key in both the text and the JSON log,
+// and a JSON reader gets a number.
+func TestLogs_SelectionDurationIsMilliseconds(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
+	a.expect(t, a.send(t, "POST", "/v1/chat/completions", "secret", `{"model": "task", "messages": [{"role": "user", "content": "hi"}]}`), http.StatusOK, "chat")
+	var duration gjson.Result
+	for _, line := range strings.Split(a.send(t, "GET", "/amf/logs?format=json", "bobs-key", "").body, "\n") {
+		if gjson.Get(line, "msg").String() == "selection" {
+			duration = gjson.Get(line, "durationMs")
+		}
+	}
+	if duration.Type != gjson.Number || duration.Raw != strconv.FormatInt(duration.Int(), 10) {
+		t.Errorf("durationMs: %q", duration.Raw)
+	}
 }
