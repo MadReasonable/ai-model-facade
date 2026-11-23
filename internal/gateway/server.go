@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -433,7 +434,7 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	hop := instanceID + "/" + name
 	route, looped := takeRoute(parsed, hop)
 	if looped {
-		s.log.Warn("routing loop", "model", name, "route", route, "status", http.StatusLoopDetected)
+		s.log.Warn("routing loop", append([]any{"model", name, "route", route, "status", http.StatusLoopDetected}, clientAttrs(client)...)...)
 		family.writeError(w, http.StatusLoopDetected, "loop_detected", fmt.Sprintf("request for '%s' has already passed through this virtual model", name))
 		return
 	}
@@ -448,18 +449,13 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	client.MessagesHeader = messagesHeader(r)
 	handler := s.models[name]
 	if handler == nil {
-		s.log.Warn("unknown model", "model", name, "status", http.StatusNotFound)
+		s.log.Warn("unknown model", append([]any{"model", name, "status", http.StatusNotFound}, clientAttrs(client)...)...)
 		family.writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
 		return
 	}
 	if !handler.Access().Allows(client.Name, client.Groups) {
 		attrs := []any{"model", name, "status", http.StatusNotFound}
-		if client.Name != "" {
-			attrs = append(attrs, "client", client.Name)
-		}
-		if client.Fingerprint != "" {
-			attrs = append(attrs, "fingerprint", client.Fingerprint)
-		}
+		attrs = append(attrs, clientAttrs(client)...)
 		s.log.Warn("model not allowed for this client", attrs...)
 		family.writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("model '%s' does not exist", name))
 		return
@@ -513,12 +509,7 @@ func (s *server) complete(w http.ResponseWriter, r *http.Request, client backend
 	if len(res.Dropped) > 0 {
 		attrs = append(attrs, "dropped", res.Dropped)
 	}
-	if client.Name != "" {
-		attrs = append(attrs, "client", client.Name)
-	}
-	if client.Fingerprint != "" {
-		attrs = append(attrs, "fingerprint", client.Fingerprint)
-	}
+	attrs = append(attrs, clientAttrs(client)...)
 	switch {
 	case err != nil:
 		s.log.Warn("request failed", append(attrs, "error", err)...)
@@ -662,17 +653,24 @@ func errorBody(errType, message string) map[string]errorDetail {
 	return map[string]errorDetail{"error": {Message: message, Type: errType}}
 }
 
+// clientAttrs names the caller in a log line: its key's name, or unknown,
+// as the built-in group it is in calls it, for any other caller, with the
+// fingerprint of a key server.apiKeys doesn't list, and none for a request
+// with no key. Every line about a request then says who sent it.
+func clientAttrs(client backend.Client) []any {
+	attrs := []any{"client", cmp.Or(client.Name, config.UnknownClient)}
+	if client.Fingerprint != "" {
+		attrs = append(attrs, "fingerprint", client.Fingerprint)
+	}
+	return attrs
+}
+
 // reject answers a request refused before selection and logs it, since no
 // selection line follows. The client's key is never logged, only its name or
 // fingerprint.
 func (s *server) reject(family *apiFamily, w http.ResponseWriter, r *http.Request, client backend.Client, status int, errType, message string) {
 	attrs := []any{"path", r.URL.Path, "status", status}
-	if client.Name != "" {
-		attrs = append(attrs, "client", client.Name)
-	}
-	if client.Fingerprint != "" {
-		attrs = append(attrs, "fingerprint", client.Fingerprint)
-	}
+	attrs = append(attrs, clientAttrs(client)...)
 	s.log.Warn("request rejected", append(attrs, "error", message)...)
 	family.writeError(w, status, errType, message)
 }

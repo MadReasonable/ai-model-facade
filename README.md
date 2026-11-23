@@ -787,7 +787,8 @@ Clients authenticate with `Authorization: Bearer <key>`.
 Under the Anthropic API's base path, a client can send the key in `x-api-key` instead, as clients built for Claude do, and the `/amf` endpoints take either, since clients of both APIs call them.
 
 - A key listed in `server.apiKeys` is accepted, and its name appears in the log as `client=<name>`.
-- An unlisted key is rejected with `401`, unless `server.unknownKeys` is `allow`. Then it is accepted and logged as `client=unknown` with a fingerprint: the first 8 hex characters of the key's SHA-256, so different callers can be told apart. Keys themselves are never logged.
+- An unlisted key is rejected with `401`, unless `server.unknownKeys` is `allow`. Then it is accepted. Either way it is logged as `client=unknown` with a fingerprint: the first 8 hex characters of the key's SHA-256, so different callers can be told apart. Keys themselves are never logged.
+- A request with no key is logged as `client=unknown`, with no fingerprint.
 - With no `apiKeys` listed, every request is accepted.
 - `GET /health` never needs a key.
 
@@ -1772,7 +1773,7 @@ curl -H "Authorization: Bearer $ADMIN_KEY" "http://127.0.0.1:8088/amf/logs?level
 ```
 
 ```json
-{"time":"2026-11-20T09:30:12.418-05:00","level":"WARN","msg":"request rejected","path":"/v1/chat/completions","status":401,"fingerprint":"9f2c41d0","error":"invalid or missing API key"}
+{"time":"2026-11-20T09:30:12.418-05:00","level":"WARN","msg":"request rejected","path":"/v1/chat/completions","status":401,"client":"unknown","fingerprint":"9f2c41d0","error":"invalid or missing API key"}
 ```
 
 `?level=` keeps lines at that level or above, `?since=` those logged at or after a time, such as `2026-11-20T09:30:00Z`, or within a duration back from now, such as `10m`, and `?limit=` the newest that many.

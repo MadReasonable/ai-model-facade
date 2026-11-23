@@ -571,14 +571,15 @@ func TestRequests_PassABackendRefusalOn(t *testing.T) {
 }
 
 // Requests refused before selection get a log line of their own, naming the
-// client or the fingerprint of an unlisted key, never the key.
+// client, or unknown, with the fingerprint of an unlisted key, for any
+// other caller, never the key.
 func TestRequests_LogRejections(t *testing.T) {
 	limitBody(t, 1024)
 	gw := startTask(t, newSwap(t))
 	sum := sha256.Sum256([]byte("wrong-key"))
 	cases := []struct{ key, body, want string }{
-		{"", `{"model":"task"}`, `path=/v1/chat/completions status=401 error="invalid or missing API key"`},
-		{"wrong-key", `{"model":"task"}`, "status=401 fingerprint=" + hex.EncodeToString(sum[:4]) + ` error="invalid or missing API key"`},
+		{"", `{"model":"task"}`, `path=/v1/chat/completions status=401 client=unknown error="invalid or missing API key"`},
+		{"wrong-key", `{"model":"task"}`, "status=401 client=unknown fingerprint=" + hex.EncodeToString(sum[:4]) + ` error="invalid or missing API key"`},
 		{"secret", `{"model":`, `status=400 client=openWebUi error="request body must be a JSON object"`},
 		{"secret", `{"model":"task","model":"x"}`, `status=400 client=openWebUi error="request body contains duplicate key 'model'"`},
 		{"secret", `{"model":"task","x":"` + strings.Repeat("a", 2048) + `"}`, `status=413 client=openWebUi error="request body exceeds 1024 bytes"`},
@@ -670,6 +671,23 @@ models:
 `, nil)
 		if _, err := Build(context.Background(), cfg, discard); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want %q", api, err, want)
+		}
+	}
+}
+
+// A request refused for a facade that doesn't exist, or for a routing loop,
+// is logged with its client, as every line about a request is.
+func TestRequests_LogTheClientOfARefusedFacade(t *testing.T) {
+	gw := startTask(t, newSwap(t))
+	gw.direct(t, http.MethodPost, "/v1/chat/completions", "secret", `{"model":"nope","messages":[]}`)
+	gw.direct(t, http.MethodPost, "/v1/chat/completions", "secret", `{"model":"task","messages":[],"ai_model_facade_route":["`+instanceID+`/task"]}`)
+	out := gw.logs.String()
+	for _, want := range []string{
+		`msg="unknown model" model=nope status=404 client=openWebUi`,
+		`msg="routing loop" model=task route=[` + instanceID + `/task] status=508 client=openWebUi`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %s in log:\n%s", want, out)
 		}
 	}
 }

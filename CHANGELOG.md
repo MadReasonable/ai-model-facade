@@ -7,6 +7,7 @@ Before 1.0, a minor release can change config keys.
 ### Changed
 
 - The selection log line's `duration` is `durationMs`, a number of whole milliseconds, in the text log and the JSON one alike; it was a Go duration, which the JSON log wrote in nanoseconds.
+- Every log line about a request names its caller in `client`: a request with no key, which had no `client`, is logged as `client=unknown`, as an unlisted key is, without the fingerprint, and the `unknown model` and `routing loop` lines name the client too.
 
 ## [0.4.2] - 2026-11-22
 
