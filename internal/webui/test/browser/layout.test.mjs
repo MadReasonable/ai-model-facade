@@ -102,6 +102,40 @@ for (const [device, width] of [['a desktop', 1280], ['a phone', 400]]) {
 	});
 }
 
+// A field stacks its name above its value by the width its list of fields
+// has, not the screen's, since beside the tree on a tablet in portrait a
+// nested field has less room than on a phone.
+for (const [device, width, columns] of [['a tablet in portrait', 820, 1], ['a desktop', 1280, 2]]) {
+	test(`on ${device}, a nested field has ${columns} column${columns > 1 ? 's' : ''} and fits its card`, { skip }, async t => {
+		const { gw, page } = await session(t, { width, height: 1180 });
+		await signIn(page, gw);
+		const [got, overflow] = JSON.parse(await page.run(() => {
+			const field = document.querySelector('.field .nested .field');
+			const card = field.closest('.card');
+			return JSON.stringify([getComputedStyle(field).gridTemplateColumns.split(' ').length, card.scrollWidth - card.clientWidth]);
+		}));
+		assert.equal(got, columns);
+		assert.equal(overflow, 0, 'the card overflows');
+		assert.deepEqual(page.problems, []);
+	});
+}
+
+// A table wider than its card scrolls inside the card, at any width, so the
+// sheet never scrolls sideways: beside the tree on a tablet in portrait, a
+// facade's candidates need more room than the card has.
+test('on a tablet in portrait, the candidates scroll inside their card, not the sheet', { skip }, async t => {
+	const { gw, page } = await session(t, { width: 820, height: 1180 });
+	await signIn(page, gw, '#/model/swap');
+	const [sheet, table] = JSON.parse(await page.run(() => {
+		const pane = document.querySelector('.main .content');
+		const card = document.querySelector('.card table.list').closest('.card');
+		return JSON.stringify([pane.scrollWidth - pane.clientWidth, card.scrollWidth - card.clientWidth]);
+	}));
+	assert.equal(sheet, 0, 'the sheet scrolls sideways');
+	assert.ok(table > 0, 'the table fits its card, so this checks nothing; widen it or narrow the page');
+	assert.deepEqual(page.problems, []);
+});
+
 test('while the gateway can\'t be reached, the bar shows only that, and the pills come back with it', { skip }, async t => {
 	const { gw, page } = await session(t);
 	await signIn(page, gw);

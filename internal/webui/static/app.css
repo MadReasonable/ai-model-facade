@@ -822,6 +822,10 @@ button.pill:hover {
 	box-shadow: var(--shadow);
 	/* A card scrolled to keeps two thirds of the gap between cards above it. */
 	scroll-margin-top: 12px;
+	/* A table wider than the card, such as the candidates beside the tree on
+	   a tablet, scrolls sideways inside it rather than spilling past its
+	   edge. */
+	overflow-x: auto;
 }
 
 .card > h2 {
@@ -848,8 +852,12 @@ button.pill:hover {
 	font-size: 13px;
 }
 
+/* A list of fields is a container, so its fields stack their two columns
+   by the width the list has, not the screen's: beside the tree on a tablet,
+   or nested in another field, a list can be narrower than a phone's. */
 .fields {
 	padding: 4px 16px 8px;
+	container-type: inline-size;
 }
 
 .field {
@@ -943,6 +951,15 @@ button.pill:hover {
 
 .field .nested .field {
 	grid-template-columns: minmax(130px, 190px) 1fr;
+}
+
+/* Below this, the value column would be narrower than about 300px, too
+   narrow for an input and its description beside the name. */
+@container (max-width: 480px) {
+	.field,
+	.field .nested .field {
+		grid-template-columns: 1fr;
+	}
 }
 
 .chips {
@@ -1631,10 +1648,6 @@ button.link {
 	.head-row .tools {
 		margin-left: 0;
 		justify-content: flex-start;
-	}
-
-	.card {
-		overflow-x: auto;
 	}
 
 	.log-bar {

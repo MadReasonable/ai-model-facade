@@ -13,6 +13,11 @@ Before 1.0, a minor release can change config keys.
 - **Breaking:** the admin log lines name their caller in `client`, as request lines do, in place of `by`: `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` say `client=alice` where they said `by="key alice"`. A reload logs each request as `reload requested` with its `client`, `<SIGHUP>` for a signal, and the reload once with its outcome, so `config reloaded` and `config reload failed` no longer carry a list in `by`.
 - **Breaking:** the selection line names the request's URL path in `path`, for every request, in place of `endpoint`, which named the API's own path without a base path and only for a request other than Chat Completions, and `draft edited` names the config location it changed in `key`, in place of `path`, so `path` is always a URL path and `key` always a config location, as on `restart needed`.
 
+### Fixed
+
+- In the admin UI, a field stacks its name above its value by the width its list of fields has, not the screen's, so beside the tree on a tablet in portrait, such as an iPad, a nested field, such as one of `server.tls`, no longer squeezes its value and description against the card's right edge.
+- In the admin UI, a table wider than its card, such as a facade's candidates beside the tree on a tablet in portrait, scrolls sideways inside the card, as it did on a phone, rather than spilling past the card's edge.
+
 ## [0.4.2] - 2026-11-22
 
 The gateway serves HTTPS itself, on a port of its own or beside plain HTTP, so the admin UI is a secure origin, and it can be installed as an app.
