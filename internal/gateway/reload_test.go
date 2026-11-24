@@ -9,13 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tidwall/gjson"
 
+	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 )
@@ -219,7 +219,8 @@ func TestReloadEndpoint_ReloadsFromTheFilesForAnAdmin(t *testing.T) {
 // A request for a reload from the files that arrives while one is reading
 // them waits, then shares the next reload with every request that arrived
 // meanwhile, and only with those: one arriving once that reload has read the
-// files may have edited them since, so it gets a reload of its own.
+// files may have edited them since, so it gets a reload of its own. Each
+// request is logged with its caller, and each reload once with its outcome.
 func TestReloadFiles_ShareTheNextReload(t *testing.T) {
 	swap := newSwap(t)
 	g, err := Build(context.Background(), parseConfig(t, taskConfig, map[string]string{"SWAP_URL": swap.URL}), discard)
@@ -233,13 +234,14 @@ func TestReloadFiles_ShareTheNextReload(t *testing.T) {
 		<-release
 		return config.Parse([]byte(strings.ReplaceAll(taskConfig, "${SWAP_URL}", swap.URL)), func(string) (string, bool) { return "", false })
 	}
-	live := NewLive(g, discard, new(slog.LevelVar), loadOnly(load))
+	logs := &syncBuffer{}
+	live := NewLive(g, slog.New(slog.NewTextHandler(logs, nil)), new(slog.LevelVar), loadOnly(load))
 	results := make(map[string]chan *Gateway)
 	reload := func(by string) {
 		result := make(chan *Gateway, 1)
 		results[by] = result
 		go func() {
-			reloaded, err := live.ReloadFiles(by)
+			reloaded, err := live.ReloadFiles(backend.Client{Name: by})
 			if err != nil {
 				t.Error(by, err)
 				result <- nil
@@ -253,11 +255,11 @@ func TestReloadFiles_ShareTheNextReload(t *testing.T) {
 	first := <-reads
 	reload("b")
 	reload("c")
-	waitForJoined(t, live, "b", "c")
+	waitForJoined(t, live, 2)
 	close(first)
 	second := <-reads
 	reload("d")
-	waitForJoined(t, live, "d")
+	waitForJoined(t, live, 1)
 	close(second)
 	third := <-reads
 	close(third)
@@ -271,25 +273,34 @@ func TestReloadFiles_ShareTheNextReload(t *testing.T) {
 		t.Error("a fourth read of the files")
 	default:
 	}
+	log := logs.String()
+	for _, name := range []string{"a", "b", "c", "d"} {
+		if !strings.Contains(log, `msg="reload requested" client=`+name+"\n") {
+			t.Errorf("no reload requested line for %s:\n%s", name, log)
+		}
+	}
+	if n := strings.Count(log, `msg="config reloaded" models=`); n != 3 || strings.Contains(log, "by=") {
+		t.Errorf("want 3 config reloaded lines and no by:\n%s", log)
+	}
 }
 
 // waitForJoined waits until the reload waiting to read the files has been
-// asked for by exactly by, in any order.
-func waitForJoined(t *testing.T, live *Live, by ...string) {
+// asked for by exactly asked requests.
+func waitForJoined(t *testing.T, live *Live, asked int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		live.nextMu.Lock()
-		var joined []string
+		joined := 0
 		if live.next != nil {
-			joined = slices.Sorted(slices.Values(live.next.by))
+			joined = live.next.asked
 		}
 		live.nextMu.Unlock()
-		if slices.Equal(joined, by) {
+		if joined == asked {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("waiting reload asked for by %v, want %v", joined, by)
+			t.Fatalf("waiting reload asked for by %d requests, want %d", joined, asked)
 		}
 		runtime.Gosched()
 	}

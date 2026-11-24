@@ -164,6 +164,9 @@ A request arriving while a reload runs can't take that reload's outcome, because
 So every caller gets the outcome of a read made after it asked, and requests that pile up cost one more reload, not one each, as a state read in flight serves the requests that arrived before it began (Fetching).
 The reload runs detached from the request, with its own timeout, so a caller that leaves doesn't fail the reload others wait on.
 The endpoint is answered by the gateway it replaces, which `Live` already allows.
+Since a reload can serve several requests, each request is logged as it arrives, with its caller in `client`, and the reload once with its outcome, so no field holds a list and `config reloaded` still counts reloads.
+A `SIGHUP` reload is logged with the caller `<SIGHUP>` (`gateway.SIGHUPCaller`), in `client` like any other caller, because a name starts with a letter, so no key can collide with it.
+Decided against (2026-11-24): a field of its own for a caller that isn't a key, such as `by` or `source`; one field names every caller, so filtering on `client` finds signals too.
 Its admin list, `server.adminApi.write`, defaults to no one, unlike the lists on facades and backends, because a config written before `adminApi` existed must not grant anyone the right to change what runs.
 Decided against: answering a waiting request with the outcome of the reload under way, which could report success without the caller's edit.
 

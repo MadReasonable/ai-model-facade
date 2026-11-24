@@ -274,7 +274,7 @@ func (s *server) putConfig(w http.ResponseWriter, r *http.Request, client backen
 		status = http.StatusCreated
 	}
 	s.edited(w, draft, path, status, notes)
-	s.log.Info("draft edited", "by", "key "+client.Name, "path", path.String(), "created", created)
+	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "created", created)...)
 }
 
 // deleteConfig serves DELETE on a path of /amf/config, which removes that
@@ -296,7 +296,7 @@ func (s *server) deleteConfig(w http.ResponseWriter, r *http.Request, client bac
 		return
 	}
 	s.edited(w, draft, nil, http.StatusOK, nil)
-	s.log.Info("draft edited", "by", "key "+client.Name, "path", path.String(), "deleted", true)
+	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "deleted", true)...)
 }
 
 // renameConfig serves POST /amf/config-rename/<path>?to=<name>, which gives
@@ -330,7 +330,7 @@ func (s *server) renameConfig(w http.ResponseWriter, r *http.Request, client bac
 		return
 	}
 	s.edited(w, draft, append(slices.Clone(path[:len(path)-1]), to), http.StatusOK, notes)
-	s.log.Info("draft edited", "by", "key "+client.Name, "path", path.String(), "renamed", to)
+	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "renamed", to)...)
 }
 
 func (s *server) edited(w http.ResponseWriter, draft *config.Document, path config.Path, status int, notes []string) {
@@ -435,7 +435,7 @@ func restartNotes(pending []PendingRestart) []string {
 // way the running gateway and the draft are kept. The gateway this request
 // arrived on answers it, whatever replaces it.
 func (s *server) reloadConfig(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	reloaded, err := s.live.ReloadFiles("key " + client.Name)
+	reloaded, err := s.live.ReloadFiles(client)
 	if err != nil {
 		status, errType := http.StatusUnprocessableEntity, "invalid_config"
 		var unread *fs.PathError
@@ -455,7 +455,7 @@ func (s *server) reloadConfig(w http.ResponseWriter, r *http.Request, client bac
 // service, as a reload does the files. If-Match, if sent, must be the
 // draft's ETag, so an admin applies the draft they read.
 func (s *server) applyConfig(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	g, err := s.live.ApplyDraft("key "+client.Name, r.Header.Get("If-Match"))
+	g, err := s.live.ApplyDraft(client, r.Header.Get("If-Match"))
 	if errors.Is(err, ErrPrecondition) {
 		writeOpenAIError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error())
 		return
@@ -477,7 +477,7 @@ func (s *server) revertConfig(w http.ResponseWriter, r *http.Request, client bac
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "config-revert goes back to the running config only; load a backup into the draft with POST /amf/config-load?backup=<id>")
 		return
 	}
-	s.live.RevertDraft("key " + client.Name)
+	s.live.RevertDraft(client)
 	writeJSON(w, http.StatusOK, struct {
 		Reverted bool `json:"reverted"`
 	}{true})
@@ -489,7 +489,7 @@ func (s *server) revertConfig(w http.ResponseWriter, r *http.Request, client bac
 // backup's ID, and in notes each secret put where the gateway's files keep
 // it rather than where the backup had it.
 func (s *server) loadConfig(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	backup, notes, err := s.live.LoadDraft("key "+client.Name, r.URL.Query().Get("backup"))
+	backup, notes, err := s.live.LoadDraft(client, r.URL.Query().Get("backup"))
 	var unread *fs.PathError
 	switch {
 	case errors.Is(err, configfile.ErrNoBackup):
@@ -516,7 +516,7 @@ func (s *server) loadConfig(w http.ResponseWriter, r *http.Request, client backe
 // to the files. A save refused before it changed anything is a 409, one that
 // failed while writing, and put the files back, a 500.
 func (s *server) saveConfig(w http.ResponseWriter, r *http.Request, client backend.Client) {
-	saved, err := s.live.SaveRunning("key "+client.Name, r.URL.Query().Has("force"))
+	saved, err := s.live.SaveRunning(client, r.URL.Query().Has("force"))
 	var saveErr *configfile.SaveError
 	switch {
 	case errors.As(err, &saveErr) && saveErr.Conflict:
@@ -576,7 +576,7 @@ func (s *server) testBackend(w http.ResponseWriter, r *http.Request, client back
 	for _, m := range models {
 		result.Models = append(result.Models, m.ID)
 	}
-	s.log.Info("backend tested", "by", "key "+client.Name, "backend", name, "ok", result.OK)
+	s.log.Info("backend tested", append(clientAttrs(client), "backend", name, "ok", result.OK)...)
 	writeJSON(w, http.StatusOK, result)
 }
 

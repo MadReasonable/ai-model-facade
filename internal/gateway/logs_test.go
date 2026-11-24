@@ -28,10 +28,10 @@ func TestLogs_Read(t *testing.T) {
 	a.expect(t, r, http.StatusOK, "read")
 	lines := strings.Split(strings.TrimSpace(r.body), "\n")
 	last := lines[len(lines)-1]
-	if r.Header.Get("Content-Type") != "application/x-ndjson" || gjson.Get(last, "msg").String() != "draft edited" || gjson.Get(last, "by").String() != "key alice" {
+	if r.Header.Get("Content-Type") != "application/x-ndjson" || gjson.Get(last, "msg").String() != "draft edited" || gjson.Get(last, "client").String() != "alice" {
 		t.Errorf("JSON lines: %s\n%s", r.Header.Get("Content-Type"), r.body)
 	}
-	if r := a.send(t, "GET", "/amf/logs?format=text&limit=1", "bobs-key", ""); !strings.Contains(r.body, `msg="draft edited" by="key alice"`) || strings.Count(r.body, "\n") != 1 {
+	if r := a.send(t, "GET", "/amf/logs?format=text&limit=1", "bobs-key", ""); !strings.Contains(r.body, `msg="draft edited" client=alice`) || strings.Count(r.body, "\n") != 1 {
 		t.Errorf("text: %s", r.body)
 	}
 	if r := a.send(t, "GET", "/amf/logs", "bobs-key", "", "Accept", "text/plain"); !strings.HasPrefix(r.Header.Get("Content-Type"), "text/plain") {

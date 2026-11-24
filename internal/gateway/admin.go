@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 	"github.com/MadReasonable/ai-model-facade/internal/virtualmodel"
@@ -101,7 +102,7 @@ func CheckDraft(d *config.Document) error {
 // does from the files, if ifMatch is empty or the draft's ETag. It refuses a
 // draft that would leave no key in server.apiKeys able to use the write
 // endpoints, since nothing over the API could then undo it.
-func (l *Live) ApplyDraft(by, ifMatch string) (*Gateway, error) {
+func (l *Live) ApplyDraft(by backend.Client, ifMatch string) (*Gateway, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.stateMu.Lock()
@@ -128,7 +129,7 @@ func (l *Live) ApplyDraft(by, ifMatch string) (*Gateway, error) {
 	defer cancel()
 	g, err := l.apply(ctx, cfg)
 	if err != nil {
-		l.log.Error("draft apply failed; keeping the running config", "by", by, "error", err)
+		l.log.Error("draft apply failed; keeping the running config", append(clientAttrs(by), "error", err)...)
 		return nil, err
 	}
 	adopted := draft.loaded != nil && l.filesHold(draft.loaded)
@@ -139,7 +140,7 @@ func (l *Live) ApplyDraft(by, ifMatch string) (*Gateway, error) {
 	}
 	l.stateMu.Unlock()
 	l.changed()
-	l.log.Info("draft applied", "by", by, "models", len(g.Models), "adoptedFiles", adopted)
+	l.log.Info("draft applied", append(clientAttrs(by), "models", len(g.Models), "adoptedFiles", adopted)...)
 	return g, nil
 }
 
@@ -158,12 +159,12 @@ func (l *Live) filesHold(loaded *config.Document) bool {
 
 // RevertDraft replaces the draft with the running config, discarding every
 // edit not applied.
-func (l *Live) RevertDraft(by string) {
+func (l *Live) RevertDraft(by backend.Client) {
 	l.stateMu.Lock()
 	l.draft = draftCopy{doc: l.Gateway().Config.Source.Copy(), provenance: l.running}
 	l.stateMu.Unlock()
 	l.changed()
-	l.log.Info("draft reverted", "by", by)
+	l.log.Info("draft reverted", clientAttrs(by)...)
 }
 
 // LoadDraft replaces the draft with the files as they are on disk now, or,
@@ -172,7 +173,7 @@ func (l *Live) RevertDraft(by string) {
 // CheckDraft. A backup made with the other layout, with or without a secrets
 // file, has its secrets put where the gateway's own files keep them, which
 // notes list (config.Document.Fit). Nothing runs until the draft is applied.
-func (l *Live) LoadDraft(by, backup string) (id string, notes []string, err error) {
+func (l *Live) LoadDraft(by backend.Client, backup string) (id string, notes []string, err error) {
 	if l.files == nil {
 		return "", nil, fmt.Errorf("the gateway has no config files to load")
 	}
@@ -200,13 +201,13 @@ func (l *Live) LoadDraft(by, backup string) (id string, notes []string, err erro
 	l.draft = draft
 	l.stateMu.Unlock()
 	l.changed()
-	l.log.Info("draft loaded", "by", by, "from", draft.source)
+	l.log.Info("draft loaded", append(clientAttrs(by), "from", draft.source)...)
 	return id, notes, nil
 }
 
 // SaveRunning writes the running config to the files; see
 // configfile.Files.Save.
-func (l *Live) SaveRunning(by string, force bool) (*configfile.Saved, error) {
+func (l *Live) SaveRunning(by backend.Client, force bool) (*configfile.Saved, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.files == nil {
@@ -218,7 +219,7 @@ func (l *Live) SaveRunning(by string, force bool) (*configfile.Saved, error) {
 	l.stateMu.Unlock()
 	saved, err := l.files.Save(cfg.Source, lastKnown, force, cfg.Server.AdminAPI.KeepBackups())
 	if err != nil {
-		l.log.Error("config save failed", "by", by, "error", err)
+		l.log.Error("config save failed", append(clientAttrs(by), "error", err)...)
 		return nil, err
 	}
 	l.stateMu.Lock()
@@ -226,7 +227,7 @@ func (l *Live) SaveRunning(by string, force bool) (*configfile.Saved, error) {
 	l.running = provenance{source: sourceFiles} // what runs is what the files hold, as after a reload of them
 	l.stateMu.Unlock()
 	l.changed()
-	l.log.Info("config saved", "by", by, "files", saved.Written, "backup", saved.Backup)
+	l.log.Info("config saved", append(clientAttrs(by), "files", saved.Written, "backup", saved.Backup)...)
 	return saved, nil
 }
 

@@ -494,8 +494,8 @@ func (p *program) waitForLog(t *testing.T, s string) string {
 	}
 }
 
-// serve answers on server.listen, reloads its config on SIGHUP, and shuts
-// down cleanly on SIGTERM.
+// serve answers on server.listen, reloads its config on SIGHUP, which it
+// logs as the caller <SIGHUP>, and shuts down cleanly on SIGTERM.
 func TestServe_ReloadsOnSIGHUPAndStopsOnSIGTERM(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts the program as a process")
@@ -527,6 +527,7 @@ func TestServe_ReloadsOnSIGHUPAndStopsOnSIGTERM(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.cmd.Process.Signal(syscall.SIGHUP)
+	p.waitForLog(t, `msg="reload requested" client=<SIGHUP>`)
 	p.waitForLog(t, `msg="config reloaded"`)
 	if got := facades(); got != `["renamed"]` {
 		t.Errorf("after the reload: %s", got)

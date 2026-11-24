@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MadReasonable/ai-model-facade/internal/backend"
 	"github.com/MadReasonable/ai-model-facade/internal/config"
 	"github.com/MadReasonable/ai-model-facade/internal/configfile"
 	"github.com/MadReasonable/ai-model-facade/internal/loghub"
@@ -144,7 +145,7 @@ func firstSet(values ...string) string {
 // fileReload is one reload from the files, shared by every request for one
 // that arrived before it read them.
 type fileReload struct {
-	by     []string // what asked for it, in order
+	asked  int // how many requests share it
 	done   chan struct{}
 	result *Reloaded
 	err    error
@@ -342,14 +343,20 @@ func (l *Live) Reload(ctx context.Context, cfg *config.Config) (*Gateway, error)
 	return l.swap(ctx, cfg)
 }
 
+// SIGHUPCaller is the caller of a reload asked for by SIGHUP, as the log
+// names it. A name starts with a letter, so no key can have this one.
+var SIGHUPCaller = backend.Client{Name: "<SIGHUP>"}
+
 // ReloadFiles reloads from the config files, as Reload does from a config,
-// sets the log level, and replaces the draft with the files' config; by
-// names what asked, for the log. A request that arrives while another reload
+// sets the log level, and replaces the draft with the files' config. It logs
+// each request with its caller, by, and each reload once with its outcome,
+// since several requests can share one. A request that arrives while another reload
 // is under way waits for it, then shares the next one with every request
 // that arrived in the meantime: a reload that had already read the files may
 // have read them before an edit the caller made, while the next one reads
 // them after every request it serves arrived.
-func (l *Live) ReloadFiles(by string) (*Reloaded, error) {
+func (l *Live) ReloadFiles(by backend.Client) (*Reloaded, error) {
+	l.log.Info("reload requested", clientAttrs(by)...)
 	l.nextMu.Lock()
 	run := l.next
 	owner := run == nil
@@ -357,7 +364,7 @@ func (l *Live) ReloadFiles(by string) (*Reloaded, error) {
 		run = &fileReload{done: make(chan struct{})}
 		l.next = run
 	}
-	run.by = append(run.by, by)
+	run.asked++
 	l.nextMu.Unlock()
 	if owner {
 		l.runFileReload(run)
@@ -375,16 +382,15 @@ func (l *Live) runFileReload(run *fileReload) {
 	defer close(run.done)
 	l.nextMu.Lock()
 	l.next = nil
-	by := run.by
 	l.nextMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), reloadTimeout)
 	defer cancel()
 	run.result, run.err = l.reloadFiles(ctx)
 	if run.err != nil {
-		l.log.Error("config reload failed; keeping the running config", "by", by, "error", run.err)
+		l.log.Error("config reload failed; keeping the running config", "error", run.err)
 		return
 	}
-	attrs := []any{"by", by, "models", len(run.result.Gateway.Models)}
+	attrs := []any{"models", len(run.result.Gateway.Models)}
 	if run.result.DiscardedDraft {
 		attrs = append(attrs, "discardedDraft", true)
 	}

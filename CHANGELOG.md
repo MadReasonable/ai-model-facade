@@ -10,6 +10,7 @@ Before 1.0, a minor release can change config keys.
 - An error about a reference to a name that isn't defined, such as an access list's, writes a character that isn't visible on its own as an escape, such as `\u200b`, so it shows and can't act on the terminal.
 - The selection log line's `duration` is `durationMs`, a number of whole milliseconds, in the text log and the JSON one alike; it was a Go duration, which the JSON log wrote in nanoseconds.
 - Every log line about a request names its caller in `client`: a request with no key, which had no `client`, is logged as `client=unknown`, as an unlisted key is, without the fingerprint, and the `unknown model` and `routing loop` lines name the client too.
+- **Breaking:** the admin log lines name their caller in `client`, as request lines do, in place of `by`: `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` say `client=alice` where they said `by="key alice"`. A reload logs each request as `reload requested` with its `client`, `<SIGHUP>` for a signal, and the reload once with its outcome, so `config reloaded` and `config reload failed` no longer carry a list in `by`.
 
 ## [0.4.2] - 2026-11-22
 

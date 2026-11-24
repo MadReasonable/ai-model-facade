@@ -354,7 +354,7 @@ func serve(files configFiles, stdout, stderr io.Writer) error {
 		case err := <-servers.Errs():
 			return err
 		case <-hup:
-			live.ReloadFiles("SIGHUP") // logs its outcome
+			live.ReloadFiles(gateway.SIGHUPCaller) // logs its outcome
 		case <-ctx.Done():
 			running = false
 		}

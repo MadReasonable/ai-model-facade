@@ -1649,7 +1649,15 @@ Windows has no `SIGHUP`, so this endpoint is the only way to reload there withou
 One reload runs at a time.
 A reload asked for while another runs waits for it, then runs once for every request that arrived in the meantime, and each gets that reload's outcome.
 It doesn't share the reload under way, which may have read the files before an edit that the request was sent for.
-The log line `config reloaded` or `config reload failed` names what asked for the reload, `SIGHUP` or the admin key, in `by`.
+Each request is logged as `reload requested`, with its caller in `client`, and each reload once, as `config reloaded` or `config reload failed`, so requests that share a reload each have a line and the reload has one:
+
+```
+level=INFO msg="reload requested" client=alice
+level=INFO msg="reload requested" client=<SIGHUP>
+level=INFO msg="config reloaded" models=2
+```
+
+A reload asked for by `SIGHUP` is logged with the caller `<SIGHUP>`, which can't be a key's name, since a [name](#names) starts with a letter.
 
 A reload replaces the [draft](#editing-the-config) too, and what is running, so it discards draft edits not applied and running changes not saved.
 That is how an edit made on the host takes effect, so it is allowed; the reply then has `"discardedDraft": true` or `"discardedUnsaved": true`, and the log line the same.
@@ -1767,7 +1775,7 @@ A change made through the gateway is sent at once: an edit, a rename, an apply, 
 A change made around it, such as an edit to the files on the host, is found by a check of the files every 2 seconds, which the gateway makes once for all the streams open, and only while one is.
 An event is sent only if it differs from the last one that stream sent, and keep-alives and `event: end` work as on the [log's stream](#reading-the-log), for a caller no longer allowed to read the config, or a gateway shutting down.
 
-The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded` and `config saved` name the admin key in `by`.
+The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` name the admin key in `client`, as a request's lines name its caller.
 
 ### Reading the log
 
