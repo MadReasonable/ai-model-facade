@@ -2,14 +2,17 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.4.3] - 2026-11-24
+
+The gateway refuses a name with a character that could act on a terminal or make two names read the same, so a config that loads today may be refused; see Names in the README.
+The admin UI fits a tablet beside its tree, and every log line about a request or an admin action names its caller in `client`.
 
 ### Changed
 
 - **Breaking:** a facade, backend, key or group name starts with a letter, and contains only letters, combining marks and digits, in any script, and `@`, `-`, `_`, `.` and `:`, at most 64 characters; a facade name may also contain `/`, so it can match a model ID such as `openai/gpt-4o`. A config with a name that starts with a digit or punctuation, or contains a space, a control or invisible character, or other punctuation such as `+`, fails to load with an error naming the entry and the character. See Names in the README.
 - An error about a reference to a name that isn't defined, such as an access list's, writes a character that isn't visible on its own as an escape, such as `\u200b`, so it shows and can't act on the terminal.
 - The selection log line's `duration` is `durationMs`, a number of whole milliseconds, in the text log and the JSON one alike; it was a Go duration, which the JSON log wrote in nanoseconds.
-- Every log line about a request names its caller in `client`: a request with no key, which had no `client`, is logged as `client=unknown`, as an unlisted key is, without the fingerprint, and the `unknown model` and `routing loop` lines name the client too.
+- Every log line about a request names its caller in `client`: a request with no key, and a key refused with `401`, which had none, are logged as `client=unknown`, the refused key with its fingerprint, and the `unknown model` and `routing loop` lines name the client too.
 - **Breaking:** the admin log lines name their caller in `client`, as request lines do, in place of `by`: `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` say `client=alice` where they said `by="key alice"`. A reload logs each request as `reload requested` with its `client`, `<SIGHUP>` for a signal, and the reload once with its outcome, so `config reloaded` and `config reload failed` no longer carry a list in `by`.
 - **Breaking:** the selection line names the request's URL path in `path`, for every request, in place of `endpoint`, which named the API's own path without a base path and only for a request other than Chat Completions, and `draft edited` names the config location it changed in `key`, in place of `path`, so `path` is always a URL path and `key` always a config location, as on `restart needed`.
 - In the admin UI, each list of fields sizes its name column to its own longest name, from 80 to 160px, where every list's was 150 to 220px, so a list of short names leaves more room for its values, and names line up within a list.
@@ -258,6 +261,9 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
+[0.4.3]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.3.0...v0.3.1
