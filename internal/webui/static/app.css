@@ -852,18 +852,32 @@ button.pill:hover {
 	font-size: 13px;
 }
 
-/* A list of fields is a container, so its fields stack their two columns
-   by the width the list has, not the screen's: beside the tree on a tablet,
-   or nested in another field, a list can be narrower than a phone's. */
+/* A list of fields holds the two columns, and its fields share them
+   through subgrid, so the name column is as wide as the list's longest
+   name, from --name-min to --name-max: a list of short names doesn't take
+   the width that a backend's connectTimeoutSeconds needs, and names still
+   line up within a list. The list is also a container, so its fields stack
+   by the width the list has, not the screen's: beside the tree on a
+   tablet, or nested in another field, a list can be narrower than a
+   phone's. */
 .fields {
 	padding: 4px 16px 8px;
 	container-type: inline-size;
+	--name-min: 80px;
+	--name-max: 160px;
+	display: grid;
+	grid-template-columns: fit-content(var(--name-max)) minmax(0, 1fr);
+	column-gap: 40px;
+}
+
+.fields > * {
+	grid-column: 1 / -1;
 }
 
 .field {
 	display: grid;
-	grid-template-columns: minmax(150px, 220px) 1fr;
-	gap: 6px 18px;
+	grid-template-columns: subgrid;
+	row-gap: 6px;
 	padding: 10px 0;
 	border-bottom: 1px solid var(--surface-3);
 }
@@ -873,6 +887,7 @@ button.pill:hover {
 }
 
 .field > .name {
+	min-width: var(--name-min);
 	padding-top: 5px;
 	font-family: var(--mono);
 	font-size: 12.5px;
@@ -949,15 +964,11 @@ button.pill:hover {
 	padding-left: 14px;
 }
 
-.field .nested .field {
-	grid-template-columns: minmax(130px, 190px) 1fr;
-}
-
-/* Below this, the value column would be narrower than about 300px, too
-   narrow for an input and its description beside the name. */
+/* Below this, with the widest names, the value column would be narrower
+   than about 280px, too narrow for an input and its description beside the
+   name. */
 @container (max-width: 480px) {
-	.field,
-	.field .nested .field {
+	.field {
 		grid-template-columns: 1fr;
 	}
 }
@@ -1617,9 +1628,7 @@ button.link {
 		backdrop-filter: blur(3px);
 	}
 
-	/* Nested fields too, whose two columns are set by a more specific rule. */
-	.field,
-	.field .nested .field {
+	.field {
 		grid-template-columns: 1fr;
 	}
 

@@ -112,7 +112,8 @@ for (const [device, width, columns] of [['a tablet in portrait', 820, 1], ['a de
 		const [got, overflow] = JSON.parse(await page.run(() => {
 			const field = document.querySelector('.field .nested .field');
 			const card = field.closest('.card');
-			return JSON.stringify([getComputedStyle(field).gridTemplateColumns.split(' ').length, card.scrollWidth - card.clientWidth]);
+			const [name, control] = [field.querySelector('.name'), field.querySelector('.control')].map(e => e.getBoundingClientRect());
+			return JSON.stringify([control.top < name.bottom ? 2 : 1, card.scrollWidth - card.clientWidth]);
 		}));
 		assert.equal(got, columns);
 		assert.equal(overflow, 0, 'the card overflows');

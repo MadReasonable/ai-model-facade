@@ -12,6 +12,7 @@ Before 1.0, a minor release can change config keys.
 - Every log line about a request names its caller in `client`: a request with no key, which had no `client`, is logged as `client=unknown`, as an unlisted key is, without the fingerprint, and the `unknown model` and `routing loop` lines name the client too.
 - **Breaking:** the admin log lines name their caller in `client`, as request lines do, in place of `by`: `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` say `client=alice` where they said `by="key alice"`. A reload logs each request as `reload requested` with its `client`, `<SIGHUP>` for a signal, and the reload once with its outcome, so `config reloaded` and `config reload failed` no longer carry a list in `by`.
 - **Breaking:** the selection line names the request's URL path in `path`, for every request, in place of `endpoint`, which named the API's own path without a base path and only for a request other than Chat Completions, and `draft edited` names the config location it changed in `key`, in place of `path`, so `path` is always a URL path and `key` always a config location, as on `restart needed`.
+- In the admin UI, each list of fields sizes its name column to its own longest name, from 80 to 160px, where every list's was 150 to 220px, so a list of short names leaves more room for its values, and names line up within a list.
 
 ### Fixed
 
