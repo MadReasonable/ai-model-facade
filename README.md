@@ -386,12 +386,13 @@ X-Gateway-Target: qwen3.8-27b:q6_k
 The log has one line for each request, with every candidate checked, the winner, and why it won:
 
 ```
-level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=3
-level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=2 endpoint=/v1/messages
+level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=3 path=/v1/chat/completions
+level=INFO msg=selection model=quick checked="[qwen3.8-flash-next:iq3_s: not loaded qwen3.8-27b:*: loaded as qwen3.8-27b:q6_k]" winner=qwen3.8-27b:q6_k reason=loaded status=200 durationMs=2 path=/anthropic/v1/messages
 ```
 
 The first candidate wasn't loaded, so the pattern won with the quant llama-swap had loaded, and nothing was loaded for the request.
 `durationMs` is the time from the request's arrival to the end of its response, a stream's included, in whole milliseconds.
+`path` is the request's URL path, so the API a client used shows, wherever a base path puts it.
 The second line's request was translated from Messages to Chat Completions, since the gateway reaches llama-swap through Chat Completions; see [Client APIs](#client-apis).
 
 `config.example.yaml` is a fuller starting point, with two facades for Open WebUI's background tasks and a voice assistant, and a commented-out entry for each other backend.
@@ -1775,7 +1776,7 @@ A change made through the gateway is sent at once: an edit, a rename, an apply, 
 A change made around it, such as an edit to the files on the host, is found by a check of the files every 2 seconds, which the gateway makes once for all the streams open, and only while one is.
 An event is sent only if it differs from the last one that stream sent, and keep-alives and `event: end` work as on the [log's stream](#reading-the-log), for a caller no longer allowed to read the config, or a gateway shutting down.
 
-The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` name the admin key in `client`, as a request's lines name its caller.
+The log lines `draft edited`, `draft applied`, `draft reverted`, `draft loaded`, `config saved` and `backend tested` name the admin key in `client`, as a request's lines name its caller, and `draft edited` names what it changed in `key`, such as `models.task.description`.
 
 ### Reading the log
 

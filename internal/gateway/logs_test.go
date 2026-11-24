@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ func TestLogs_Read(t *testing.T) {
 	a.expect(t, r, http.StatusOK, "read")
 	lines := strings.Split(strings.TrimSpace(r.body), "\n")
 	last := lines[len(lines)-1]
-	if r.Header.Get("Content-Type") != "application/x-ndjson" || gjson.Get(last, "msg").String() != "draft edited" || gjson.Get(last, "client").String() != "alice" {
+	if r.Header.Get("Content-Type") != "application/x-ndjson" || gjson.Get(last, "msg").String() != "draft edited" || gjson.Get(last, "client").String() != "alice" || gjson.Get(last, "key").String() != "models.task.description" {
 		t.Errorf("JSON lines: %s\n%s", r.Header.Get("Content-Type"), r.body)
 	}
 	if r := a.send(t, "GET", "/amf/logs?format=text&limit=1", "bobs-key", ""); !strings.Contains(r.body, `msg="draft edited" client=alice`) || strings.Count(r.body, "\n") != 1 {
@@ -110,9 +111,9 @@ func TestLogs_FollowEndsWhenReadIsRevoked(t *testing.T) {
 			}
 		}
 	}
-	next(`path=models.task.description`)
+	next(`key=models.task.description`)
 	a.expect(t, a.send(t, "PUT", "/amf/config/models/helper", "alices-key", `{"backend": "llamaSwap", "candidates": [{"model": "m", "loadIfNone": true}]}`), http.StatusCreated, "edit")
-	next(`path=models.helper`)
+	next(`key=models.helper`)
 
 	writeFile(t, a.main, strings.Replace(readFile(t, a.main), "    read: {allowedKeys: [bob]}\n", "", 1), 0o644)
 	a.expect(t, a.send(t, "POST", "/amf/reload", "alices-key", ""), http.StatusOK, "reload")
@@ -208,6 +209,25 @@ func TestLogs_SlowStreamSaysWhatItDropped(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A selection line names the request's URL path in path, whatever the
+// protocol, so the API a client used shows even where a base path moves it.
+func TestLogs_SelectionNamesThePath(t *testing.T) {
+	swap := newSwap(t)
+	swap.SetState("qwen3.6-35b-a3b:q8_0", "ready")
+	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
+	a.expect(t, a.send(t, "POST", "/anthropic/v1/messages", "secret", `{"model": "task", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}`), http.StatusOK, "messages")
+	a.expect(t, a.send(t, "POST", "/v1/chat/completions", "secret", `{"model": "task", "messages": [{"role": "user", "content": "hi"}]}`), http.StatusOK, "chat")
+	var paths []string
+	for _, line := range strings.Split(a.send(t, "GET", "/amf/logs?format=json", "bobs-key", "").body, "\n") {
+		if gjson.Get(line, "msg").String() == "selection" {
+			paths = append(paths, gjson.Get(line, "path").String())
+		}
+	}
+	if !slices.Equal(paths, []string{"/anthropic/v1/messages", "/v1/chat/completions"}) || strings.Contains(a.send(t, "GET", "/amf/logs?format=text", "bobs-key", "").body, "endpoint=") {
+		t.Errorf("paths %q; want each request's own, and no endpoint", paths)
+	}
 }
 
 // A selection line's duration is a number of whole milliseconds, in

@@ -274,7 +274,7 @@ func (s *server) putConfig(w http.ResponseWriter, r *http.Request, client backen
 		status = http.StatusCreated
 	}
 	s.edited(w, draft, path, status, notes)
-	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "created", created)...)
+	s.log.Info("draft edited", append(clientAttrs(client), "key", path.String(), "created", created)...)
 }
 
 // deleteConfig serves DELETE on a path of /amf/config, which removes that
@@ -296,7 +296,7 @@ func (s *server) deleteConfig(w http.ResponseWriter, r *http.Request, client bac
 		return
 	}
 	s.edited(w, draft, nil, http.StatusOK, nil)
-	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "deleted", true)...)
+	s.log.Info("draft edited", append(clientAttrs(client), "key", path.String(), "deleted", true)...)
 }
 
 // renameConfig serves POST /amf/config-rename/<path>?to=<name>, which gives
@@ -330,7 +330,7 @@ func (s *server) renameConfig(w http.ResponseWriter, r *http.Request, client bac
 		return
 	}
 	s.edited(w, draft, append(slices.Clone(path[:len(path)-1]), to), http.StatusOK, notes)
-	s.log.Info("draft edited", append(clientAttrs(client), "path", path.String(), "renamed", to)...)
+	s.log.Info("draft edited", append(clientAttrs(client), "key", path.String(), "renamed", to)...)
 }
 
 func (s *server) edited(w http.ResponseWriter, draft *config.Document, path config.Path, status int, notes []string) {
