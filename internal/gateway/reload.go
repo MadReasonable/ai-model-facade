@@ -468,7 +468,10 @@ func (l *Live) swap(ctx context.Context, cfg *config.Config) (*Gateway, error) {
 // doesn't listen on yet, because it started with another, or the admin UI's
 // root, which waits for the admin side's own address.
 type PendingRestart struct {
-	Key string `json:"key"` // server.listen, server.adminApi.listen or server.adminApi.uiBasePath
+	// Key is the setting that waits: server.listen, server.tls.listen,
+	// server.adminApi.listen, server.adminApi.tls.listen or
+	// server.adminApi.uiBasePath.
+	Key string `json:"key"`
 	// Listening is where the gateway listens, "" for nowhere, or for
 	// server.adminApi.uiBasePath, the path the UI is served at.
 	Listening string `json:"listening"`
