@@ -42,6 +42,9 @@ func (cfg *Config) indexKeys() error {
 		if k.Name == "" {
 			return fmt.Errorf("server.apiKeys[%d]: name is required", i)
 		}
+		if err := checkName(k.Name, false); err != nil {
+			return fmt.Errorf("server.apiKeys[%d].name: %w", i, err)
+		}
 		if k.Name == GroupUnknown || k.Name == GroupAll {
 			return fmt.Errorf("server.apiKeys[%d]: name '%s' is reserved for a built-in group", i, k.Name)
 		}

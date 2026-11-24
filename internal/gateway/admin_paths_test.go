@@ -24,6 +24,28 @@ func TestAdmin_KeyWithASlash(t *testing.T) {
 	}
 }
 
+// A name the rule refuses is refused when an edit writes it, by a PUT or a
+// rename, with the character escaped in the error, and the draft is left as
+// it was.
+func TestAdmin_ABadNameIsRefused(t *testing.T) {
+	swap := newSwap(t)
+	a := startAdmin(t, swap.URL, adminMain, adminSecrets)
+	before := a.send(t, "GET", "/amf/config", "bobs-key", "").Header.Get("ETag")
+	facade := `{"backend": "llamaSwap", "candidates": [{"model": "m", "loadIfNone": true}]}`
+	for _, c := range []struct{ what, method, path, body, want string }{
+		{"a facade with an escape", "PUT", "/amf/config/models/t%1Bask", facade, `'t\\x1bask' contains U+001B`},
+		{"a backend with a slash", "PUT", "/amf/config/backends/org%2Fswap", `{"type": "llamaSwap", "baseUrl": "http://x"}`, `'org/swap' contains '/'`},
+		{"a rename to a leading digit", "POST", "/amf/config-rename/models/task?to=1task", "", `'1task' starts with '1'`},
+	} {
+		if r := a.send(t, c.method, c.path, "alices-key", c.body); r.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(r.body, c.want) {
+			t.Errorf("%s: got %d %s, want 422 with %s", c.what, r.StatusCode, r.body, c.want)
+		}
+	}
+	if after := a.send(t, "GET", "/amf/config", "bobs-key", "").Header.Get("ETag"); after != before {
+		t.Errorf("a refused edit changed the draft: ETag %s, was %s", after, before)
+	}
+}
+
 // DELETE honours If-Match; a PUT body that is neither JSON nor YAML is
 // refused; a PUT of what GET shows for the entire draft leaves it as it was;
 // a backend entry wrong by itself is refused when it is written.

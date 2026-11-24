@@ -125,6 +125,22 @@ Open WebUI makes this necessary even with every service up: it lists a gateway's
 
 `serve` and reloads log the warnings and start; `check` reports them as errors and exits non-zero, so a config can still be verified before it is deployed.
 
+### Names
+
+A name, of a facade, a backend, a key or a group, is printed raw in the log, in `check`'s output and in errors, and compared byte for byte in access lists, so `config.checkName()` keeps out what changes how text reads: control characters, which a terminal acts on, and invisible and bidi formatting characters (category Cf), which can make two different names read the same.
+The rule is the same for every script: letters, combining marks and digits (categories L, M and Nd), and `@ - _ . :`, at most 64 code points.
+A name starts with a letter, because a combining mark there draws on the character before the name, and a digit or punctuation there can move when a right-to-left name is displayed: by the bidi algorithm, `א12` and `12א` both display as `12א` in a left-to-right line (not checked in a viewer).
+Only a facade name takes `/`, so it can match a model ID such as `org/model`; a backend, key or group name is the admin's own label.
+A zero-width non-joiner is allowed between two Arabic-script letters, where Persian spelling needs it; anywhere else it is invisible.
+Model IDs come from backends and are not names.
+
+The rule runs where a name is defined: `server.apiKeys` names in `indexKeys()`, group names in `parseSchema()`, and backend and facade names in `config.Entries()`, so loading, a reload and every draft edit check them.
+A reference is checked only against the names defined, since it has to match one; the error for one that doesn't quotes it with `config.QuoteName()`, which writes a character that isn't visible on its own as an escape.
+
+Decided against (2026-11-24): one script per name. It needs code of its own for the characters of Unicode's Common and Inherited scripts, and it refuses ordinary names: Japanese mixes Han, Hiragana and Katakana, and a model name may mix Latin with another script. It doesn't stop lookalikes either, since a name entirely in Cyrillic lookalikes of Latin letters passes.
+Decided against (2026-11-24): ASCII digits only, which would make other scripts' digits second-class.
+What the rule leaves open is the PRECIS to-do in Open decisions.
+
 ### Checks against model lists
 
 Checks that need a backend's model list (`backend.ListingCheck`: exact candidate IDs, alias notes, the Open WebUI prefix check) run once every backend they name has been listed.
@@ -787,6 +803,7 @@ Stock nginx can't rewrite a body by its JSON content; njs or OpenResty could, bu
 
 ## Open decisions
 
+- **To do: names in PRECIS form.** The rule in Names leaves open what PRECIS (RFC 8264, `golang.org/x/text/secure/precis`, about 272 KiB of binary) would close: names aren't normalized, so `é` precomposed and decomposed are different names, and a reference written in the other form fails as undefined, with an error that looks wrong because both read the same; lookalike letters; the rest of the Bidi Rule (RFC 5893), such as a name mixing left-to-right and right-to-left letters, or ending in punctuation; and the exact zero-width non-joiner rule, by each letter's joining type rather than its script. Normalizing a name only in the parsed copy, as `${NAME}` is expanded, keeps saves from rewriting a file; a client's requested model name would be normalized before lookup.
 - **To do: Messages untranslated to local backends.** A Messages client's request to a local backend is translated to Chat Completions (Translation), since the local adapters declare only Chat Completions and legacy completions, so `thinking`, `cache_control` and the rest the README's "Messages on a Chat Completions backend" lists are dropped. Every local backend dev-env runs serves `/v1/messages` itself: verified with one non-streaming request each against llama-server b11580, llama-swap v263, Ollama 0.40.8, LM Studio's llmster 0.0.25-1 and LocalAI v4.11.0; streaming, tools, thinking and images not checked. Declaring Messages in those adapters needs a fallback to translation for a server without the endpoint, which only a backend check could find (a warning, per Errors and warnings), and changes which params block a candidate's requests get, so existing configs would see different patches.
   The same holds for Responses: all of them serve `/v1/responses`, and two keep conversations, LM Studio (llmster 0.0.25-1) and LocalAI (v4.11.0), which answer a `GET` by ID and refuse an unknown `previous_response_id`; sent Responses as they are, a candidate on them could take `responsesHistory: service`, as one on OpenAI's API can. llama-server (b11580) refuses `previous_response_id`, and Ollama (0.40.8) accepts one it doesn't know, so it ignores it. Checked by those answers only, not by whether a follow-up's reply used the earlier turn.
 - **To do: a hub form.** An intermediate form every protocol translates to and from, so a new protocol needs one translator pair instead of one per existing protocol. The direct pairs stay as routes beside it (Translation).

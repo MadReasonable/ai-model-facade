@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -36,6 +37,17 @@ func (a Access) Allows(name string, groups []string) bool {
 	return slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(a.AllowedGroups, g) })
 }
 
+// checkGroupNames checks the names server.groups defines, in name order, so
+// a config with several wrong ones always reports the same one.
+func (s *Server) checkGroupNames() error {
+	for _, name := range slices.Sorted(maps.Keys(s.Groups)) {
+		if err := checkName(name, false); err != nil {
+			return fmt.Errorf("server.groups: %w", err)
+		}
+	}
+	return nil
+}
+
 // indexGroups checks server.groups against server.apiKeys and records each
 // key's groups. Key names, group names and the built-in groups are one
 // namespace, because access lists and key maps take a name of either kind.
@@ -52,8 +64,6 @@ func (cfg *Config) indexGroups() error {
 	slices.Sort(names)
 	for _, name := range names {
 		switch {
-		case name == "":
-			return fmt.Errorf("server.groups: a group needs a name")
 		case name == GroupAll || name == GroupUnknown:
 			return fmt.Errorf("server.groups.%s: '%s' is a built-in group", name, name)
 		case s.groupsOf[name] != nil:
@@ -61,7 +71,7 @@ func (cfg *Config) indexGroups() error {
 		}
 		for _, member := range s.Groups[name] {
 			if s.groupsOf[member] == nil {
-				return fmt.Errorf("server.groups.%s: '%s' is not a name in server.apiKeys", name, member)
+				return fmt.Errorf("server.groups.%s: %s is not a name in server.apiKeys", name, QuoteName(member))
 			}
 			if !slices.Contains(s.groupsOf[member], name) {
 				s.groupsOf[member] = append(s.groupsOf[member], name)
@@ -162,12 +172,12 @@ func (s *Server) checkAdmins() error {
 func (s *Server) CheckAccess(a Access) error {
 	for _, name := range a.AllowedKeys {
 		if s.groupsOf[name] == nil {
-			return fmt.Errorf("allowedKeys: '%s' is not a name in server.apiKeys", name)
+			return fmt.Errorf("allowedKeys: %s is not a name in server.apiKeys", QuoteName(name))
 		}
 	}
 	for _, name := range a.AllowedGroups {
 		if !s.isGroup(name) {
-			return fmt.Errorf("allowedGroups: '%s' is not a group; use a name in server.groups, '%s' or '%s'", name, GroupAll, GroupUnknown)
+			return fmt.Errorf("allowedGroups: %s is not a group; use a name in server.groups, '%s' or '%s'", QuoteName(name), GroupAll, GroupUnknown)
 		}
 	}
 	return nil
@@ -186,7 +196,7 @@ func (s *Server) CheckKeyMap(keyMap KeyMap) ([]string, error) {
 		case e.Name == GroupAll || e.Name == GroupUnknown:
 			return nil, fmt.Errorf("keyMap: '%s' can't have an entry; apiKey is the key for every caller keyMap doesn't name", e.Name)
 		case s.groupsOf[e.Name] == nil && !s.isGroup(e.Name):
-			return nil, fmt.Errorf("keyMap: '%s' is not a name in server.apiKeys or server.groups", e.Name)
+			return nil, fmt.Errorf("keyMap: %s is not a name in server.apiKeys or server.groups", QuoteName(e.Name))
 		}
 	}
 	type pair struct{ first, other string }

@@ -141,7 +141,7 @@ func (b *Backend) Link(backends map[string]backend.Backend, check func(backend.L
 	for _, c := range b.linkConfigs {
 		other := backends[c.Backend]
 		if other == nil {
-			return fmt.Errorf("links.backend '%s' is not defined", c.Backend)
+			return fmt.Errorf("links.backend %s is not defined", config.QuoteName(c.Backend))
 		}
 		target, ok := other.(linkTarget)
 		if !ok {

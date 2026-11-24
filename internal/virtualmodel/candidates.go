@@ -84,7 +84,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 	m := &candidates{name: entry.Name, log: env.Log, backendName: c.Backend, description: c.Description, selector: &selector.FirstLoaded{}, pipeline: env.Pipeline, access: c.Access}
 	if c.Backend != "" {
 		if m.backend = env.Backends[c.Backend]; m.backend == nil {
-			return nil, fmt.Errorf("line %d: backend '%s' is not defined", entry.Node.Line, c.Backend)
+			return nil, fmt.Errorf("line %d: backend %s is not defined", entry.Node.Line, config.QuoteName(c.Backend))
 		}
 	}
 	var err error
@@ -113,7 +113,7 @@ func newCandidates(entry config.Entry, env Env) (*candidates, error) {
 		}
 		b := env.Backends[name]
 		if b == nil {
-			return nil, fmt.Errorf("line %d: backend '%s' is not defined", node.Line, name)
+			return nil, fmt.Errorf("line %d: backend %s is not defined", node.Line, config.QuoteName(name))
 		}
 		if !checked[name] {
 			checked[name] = true

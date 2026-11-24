@@ -20,7 +20,9 @@ import (
 func TestBuild_RejectsAWrongConfig(t *testing.T) {
 	cases := []struct{ name, from, to, want string }{
 		{"undefined backend", "    backend: llamaSwap\n    description", "    backend: nope\n    description", `backend 'nope' is not defined`},
+		{"undefined backend with an escape", "    backend: llamaSwap\n    description", "    backend: \"nope\\e[2J\"\n    description", `backend 'nope\x1b[2J' is not defined`},
 		{"undefined candidate backend", "model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:q8_0\n        backend: nope", `backend 'nope' is not defined`},
+		{"undefined candidate backend with an escape", "model: qwen2.5-coder-3b:q8_0", "model: qwen2.5-coder-3b:q8_0\n        backend: \"nope\\u200b\"", `backend 'nope\u200b' is not defined`},
 		{"no backend at all", "    backend: llamaSwap\n    description", "    description", "backend is required, on the model or on the candidate"},
 		{"unknown facade key", "    description:", "    descripton:", `unknown key 'descripton'`},
 		{"unknown candidate key", "loadIfNone: true", "loadIfNoneed: true", `unknown key 'loadIfNoneed'`},
@@ -31,6 +33,7 @@ func TestBuild_RejectsAWrongConfig(t *testing.T) {
 		{"unknown protocol", "models:\n", "models:\n  bad: {backend: llamaSwap, protocols: [openAiChatt], candidates: [{model: x}]}\n", "unknown protocol 'openAiChatt'"},
 		{"negative retry", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", listRetrySeconds: -1`, "listRetrySeconds must not be negative"},
 		{"keyMap for an undefined name", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {nobody: k}`, "backends.llamaSwap: line 8: keyMap: 'nobody' is not a name in server.apiKeys or server.groups"},
+		{"keyMap for an undefined name with an escape", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {"no\e[2Jbody": k}`, `keyMap: 'no\x1b[2Jbody' is not a name in server.apiKeys or server.groups`},
 		{"keyMap for a built-in group", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", keyMap: {all: k}`, "keyMap: 'all' can't have an entry"},
 		{"undefined key on a facade", "    description:", "    allowedKeys: [nobody]\n    description:", "models.task: line 11: allowedKeys: 'nobody' is not a name in server.apiKeys"},
 		{"undefined group on a backend", `baseUrl: "${SWAP_URL}"`, `baseUrl: "${SWAP_URL}", allowedGroups: [famly]`, "backends.llamaSwap: line 8: allowedGroups: 'famly' is not a group"},

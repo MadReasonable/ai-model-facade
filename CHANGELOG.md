@@ -6,6 +6,8 @@ Before 1.0, a minor release can change config keys.
 
 ### Changed
 
+- **Breaking:** a facade, backend, key or group name starts with a letter, and contains only letters, combining marks and digits, in any script, and `@`, `-`, `_`, `.` and `:`, at most 64 characters; a facade name may also contain `/`, so it can match a model ID such as `openai/gpt-4o`. A config with a name that starts with a digit or punctuation, or contains a space, a control or invisible character, or other punctuation such as `+`, fails to load with an error naming the entry and the character. See Names in the README.
+- An error about a reference to a name that isn't defined, such as an access list's, writes a character that isn't visible on its own as an escape, such as `\u200b`, so it shows and can't act on the terminal.
 - The selection log line's `duration` is `durationMs`, a number of whole milliseconds, in the text log and the JSON one alike; it was a Go duration, which the JSON log wrote in nanoseconds.
 - Every log line about a request names its caller in `client`: a request with no key, which had no `client`, is logged as `client=unknown`, as an unlisted key is, without the fingerprint, and the `unknown model` and `routing loop` lines name the client too.
 

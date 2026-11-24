@@ -1190,6 +1190,17 @@ It also carries a commented-out entry for each other backend, and a commented-ou
 It is meant for secrets, so they can live outside the config file; there is no other substitution.
 The environment is fixed when the gateway starts, so a reload expands `${NAME}` against the same values: a variable added or changed since needs a restart.
 
+### Names
+
+A name is what the config calls a facade, a backend, a key or a group, and the gateway prints names in the log, in `check`'s output and in its errors.
+A name starts with a letter, and contains only letters, combining marks and digits, in any script, and `@`, `-`, `_`, `.` and `:`, at most 64 characters (Unicode code points).
+A facade name may also contain `/`, so a facade can be named after a model ID such as `openai/gpt-4o`.
+The rule keeps out characters that change how the text around a name reads: control characters, which a terminal acts on, and invisible and bidi formatting characters, which can make two different names read the same.
+A zero-width non-joiner, which Persian spelling needs, is allowed between two Arabic-script letters.
+Names are compared exactly as written, so `é` written as one character and `é` written as `e` and a combining accent are two different names.
+
+A name that breaks the rule is a startup error naming the character, and so is a reference to a name that isn't defined; a character that isn't visible on its own is written as an escape, such as `\u200b`.
+
 ### Secrets file
 
 A secrets file holds the config's secrets in a file of their own, which the config doesn't name: `serve` and `check` read it when given `--secrets <file>`.
@@ -1222,7 +1233,7 @@ It is a place to define YAML anchors (`&name`) that entries reference explicitly
 
 ### Errors and warnings
 
-A config that is wrong is a startup error, reported with its line number: unknown keys, undefined environment variables, a backend or model name defined twice, a reference to a backend that isn't defined.
+A config that is wrong is a startup error, reported with its line number: unknown keys, undefined environment variables, a backend or model name defined twice, a name with a character a [name](#names) can't contain, a reference to a backend that isn't defined.
 Checks that depend on a backend being up and current only warn: a backend that can't be reached, or an exact candidate ID it doesn't list.
 `serve` logs the warnings and starts, so one backend that is down, or not ready yet, doesn't take the other backends' facades with it; an unlisted candidate never shows as loaded until its backend lists it.
 If a backend that a check needs can't be reached, `serve` asks it for its models again every `listRetrySeconds`, and once it answers, runs the checks that were waiting for it and logs what they find.

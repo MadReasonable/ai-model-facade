@@ -212,6 +212,9 @@ func (d *Document) parseSchema(lookupEnv func(string) (string, bool)) (*Config, 
 	if err := cfg.indexKeys(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Server.checkGroupNames(); err != nil {
+		return nil, err
+	}
 	switch cfg.Server.UnknownKeys {
 	case "":
 		cfg.Server.UnknownKeys = "reject"

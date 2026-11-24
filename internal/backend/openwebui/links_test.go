@@ -108,6 +108,7 @@ func TestLinks_CheckTheirReferences(t *testing.T) {
 	f := testkit.NewOpenWebUI(t, testkit.PlainEntry("m1"))
 	cases := []struct{ name, extra, want string }{
 		{"undefined backend", ", links: [{backend: nope}]", "links.backend 'nope' is not defined"},
+		{"undefined backend with an escape", `, links: [{backend: "nope\e"}]`, `links.backend 'nope\x1b' is not defined`},
 		{"an Open WebUI backend", ", links: [{backend: other}]", "links.backend 'other' can't be linked"},
 		{"linked twice", ", links: [{backend: studio}, {backend: studio, prefixId: p}]", "links.backend 'studio' is linked more than once"},
 	}

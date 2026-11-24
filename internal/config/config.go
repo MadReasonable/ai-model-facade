@@ -441,6 +441,9 @@ func Entries(section *yaml.Node, sectionName string) ([]Entry, error) {
 	seen := map[string]int{}
 	for i := 0; i < len(section.Content); i += 2 {
 		k, v := section.Content[i], resolve(section.Content[i+1])
+		if err := checkName(k.Value, sectionName == "models"); err != nil {
+			return nil, fmt.Errorf("line %d: %s: %w", k.Line, sectionName, err)
+		}
 		if first, ok := seen[k.Value]; ok {
 			return nil, fmt.Errorf("line %d: %s.%s is defined again (first at line %d)", k.Line, sectionName, k.Value, first)
 		}
