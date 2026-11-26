@@ -2,7 +2,9 @@
 
 Before 1.0, a minor release can change config keys.
 
-## [Unreleased]
+## [0.4.4] - 2026-11-26
+
+In the admin UI, a log that fills the pane gets out of the way when you navigate, so the sheet you picked shows.
 
 ### Changed
 
@@ -267,6 +269,7 @@ First release: an OpenAI-compatible gateway that serves stable virtual models wh
 - API keys per client, with optional passthrough of the client's own key to a backend.
 - The config reloads on `SIGHUP`, and `check` validates a config and prints what each facade resolves to.
 
+[0.4.4]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/MadReasonable/ai-model-facade/compare/v0.4.0...v0.4.1
