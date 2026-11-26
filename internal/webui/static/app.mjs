@@ -11,7 +11,7 @@ import { errorText, followHistory, forgetKeys, freshKey, load, refresh, refreshF
 import { confirm, Dialog, Dialogs, html, Icon, openDialog, plural, Reveal, toast, useNarrow } from './ui.mjs';
 import { BackendSheet, CandidateSheet, ModelSheet, SectionList, ServerSheet, stateClass } from './sheets.mjs';
 import { DiffDialog, VarsEditor, YAMLEditor } from './editors.mjs';
-import { LogPanel, useLogMode } from './log.mjs';
+import { LogPanel, useLogLayout } from './log.mjs';
 
 // Sign-in
 
@@ -74,7 +74,7 @@ let hadKey = hasKey();
 
 // The bar
 
-function TopBar({ logMode, setLogMode, onMenu, barRef }) {
+function TopBar({ logMode, setLogMode, loadBackup, onMenu, barRef }) {
 	const s = useStore();
 	const st = s.status;
 	const write = s.caller.write;
@@ -107,7 +107,7 @@ function TopBar({ logMode, setLogMode, onMenu, barRef }) {
 					<button class="btn" disabled=${st.draft.live} onClick=${revert}>Revert</button>
 					<button class="btn primary" disabled=${st.draft.live} onClick=${apply}>Apply</button>
 					<button class="btn" disabled=${st.live.saved || unsaveable.length > 0} title=${unsaveable.length > 0 ? unsaveable.map(f => f.role + ': ' + f.reason).join('\n') : 'Write the running config to the files'} onClick=${() => save(false)}>Save</button>
-					<${More} />
+					<${More} loadBackup=${loadBackup} />
 				`}
 				<button class=${'btn' + (logMode !== 'hidden' ? ' primary' : '')} title="The gateway's log" onClick=${() => setLogMode(logMode === 'hidden' ? 'docked' : 'hidden')}><${Icon} name="log" />Log</button>
 				<span class="who" title="The key signed in with">${s.caller.name || 'no key'}</span>
@@ -150,7 +150,7 @@ function restartLines(pending) {
 	return lines;
 }
 
-function More() {
+function More({ loadBackup }) {
 	const [open, setOpen] = useState(false);
 	useEffect(() => {
 		if (!open) {
@@ -166,7 +166,7 @@ function More() {
 			${open && html`
 				<div class="card" style="position:absolute;right:0;top:34px;z-index:10;min-width:260px;padding:6px;display:flex;flex-direction:column;gap:2px">
 					<button class="btn ghost" style="justify-content:flex-start" onClick=${loadFiles}>Load the current save</button>
-					<button class="btn ghost" style="justify-content:flex-start" onClick=${() => select({ kind: 'server' }, 'properties', { scrollTo: 'backups' })}>Load a backup...</button>
+					<button class="btn ghost" style="justify-content:flex-start" onClick=${loadBackup}>Load a backup...</button>
 					<button class="btn ghost danger" style="justify-content:flex-start" onClick=${reload}>Reload: load and run the current save</button>
 				</div>
 			`}
@@ -433,7 +433,7 @@ function Content() {
 }
 
 function Ready() {
-	const [logMode, setLogMode] = useLogMode();
+	const log = useLogLayout();
 	const [treeOpen, setTreeOpen] = useState(false);
 	const narrow = useNarrow();
 	useEffect(() => watch(), []);
@@ -448,19 +448,55 @@ function Ready() {
 	}, [treeOpen]);
 	// A narrow screen has no room for the log below the sheet, so it takes
 	// the entire screen while it is open.
-	const shownMode = narrow && logMode === 'docked' ? 'full' : logMode;
+	const shownMode = narrow && log.mode === 'docked' ? 'full' : log.mode;
+	const main = useRef();
+	// showSheet is for a pick of a sheet made while the sheet may be hidden,
+	// from the tree, the bar or the browser's history, which asks to see
+	// it: it moves a log that fills the pane below the sheet,
+	// and, given most, shrinks a docked log to at most that share of the
+	// pane. A narrow screen has no room for both, so there it closes the log.
+	const showSheet = most => {
+		if (log.mode === 'hidden') {
+			return;
+		}
+		if (narrow) {
+			log.setMode('hidden');
+			return;
+		}
+		if (log.mode === 'full') {
+			log.setMode('docked');
+		}
+		const cap = most && Math.round(main.current.clientHeight * most);
+		if (cap && log.height > cap) {
+			log.setHeight(Math.max(120, cap));
+		}
+	};
+	useEffect(() => {
+		const onPop = () => showSheet();
+		addEventListener('popstate', onPop);
+		return () => removeEventListener('popstate', onPop);
+	}, [narrow, log.mode]);
+	// Load a backup... leaves the log at most 40% of the pane, so the
+	// backups it scrolls to have room to show.
+	const loadBackup = () => {
+		select({ kind: 'server' }, 'properties', { scrollTo: 'backups' });
+		showSheet(0.4);
+	};
 	const bar = useRef();
 	const content = useRef();
 	useScrollAway(narrow, shownMode !== 'full', bar, content);
 	return html`
 		<div class="app">
-			<${TopBar} logMode=${logMode} setLogMode=${setLogMode} onMenu=${() => setTreeOpen(true)} barRef=${bar} />
+			<${TopBar} logMode=${log.mode} setLogMode=${log.setMode} loadBackup=${loadBackup} onMenu=${() => setTreeOpen(true)} barRef=${bar} />
 			<div class="body">
-				<${Tree} open=${narrow && treeOpen} onPick=${() => setTreeOpen(false)} />
+				<${Tree} open=${narrow && treeOpen} onPick=${() => {
+					setTreeOpen(false);
+					showSheet();
+				}} />
 				${narrow && treeOpen && html`<div class="drawer-backdrop" onClick=${() => setTreeOpen(false)}></div>`}
-				<main class=${'main' + (shownMode === 'full' ? ' log-full' : '')}>
+				<main class=${'main' + (shownMode === 'full' ? ' log-full' : '')} ref=${main}>
 					<div class="content" ref=${content}><${Content} /></div>
-					<${LogPanel} mode=${shownMode} setMode=${setLogMode} narrow=${narrow} />
+					<${LogPanel} mode=${shownMode} setMode=${log.setMode} height=${log.height} setHeight=${log.setHeight} narrow=${narrow} />
 				</main>
 			</div>
 		</div>

@@ -2,6 +2,12 @@
 
 Before 1.0, a minor release can change config keys.
 
+## [Unreleased]
+
+### Changed
+
+- In the admin UI, a pick from the tree, **Load a backup...**, or the browser's back or forward while the log fills the pane moves the log below the sheet, so the sheet shows; **Load a backup...** also shrinks a docked log to 40% of the pane, so the backups have room. On a phone, where the log covers the screen, each closes the log.
+
 ## [0.4.3] - 2026-11-24
 
 The gateway refuses a name with a character that could act on a terminal or make two names read the same, so a config that loads today may be refused; see Names in the README.

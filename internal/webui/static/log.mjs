@@ -28,12 +28,26 @@ function remember(name, value) {
 	}
 }
 
-export function useLogMode() {
+// useLogLayout holds where the panel is and its height while docked, each
+// remembered for the next visit; setHeight remembers the height unless
+// keep is false, as during a drag, which keeps only the height it ends at.
+export function useLogLayout() {
 	const [mode, setMode] = useState(remembered('mode', 'hidden'));
-	return [mode, m => {
-		remember('mode', m);
-		setMode(m);
-	}];
+	const [height, setHeight] = useState(Number(remembered('height', '280')));
+	return {
+		mode,
+		height,
+		setMode: m => {
+			remember('mode', m);
+			setMode(m);
+		},
+		setHeight: (h, keep = true) => {
+			if (keep) {
+				remember('height', String(h));
+			}
+			setHeight(h);
+		},
+	};
 }
 
 // timeOrder makes the times of one gateway's log, in RFC 3339 with a
@@ -107,11 +121,10 @@ function useLogStream(on, level) {
 	return { lines, note };
 }
 
-export function LogPanel({ mode, setMode, narrow }) {
+export function LogPanel({ mode, setMode, height, setHeight, narrow }) {
 	const [level, setLevel] = useState(remembered('level', 'info'));
 	const [filter, setFilter] = useState('');
 	const [paused, setPaused] = useState(false);
-	const [height, setHeight] = useState(Number(remembered('height', '280')));
 	const { lines, note } = useLogStream(mode !== 'hidden', level);
 	const [frozen, setFrozen] = useState(null);
 	const box = useRef();
@@ -133,12 +146,12 @@ export function LogPanel({ mode, setMode, narrow }) {
 		const startHeight = height;
 		const handle = e.currentTarget;
 		handle.classList.add('active');
-		const move = ev => setHeight(Math.max(120, Math.min(innerHeight - 160, startHeight + startY - ev.clientY)));
+		const move = ev => setHeight(Math.max(120, Math.min(innerHeight - 160, startHeight + startY - ev.clientY)), false);
 		const up = ev => {
 			removeEventListener('pointermove', move);
 			removeEventListener('pointerup', up);
 			handle.classList.remove('active');
-			remember('height', String(Math.max(120, Math.min(innerHeight - 160, startHeight + startY - ev.clientY))));
+			setHeight(Math.max(120, Math.min(innerHeight - 160, startHeight + startY - ev.clientY)));
 		};
 		addEventListener('pointermove', move);
 		addEventListener('pointerup', up);
