@@ -7,7 +7,7 @@ import { render } from 'preact';
 import { useEffect, useRef, useState } from './vendor/hooks.mjs';
 import { ApiError, currentKey, entriesOf, hasKey, isObject, request, signIn, signOut } from './api.mjs';
 import { keyHash } from './sha256.mjs';
-import { errorText, followHistory, forgetKeys, freshKey, load, refresh, refreshFacades, select, selectionFromHash, set, settle, state, useStore, watch } from './store.mjs';
+import { cover, covered, errorText, followHistory, forgetKeys, freshKey, load, refresh, refreshFacades, select, selectionFromHash, set, settle, state, uncover, useStore, watch } from './store.mjs';
 import { confirm, Dialog, Dialogs, html, Icon, openDialog, plural, Reveal, toast, useNarrow } from './ui.mjs';
 import { BackendSheet, CandidateSheet, ModelSheet, SectionList, ServerSheet, stateClass } from './sheets.mjs';
 import { DiffDialog, VarsEditor, YAMLEditor } from './editors.mjs';
@@ -451,10 +451,9 @@ function Ready() {
 	const shownMode = narrow && log.mode === 'docked' ? 'full' : log.mode;
 	const main = useRef();
 	// showSheet is for a pick of a sheet made while the sheet may be hidden,
-	// from the tree, the bar or the browser's history, which asks to see
-	// it: it moves a log that fills the pane below the sheet,
-	// and, given most, shrinks a docked log to at most that share of the
-	// pane. A narrow screen has no room for both, so there it closes the log.
+	// from the tree or the bar, which asks to see it: it moves a log that
+	// fills the pane below the sheet, and, given most, shrinks a docked log
+	// to at most that share of the pane. A narrow screen has no room for both, so there it closes the log.
 	const showSheet = most => {
 		if (log.mode === 'hidden') {
 			return;
@@ -471,11 +470,35 @@ function Ready() {
 			log.setHeight(Math.max(120, cap));
 		}
 	};
+	// A log that hides the sheet is a cover (cover() in store.mjs), so back
+	// closes it before it leaves the page: on a wide screen it goes back
+	// below the sheet, and on a narrow one, where the log covers the screen
+	// while it is open, it closes. The first layout adds no entry, because
+	// a browser's back skips an entry added before the page was used, and
+	// that would leave the page; a log remembered as full from the last
+	// visit is instead moved below the sheet by the next back, which then
+	// leaves the page.
+	const laidOut = useRef(false);
 	useEffect(() => {
-		const onPop = () => showSheet();
+		if (shownMode !== 'full') {
+			uncover('log');
+		} else if (laidOut.current) {
+			cover('log');
+		}
+		laidOut.current = true;
+	}, [shownMode]);
+	useEffect(() => {
+		const onPop = () => {
+			if (covered() === 'log' && shownMode !== 'full') {
+				// Forward onto the entry of a log since closed opens nothing.
+				history.back();
+			} else if (covered() !== 'log' && shownMode === 'full') {
+				log.setMode(narrow ? 'hidden' : 'docked');
+			}
+		};
 		addEventListener('popstate', onPop);
 		return () => removeEventListener('popstate', onPop);
-	}, [narrow, log.mode]);
+	}, [narrow, shownMode]);
 	// Load a backup... leaves the log at most 40% of the pane, so the
 	// backups it scrolls to have room to show.
 	const loadBackup = () => {

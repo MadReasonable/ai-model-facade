@@ -335,8 +335,10 @@ export function remove(path) {
 // shown and a reload returns to it. With replace, it takes the place of
 // the entry shown, as after a rename or a delete, whose old entry would
 // show what no longer exists. With scrollTo, the sheet scrolls to that
-// Card once it shows it; any other selection drops the request.
+// Card once it shows it; any other selection drops the request. A cover's
+// entry is replaced too, so the cover leaves no entry behind it.
 export function select(selection, view = state.view, { replace = false, scrollTo = null } = {}) {
+	replace ||= covered() !== null;
 	set({ selection, view, scrollTo });
 	const parts = [selection.kind];
 	if (selection.name !== undefined) {
@@ -358,6 +360,29 @@ export function followHistory() {
 	const onPop = () => set(selectionFromHash());
 	addEventListener('popstate', onPop);
 	return () => removeEventListener('popstate', onPop);
+}
+
+// A cover is a view that hides the sheet, such as a log that fills the
+// pane, which back closes before it leaves the page. It gets an entry of
+// its own in the browser's history, with the URL of the page it covers,
+// so back steps off it to the page; nothing else about it goes into
+// history, so forward never opens it again. cover adds the entry for
+// name, covered says which cover the current entry is for, or null, and
+// uncover steps back off the entry for name, if it is the current one.
+export function cover(name) {
+	if (covered() !== name) {
+		history.pushState({ cover: name }, '', location.hash);
+	}
+}
+
+export function covered() {
+	return history.state?.cover ?? null;
+}
+
+export function uncover(name) {
+	if (covered() === name) {
+		history.back();
+	}
 }
 
 // selectionFromHash reads the selection from the URL, as select writes it.
